@@ -369,6 +369,116 @@ curl http://localhost:3000/api/dataset/{datasetId}
 
 ---
 
+## Testing Split Strategy and Progress Updates
+
+### Test 6: Combined Split Strategy (Default) - All Images in Train/Val
+
+**Purpose:** Verify that all images (labeled + unlabeled) are split 80:20 into train/val folders
+
+**Setup:**
+- Upload dataset with mix of labeled and unlabeled images
+- Ensure `SPLIT_STRATEGY` is not set (defaults to 'combined')
+
+**Expected Result:**
+- All images appear in either `images/train/` or `images/val/` (flattened structure)
+- Labels only appear in `labels/train/` or `labels/val/` if corresponding image has label
+- Unlabeled images are included in the split
+- Dataset metadata shows: `trainCount + valCount = totalImages`
+- Progress updates visible during processing (poll status endpoint)
+
+**Verification:**
+```bash
+# Check train/val folders are populated
+# Should see: datasets/acme/line1/v1/images/train/*.jpg (flat, no subfolders)
+# Should see: datasets/acme/line1/v1/images/val/*.jpg (flat, no subfolders)
+
+# Check progress during processing
+curl http://localhost:3000/api/dataset/{datasetId}/status
+# Should show trainCount and valCount updating as worker processes
+```
+
+---
+
+### Test 7: Labeled-Only Split Strategy
+
+**Purpose:** Verify that only labeled images are split, unlabeled go to test folder
+
+**Setup:**
+- Set environment variable: `SPLIT_STRATEGY=labeled-only`
+- Upload dataset with mix of labeled and unlabeled images
+
+**Expected Result:**
+- Labeled images split 80:20 into `images/train/` and `images/val/`
+- Unlabeled images copied to `images/test/` folder
+- Dataset metadata shows: `testCount > 0` if unlabeled images exist
+- Labels appear in `labels/train/` and `labels/val/` for labeled images only
+
+**Verification:**
+```bash
+# Set environment variable (Windows PowerShell):
+$env:SPLIT_STRATEGY="labeled-only"
+
+# Restart worker, then upload dataset
+
+# Check test folder exists with unlabeled images
+# Should see: datasets/acme/line1/v1/images/test/*.jpg (unlabeled images)
+
+# Check dataset metadata
+curl http://localhost:3000/api/dataset/{datasetId}
+# Should show: "testCount": <number of unlabeled images>
+```
+
+---
+
+### Test 8: Thumbnail Generation Reliability
+
+**Purpose:** Verify thumbnails are generated for train+val images
+
+**Expected Result:**
+- Thumbnails generated for up to first 50 images from train+val combined
+- Thumbnails saved in `thumbnails/` folder
+- Dataset metadata shows `thumbnailsGenerated` count
+- Thumbnails read from original folder locations (not train/val copies)
+
+**Verification:**
+```bash
+# Check thumbnails folder
+# Should see: datasets/acme/line1/v1/thumbnails/thumb_*.jpg
+
+# Check dataset metadata
+curl http://localhost:3000/api/dataset/{datasetId}
+# Should show: "thumbnailsGenerated": <number up to 50>
+```
+
+---
+
+### Test 9: Progress Updates During Processing
+
+**Purpose:** Verify frontend can poll and see progress updates
+
+**Steps:**
+1. Upload dataset
+2. Poll status endpoint every 2 seconds: `GET /api/dataset/{datasetId}/status`
+3. Watch for updates
+
+**Expected Result:**
+- Status changes: `queued` → `processing` → `ready`
+- During processing, `trainCount` and `valCount` update incrementally
+- Final status shows complete counts
+
+**Verification:**
+```bash
+# Poll status endpoint multiple times
+curl http://localhost:3000/api/dataset/{datasetId}/status
+# First: { "status": "queued", "totalImages": 10 }
+# Then:  { "status": "processing", "totalImages": 10, "trainCount": 0, "valCount": 0 }
+# Then:  { "status": "processing", "totalImages": 10, "trainCount": 6, "valCount": 0 }
+# Then:  { "status": "processing", "totalImages": 10, "trainCount": 6, "valCount": 2 }
+# Final: { "status": "ready", "totalImages": 10 }
+```
+
+---
+
 ## Troubleshooting
 
 - **"MongoDB connection error"** → Check MongoDB is running
@@ -377,4 +487,7 @@ curl http://localhost:3000/api/dataset/{datasetId}
 - **"Status stuck on queued"** → Check worker is running and Redis is connected
 - **"fileMeta parse error"** → Check JSON format is valid, backend will default to 'dataset' folder
 - **"Files not in expected folders"** → Verify fileMeta JSON matches uploaded file originalName exactly
+- **"Train/val folders empty"** → Check worker logs for copy errors, verify source files exist
+- **"Thumbnails not generated"** → Check worker logs, verify images are readable, check disk space
+- **"Progress not updating"** → Worker saves dataset periodically; if stuck, check for errors in worker terminal
 

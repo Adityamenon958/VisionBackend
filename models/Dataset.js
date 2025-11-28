@@ -111,6 +111,14 @@ const datasetSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  testCount: {
+    type: Number,
+    default: 0
+  },
+  thumbnailsGenerated: {
+    type: Number,
+    default: 0
+  },
 
   // Error message if status is 'failed'
   errorMessage: {

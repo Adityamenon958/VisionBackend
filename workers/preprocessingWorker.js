@@ -115,6 +115,9 @@ const processPreprocessingJob = async (job) => {
       }
     }
 
+    // ✅ Read split strategy from environment (default: 'combined')
+    const splitStrategy = (process.env.SPLIT_STRATEGY || 'combined').toLowerCase();
+
     // ✅ Separate labeled and unlabeled images using manifest
     const labeledImages = [];
     const unlabeledImages = [];
@@ -127,11 +130,24 @@ const processPreprocessingJob = async (job) => {
       }
     }
 
-    // ✅ Perform 80:20 train/val split on labeled images
+    // ✅ Build combined list based on split strategy
+    let combinedList = [];
+    let testImages = [];
+
+    if (splitStrategy === 'labeled-only') {
+      // Only split labeled images, place unlabeled in test folder
+      combinedList = [...labeledImages];
+      testImages = [...unlabeledImages];
+    } else {
+      // Default 'combined': combine labeled + unlabeled for split
+      combinedList = [...labeledImages, ...unlabeledImages];
+    }
+
+    // ✅ Perform 80:20 train/val split on combined list
     // ⚠️ CAUTION: Using deterministic shuffle for reproducibility
-    // For true randomness, use: labeledImages.sort(() => Math.random() - 0.5)
+    // For true randomness, use: combinedList.sort(() => Math.random() - 0.5)
     // Or use a seeded random number generator for reproducible splits
-    const shuffled = [...labeledImages].sort((a, b) => {
+    const shuffled = [...combinedList].sort((a, b) => {
       // Simple deterministic shuffle based on stored filename
       return a.storedName.localeCompare(b.storedName);
     });
@@ -145,51 +161,125 @@ const processPreprocessingJob = async (job) => {
     // Training requires flat structure (no folders), but dashboard needs folder view
     let trainCount = 0;
     let valCount = 0;
+    let testCount = 0;
+    const processingErrors = [];
 
+    // ✅ Copy train images
     for (const imageInfo of trainImages) {
-      // ✅ Use storedPath to find file in its original folder location
-      const srcPath = path.join(datasetRoot, imageInfo.storedPath); // e.g., datasetRoot/images/good/storedName
-      const destPath = path.join(trainImagesPath, imageInfo.storedName); // Flattened: train/images/storedName
-      await storageAdapter.copyFile(srcPath, destPath); // Copy preserves original
-      trainCount++;
+      try {
+        // ✅ Use storedPath to find file in its original folder location
+        const srcPath = path.join(datasetRoot, imageInfo.storedPath); // e.g., datasetRoot/images/good/storedName
+        const destPath = path.join(trainImagesPath, imageInfo.storedName); // Flattened: train/images/storedName
+        
+        // Check if source file exists
+        if (await storageAdapter.exists(srcPath)) {
+          await storageAdapter.copyFile(srcPath, destPath); // Copy preserves original
+          trainCount++;
 
-      // ✅ Copy corresponding label file using manifest
-      const originalBaseName = path.parse(imageInfo.fileEntry.originalName).name;
-      const labelInfo = labelManifest.get(originalBaseName);
-      
-      if (labelInfo) {
-        const labelSrcPath = path.join(datasetRoot, labelInfo.storedPath); // e.g., datasetRoot/labels/good/storedName
-        const labelDestPath = path.join(trainLabelsPath, labelInfo.storedName); // Flattened: train/labels/storedName
-        await storageAdapter.copyFile(labelSrcPath, labelDestPath); // Copy preserves original
+          // ✅ Copy corresponding label file using manifest (if exists)
+          const originalBaseName = path.parse(imageInfo.fileEntry.originalName).name;
+          const labelInfo = labelManifest.get(originalBaseName);
+          
+          if (labelInfo) {
+            const labelSrcPath = path.join(datasetRoot, labelInfo.storedPath); // e.g., datasetRoot/labels/good/storedName
+            const labelDestPath = path.join(trainLabelsPath, labelInfo.storedName); // Flattened: train/labels/storedName
+            if (await storageAdapter.exists(labelSrcPath)) {
+              await storageAdapter.copyFile(labelSrcPath, labelDestPath); // Copy preserves original
+            }
+          }
+        } else {
+          processingErrors.push({
+            filename: imageInfo.storedName,
+            reason: `Source file not found: ${srcPath}`
+          });
+        }
+      } catch (error) {
+        console.error(`Failed to copy train image ${imageInfo.storedName}:`, error.message);
+        processingErrors.push({
+          filename: imageInfo.storedName,
+          reason: `Copy error: ${error.message}`
+        });
       }
     }
 
+    // ✅ Update progress: save train count
+    dataset.trainCount = trainCount;
+    if (processingErrors.length > 0) {
+      dataset.uploadErrors = (dataset.uploadErrors || []).concat(processingErrors);
+    }
+    await dataset.save();
+
+    // ✅ Copy val images
     for (const imageInfo of valImages) {
-      // ✅ Use storedPath to find file in its original folder location
-      const srcPath = path.join(datasetRoot, imageInfo.storedPath); // e.g., datasetRoot/images/good/storedName
-      const destPath = path.join(valImagesPath, imageInfo.storedName); // Flattened: val/images/storedName
-      await storageAdapter.copyFile(srcPath, destPath); // Copy preserves original
-      valCount++;
+      try {
+        // ✅ Use storedPath to find file in its original folder location
+        const srcPath = path.join(datasetRoot, imageInfo.storedPath); // e.g., datasetRoot/images/good/storedName
+        const destPath = path.join(valImagesPath, imageInfo.storedName); // Flattened: val/images/storedName
+        
+        // Check if source file exists
+        if (await storageAdapter.exists(srcPath)) {
+          await storageAdapter.copyFile(srcPath, destPath); // Copy preserves original
+          valCount++;
 
-      // ✅ Copy corresponding label file using manifest
-      const originalBaseName = path.parse(imageInfo.fileEntry.originalName).name;
-      const labelInfo = labelManifest.get(originalBaseName);
-      
-      if (labelInfo) {
-        const labelSrcPath = path.join(datasetRoot, labelInfo.storedPath); // e.g., datasetRoot/labels/good/storedName
-        const labelDestPath = path.join(valLabelsPath, labelInfo.storedName); // Flattened: val/labels/storedName
-        await storageAdapter.copyFile(labelSrcPath, labelDestPath); // Copy preserves original
+          // ✅ Copy corresponding label file using manifest (if exists)
+          const originalBaseName = path.parse(imageInfo.fileEntry.originalName).name;
+          const labelInfo = labelManifest.get(originalBaseName);
+          
+          if (labelInfo) {
+            const labelSrcPath = path.join(datasetRoot, labelInfo.storedPath); // e.g., datasetRoot/labels/good/storedName
+            const labelDestPath = path.join(valLabelsPath, labelInfo.storedName); // Flattened: val/labels/storedName
+            if (await storageAdapter.exists(labelSrcPath)) {
+              await storageAdapter.copyFile(labelSrcPath, labelDestPath); // Copy preserves original
+            }
+          }
+        } else {
+          processingErrors.push({
+            filename: imageInfo.storedName,
+            reason: `Source file not found: ${srcPath}`
+          });
+        }
+      } catch (error) {
+        console.error(`Failed to copy val image ${imageInfo.storedName}:`, error.message);
+        processingErrors.push({
+          filename: imageInfo.storedName,
+          reason: `Copy error: ${error.message}`
+        });
       }
     }
 
-    // ✅ Move unlabeled images to test folder (or keep in images root)
-    // For now, we'll leave unlabeled images in the root images folder
-    // You can move them to test folder if needed
+    // ✅ Update progress: save val count
+    dataset.valCount = valCount;
+    if (processingErrors.length > 0) {
+      dataset.uploadErrors = (dataset.uploadErrors || []).concat(processingErrors);
+    }
+    await dataset.save();
 
-    // ✅ Generate thumbnails (sample subset for performance)
+    // ✅ Handle unlabeled images for 'labeled-only' strategy (copy to test folder)
+    if (splitStrategy === 'labeled-only' && testImages.length > 0) {
+      for (const imageInfo of testImages) {
+        try {
+          const srcPath = path.join(datasetRoot, imageInfo.storedPath);
+          const destPath = path.join(testImagesPath, imageInfo.storedName);
+          
+          if (await storageAdapter.exists(srcPath)) {
+            await storageAdapter.copyFile(srcPath, destPath);
+            testCount++;
+          }
+        } catch (error) {
+          console.error(`Failed to copy test image ${imageInfo.storedName}:`, error.message);
+          processingErrors.push({
+            filename: imageInfo.storedName,
+            reason: `Test copy error: ${error.message}`
+          });
+        }
+      }
+      dataset.testCount = testCount;
+      await dataset.save();
+    }
+
+    // ✅ Generate thumbnails from train+val images (sample up to 50)
     // ⚠️ CAUTION: Generating thumbnails for all images can be slow
-    // We'll generate for first 50 images as a sample
-    // ✅ Read from original folder locations (images/{folder}/...) to preserve folder context
+    // ✅ Read from original folder locations (images/{folder}/...) to preserve quality
     const thumbnailSample = [...trainImages, ...valImages].slice(0, 50);
     let thumbnailsGenerated = 0;
 
@@ -198,7 +288,7 @@ const processPreprocessingJob = async (job) => {
         // ✅ Use storedPath to read from original folder location
         const originalImagePath = path.join(datasetRoot, imageInfo.storedPath);
 
-        if (fs.existsSync(originalImagePath)) {
+        if (await storageAdapter.exists(originalImagePath)) {
           const thumbnailPath = path.join(thumbnailsPath, `thumb_${imageInfo.storedName}`);
           await sharp(originalImagePath)
             .resize(200, 200, { fit: 'inside', withoutEnlargement: true })
@@ -207,8 +297,19 @@ const processPreprocessingJob = async (job) => {
         }
       } catch (error) {
         console.warn(`Failed to generate thumbnail for ${imageInfo.storedName}:`, error.message);
+        processingErrors.push({
+          filename: imageInfo.storedName,
+          reason: `Thumbnail generation error: ${error.message}`
+        });
       }
     }
+
+    // ✅ Update progress: save thumbnail count
+    dataset.thumbnailsGenerated = thumbnailsGenerated;
+    if (processingErrors.length > 0) {
+      dataset.uploadErrors = (dataset.uploadErrors || []).concat(processingErrors);
+    }
+    await dataset.save();
 
     // ✅ Extract labels from label files (read from both train and val)
     const labelsSet_final = new Set();
@@ -267,11 +368,14 @@ const processPreprocessingJob = async (job) => {
       console.warn('Val labels directory read error (may be empty):', error.message);
     }
 
-    // ✅ Update dataset metadata
+    // ✅ Update final dataset metadata
     dataset.labeledImages = labeledImages.length;
     dataset.unlabeledImages = unlabeledImages.length;
     dataset.trainCount = trainCount;
     dataset.valCount = valCount;
+    if (splitStrategy === 'labeled-only') {
+      dataset.testCount = testCount;
+    }
     dataset.labels = Array.from(labelsSet_final);
     
     // ✅ Recompute final dataset sizeBytes after preprocessing
@@ -287,7 +391,8 @@ const processPreprocessingJob = async (job) => {
     await dataset.save();
 
     console.log(`✅ Dataset ${datasetId} processed successfully`);
-    console.log(`   - Train: ${trainCount}, Val: ${valCount}`);
+    console.log(`   - Strategy: ${splitStrategy}`);
+    console.log(`   - Train: ${trainCount}, Val: ${valCount}${testCount > 0 ? `, Test: ${testCount}` : ''}`);
     console.log(`   - Labeled: ${labeledImages.length}, Unlabeled: ${unlabeledImages.length}`);
     console.log(`   - Thumbnails: ${thumbnailsGenerated}`);
 
@@ -345,3 +450,4 @@ if (require.main === module) {
 }
 
 module.exports = { startWorker, processPreprocessingJob };
+
