@@ -161,7 +161,7 @@ const processPreprocessingJob = async (job) => {
     // Training requires flat structure (no folders), but dashboard needs folder view
     let trainCount = 0;
     let valCount = 0;
-    let testCount = 0;
+    let testCount = 0; // For labeled-only strategy unlabeled images
     const processingErrors = [];
 
     // ✅ Copy train images
@@ -277,6 +277,51 @@ const processPreprocessingJob = async (job) => {
       await dataset.save();
     }
 
+    // ✅ Copy 10% of images to test folder (images only, no labels)
+    // Build candidate list: same as used for train/val split
+    const allImagesForTest = splitStrategy === 'labeled-only' ? labeledImages : combinedList;
+    const testSampleSize = Math.max(1, Math.ceil(allImagesForTest.length * 0.10));
+    
+    // Ensure test folder exists
+    await storageAdapter.ensureDir(testImagesPath);
+    
+    // Select first testSampleSize images from shuffled list (already sorted)
+    const testSampleImages = shuffled.slice(0, testSampleSize);
+    let testImagesCopied = 0;
+    
+    for (const imageInfo of testSampleImages) {
+      try {
+        const srcPath = path.join(datasetRoot, imageInfo.storedPath);
+        const destPath = path.join(testImagesPath, imageInfo.storedName);
+        
+        if (await storageAdapter.exists(srcPath)) {
+          await storageAdapter.copyFile(srcPath, destPath);
+          testImagesCopied++;
+        } else {
+          processingErrors.push({
+            filename: imageInfo.storedName,
+            reason: `Test copy: source file not found: ${srcPath}`
+          });
+        }
+      } catch (error) {
+        console.error(`Failed to copy test image ${imageInfo.storedName}:`, error.message);
+        processingErrors.push({
+          filename: imageInfo.storedName,
+          reason: `Test copy error: ${error.message}`
+        });
+      }
+    }
+    
+    // Update test count (add to existing if labeled-only strategy already set it)
+    const existingTestCount = splitStrategy === 'labeled-only' ? testCount : 0;
+    dataset.testCount = existingTestCount + testImagesCopied;
+    if (processingErrors.length > 0) {
+      dataset.uploadErrors = (dataset.uploadErrors || []).concat(processingErrors);
+    }
+    await dataset.save();
+    
+    console.log(`   - Test sample: ${testImagesCopied} images copied`);
+
     // ✅ Generate thumbnails from train+val images (sample up to 50)
     // ⚠️ CAUTION: Generating thumbnails for all images can be slow
     // ✅ Read from original folder locations (images/{folder}/...) to preserve quality
@@ -373,9 +418,7 @@ const processPreprocessingJob = async (job) => {
     dataset.unlabeledImages = unlabeledImages.length;
     dataset.trainCount = trainCount;
     dataset.valCount = valCount;
-    if (splitStrategy === 'labeled-only') {
-      dataset.testCount = testCount;
-    }
+    // testCount already updated during test folder copy
     dataset.labels = Array.from(labelsSet_final);
     
     // ✅ Recompute final dataset sizeBytes after preprocessing
@@ -392,7 +435,7 @@ const processPreprocessingJob = async (job) => {
 
     console.log(`✅ Dataset ${datasetId} processed successfully`);
     console.log(`   - Strategy: ${splitStrategy}`);
-    console.log(`   - Train: ${trainCount}, Val: ${valCount}${testCount > 0 ? `, Test: ${testCount}` : ''}`);
+    console.log(`   - Train: ${trainCount}, Val: ${valCount}, Test: ${dataset.testCount}`);
     console.log(`   - Labeled: ${labeledImages.length}, Unlabeled: ${unlabeledImages.length}`);
     console.log(`   - Thumbnails: ${thumbnailsGenerated}`);
 

@@ -479,6 +479,42 @@ curl http://localhost:3000/api/dataset/{datasetId}/status
 
 ---
 
+### Test 10: Test Folder Sample Copy
+
+**Purpose:** Verify 10% of images are copied to test folder (images only, no labels)
+
+**Steps:**
+1. Upload dataset with multiple images (e.g., 20+ images)
+2. Wait for preprocessing to complete
+3. Check test folder and dataset metadata
+
+**Expected Result:**
+- `images/test/` folder contains approximately 10% of total images (rounded up, minimum 1)
+- Test images are copies (original folder structure preserved)
+- No `labels/test/` folder created
+- Dataset metadata shows `testCount` field with actual count
+- Test images may also exist in train/val (acceptable)
+- Train/val logic remains unchanged
+
+**Verification:**
+```bash
+# Check test folder exists with images
+# Should see: datasets/acme/line1/v1/images/test/*.jpg
+# Count should be: Math.ceil(totalImages * 0.10), minimum 1
+
+# Check no labels/test folder
+# Should NOT exist: datasets/acme/line1/v1/labels/test/
+
+# Check dataset metadata
+curl http://localhost:3000/api/dataset/{datasetId}
+# Should show: "testCount": <number approximately 10% of totalImages>
+
+# Verify train/val still work correctly
+# Should see: images/train/ and images/val/ populated as before
+```
+
+---
+
 ## Troubleshooting
 
 - **"MongoDB connection error"** → Check MongoDB is running
