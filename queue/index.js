@@ -1,0 +1,49 @@
+const Bull = require('bull');
+const Redis = require('ioredis');
+
+const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+
+/**
+ * Create Redis client with Bull-safe options.
+ */
+function createRedisClient() {
+  return new Redis(redisUrl, {
+    enableReadyCheck: false,
+    maxRetriesPerRequest: null,
+  });
+}
+
+// Bull queue with fresh Redis clients for each role
+const preprocessingQueue = new Bull('preprocess-dataset', {
+  createClient: (type) => {
+    return createRedisClient(); // Bull requires a new client for client/subscriber/bclient
+  }
+});
+
+// Separate monitor redis instance (not used by Bull)
+const monitorRedis = new Redis(redisUrl);
+
+monitorRedis.on('connect', () => {
+  console.log('✅ Redis (monitor) connected');
+});
+
+monitorRedis.on('error', (err) => {
+  console.error('❌ Redis (monitor) connection error:', err);
+});
+
+// Queue event logs
+preprocessingQueue.on('completed', (job) => {
+  console.log(`✅ Job ${job.id} completed`);
+});
+
+preprocessingQueue.on('failed', (job, err) => {
+  console.error(`❌ Job ${job.id} failed:`, err?.message || err);
+});
+
+preprocessingQueue.on('stalled', (job) => {
+  console.warn(`⚠️ Job ${job.id} stalled`);
+});
+
+module.exports = {
+  preprocessingQueue
+};
