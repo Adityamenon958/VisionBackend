@@ -1,0 +1,75 @@
+FRONTEND UPLOAD INSTRUCTIONS
+============================
+
+When uploading folders from browser, build fileMeta JSON that maps each uploaded 
+file's originalName to the folder name (e.g. good, defect1). Upload fileMeta as 
+a form-field (Content-Type: application/json) named fileMeta.
+
+If frontend cannot assemble fileMeta (single-folder case), omit it — backend will 
+set folder=dataset.
+
+Keep filenames unique or include paths in originalName in fileMeta to disambiguate.
+
+File validation (client-side): allow only .jpg,.jpeg,.png,.txt and max 50MB per 
+file, max 100 files per request.
+
+FILEMETA JSON FORMAT:
+--------------------
+[
+  {"originalName":"img1.jpg","folder":"good"},
+  {"originalName":"img1.txt","folder":"good"},
+  {"originalName":"img2.jpg","folder":"defect1"},
+  {"originalName":"img2.txt","folder":"defect1"}
+]
+
+UPLOAD ENDPOINT:
+---------------
+POST /api/dataset/upload
+
+Form Fields:
+- company (string, required)
+- project (string, required)
+- version (string, optional, defaults to "v1")
+- fileMeta (string, optional) - JSON string as shown above
+- files (file[], required) - Array of files
+
+RESPONSE:
+---------
+202 Accepted
+{
+  "datasetId": "...",
+  "status": "queued",
+  "message": "Dataset uploaded successfully. Preprocessing started.",
+  "totalImages": 2,
+  "uploadErrors": []
+}
+
+FOLDER BEHAVIOR:
+---------------
+- If fileMeta provided: Files stored in images/{folder}/ and labels/{folder}/
+- If fileMeta omitted: Files stored in images/dataset/ and labels/dataset/
+- After preprocessing: Files copied (not moved) to train/images/ and val/images/ 
+  (flat structure for YOLO training)
+- Original folder structure preserved for dashboard view
+
+GET DATASET ENDPOINT:
+--------------------
+GET /api/dataset/{datasetId}
+
+Returns dataset with folders summary:
+{
+  "files": [...],
+  "folders": {
+    "good": {
+      "images": 2,
+      "labels": 2,
+      "files": [...]
+    },
+    "defect1": {
+      "images": 1,
+      "labels": 1,
+      "files": [...]
+    }
+  }
+}
+

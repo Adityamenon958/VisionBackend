@@ -90,10 +90,12 @@ const processPreprocessingJob = async (job) => {
     await storageAdapter.ensureDir(valLabelsPath);
     await storageAdapter.ensureDir(thumbnailsPath);
 
-    // ✅ Use manifest-based matching (dataset.files) instead of filename parsing
-    // Build maps: originalName (base) → storedName for images and labels
-    const imageManifest = new Map(); // originalName (base) → { storedName, fileEntry }
-    const labelManifest = new Map(); // originalName (base) → { storedName, fileEntry }
+    // ✅ Use manifest-based matching (dataset.files) with storedPath
+    // Build maps: originalName (base) → { storedName, storedPath, fileEntry } for images and labels
+    const imageManifest = new Map(); // originalName (base) → { storedName, storedPath, fileEntry }
+    const labelManifest = new Map(); // originalName (base) → { storedName, storedPath, fileEntry }
+
+    const datasetRoot = storageAdapter.buildDatasetPath(company, project, version);
 
     for (const fileEntry of dataset.files) {
       const originalBaseName = path.parse(fileEntry.originalName).name; // Remove extension
@@ -101,11 +103,13 @@ const processPreprocessingJob = async (job) => {
       if (fileEntry.type === 'image') {
         imageManifest.set(originalBaseName, {
           storedName: fileEntry.storedName,
+          storedPath: fileEntry.storedPath, // e.g., "images/good/692..._img.jpg"
           fileEntry: fileEntry
         });
       } else if (fileEntry.type === 'label') {
         labelManifest.set(originalBaseName, {
           storedName: fileEntry.storedName,
+          storedPath: fileEntry.storedPath, // e.g., "labels/good/692..._img.txt"
           fileEntry: fileEntry
         });
       }
@@ -136,41 +140,45 @@ const processPreprocessingJob = async (job) => {
     const trainImages = shuffled.slice(0, splitIndex);
     const valImages = shuffled.slice(splitIndex);
 
-    // ✅ Move images and labels to train/val folders using storageAdapter.moveFile
+    // ✅ Copy images and labels to train/val folders (flattened structure)
+    // ⚠️ CAUTION: We COPY (not move) to preserve original folder structure for dashboard
+    // Training requires flat structure (no folders), but dashboard needs folder view
     let trainCount = 0;
     let valCount = 0;
 
     for (const imageInfo of trainImages) {
-      const srcPath = path.join(imagesPath, imageInfo.storedName);
-      const destPath = path.join(trainImagesPath, imageInfo.storedName);
-      await storageAdapter.moveFile(srcPath, destPath);
+      // ✅ Use storedPath to find file in its original folder location
+      const srcPath = path.join(datasetRoot, imageInfo.storedPath); // e.g., datasetRoot/images/good/storedName
+      const destPath = path.join(trainImagesPath, imageInfo.storedName); // Flattened: train/images/storedName
+      await storageAdapter.copyFile(srcPath, destPath); // Copy preserves original
       trainCount++;
 
-      // ✅ Move corresponding label file using manifest
+      // ✅ Copy corresponding label file using manifest
       const originalBaseName = path.parse(imageInfo.fileEntry.originalName).name;
       const labelInfo = labelManifest.get(originalBaseName);
       
       if (labelInfo) {
-        const labelSrcPath = path.join(labelsPath, labelInfo.storedName);
-        const labelDestPath = path.join(trainLabelsPath, labelInfo.storedName);
-        await storageAdapter.moveFile(labelSrcPath, labelDestPath);
+        const labelSrcPath = path.join(datasetRoot, labelInfo.storedPath); // e.g., datasetRoot/labels/good/storedName
+        const labelDestPath = path.join(trainLabelsPath, labelInfo.storedName); // Flattened: train/labels/storedName
+        await storageAdapter.copyFile(labelSrcPath, labelDestPath); // Copy preserves original
       }
     }
 
     for (const imageInfo of valImages) {
-      const srcPath = path.join(imagesPath, imageInfo.storedName);
-      const destPath = path.join(valImagesPath, imageInfo.storedName);
-      await storageAdapter.moveFile(srcPath, destPath);
+      // ✅ Use storedPath to find file in its original folder location
+      const srcPath = path.join(datasetRoot, imageInfo.storedPath); // e.g., datasetRoot/images/good/storedName
+      const destPath = path.join(valImagesPath, imageInfo.storedName); // Flattened: val/images/storedName
+      await storageAdapter.copyFile(srcPath, destPath); // Copy preserves original
       valCount++;
 
-      // ✅ Move corresponding label file using manifest
+      // ✅ Copy corresponding label file using manifest
       const originalBaseName = path.parse(imageInfo.fileEntry.originalName).name;
       const labelInfo = labelManifest.get(originalBaseName);
       
       if (labelInfo) {
-        const labelSrcPath = path.join(labelsPath, labelInfo.storedName);
-        const labelDestPath = path.join(valLabelsPath, labelInfo.storedName);
-        await storageAdapter.moveFile(labelSrcPath, labelDestPath);
+        const labelSrcPath = path.join(datasetRoot, labelInfo.storedPath); // e.g., datasetRoot/labels/good/storedName
+        const labelDestPath = path.join(valLabelsPath, labelInfo.storedName); // Flattened: val/labels/storedName
+        await storageAdapter.copyFile(labelSrcPath, labelDestPath); // Copy preserves original
       }
     }
 
@@ -181,20 +189,18 @@ const processPreprocessingJob = async (job) => {
     // ✅ Generate thumbnails (sample subset for performance)
     // ⚠️ CAUTION: Generating thumbnails for all images can be slow
     // We'll generate for first 50 images as a sample
+    // ✅ Read from original folder locations (images/{folder}/...) to preserve folder context
     const thumbnailSample = [...trainImages, ...valImages].slice(0, 50);
     let thumbnailsGenerated = 0;
 
     for (const imageInfo of thumbnailSample) {
       try {
-        const imagePath = path.join(trainImagesPath, imageInfo.storedName);
-        // Check if file exists in train, otherwise check val
-        const actualPath = fs.existsSync(imagePath)
-          ? imagePath
-          : path.join(valImagesPath, imageInfo.storedName);
+        // ✅ Use storedPath to read from original folder location
+        const originalImagePath = path.join(datasetRoot, imageInfo.storedPath);
 
-        if (fs.existsSync(actualPath)) {
+        if (fs.existsSync(originalImagePath)) {
           const thumbnailPath = path.join(thumbnailsPath, `thumb_${imageInfo.storedName}`);
-          await sharp(actualPath)
+          await sharp(originalImagePath)
             .resize(200, 200, { fit: 'inside', withoutEnlargement: true })
             .toFile(thumbnailPath);
           thumbnailsGenerated++;

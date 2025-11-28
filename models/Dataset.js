@@ -52,6 +52,15 @@ const datasetSchema = new mongoose.Schema({
     size: {
       type: Number,
       required: true // File size in bytes
+    },
+    folder: {
+      type: String,
+      required: true,
+      default: 'dataset' // Virtual folder name (e.g., 'good', 'defect1', 'dataset')
+    },
+    storedPath: {
+      type: String,
+      required: true // Relative path inside dataset folder e.g. "images/good/....jpg"
     }
   }],
 

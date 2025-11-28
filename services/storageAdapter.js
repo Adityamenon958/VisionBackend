@@ -170,6 +170,34 @@ class StorageAdapter {
   buildThumbnailsPath(company, project, version) {
     return path.join(this.buildDatasetPath(company, project, version), 'thumbnails');
   }
+
+  /**
+   * Copy a file from source to destination (preserves original)
+   * 
+   * This is used when we need to keep the original file intact
+   * (e.g., preserving folder structure for dashboard while copying to train/val)
+   * 
+   * @param {string} srcPath - Source file path
+   * @param {string} destPath - Destination file path
+   */
+  async copyFile(srcPath, destPath) {
+    if (this.mode === 'local') {
+      // ✅ Ensure destination directory exists
+      const destDir = path.dirname(destPath);
+      await this.ensureDir(destDir);
+
+      // ✅ Copy file (does not delete source)
+      await fs.copyFile(srcPath, destPath);
+    } else if (this.mode === 'azure') {
+      // TODO: Copy blob in Azure Blob Storage
+      // const srcContainer = this.extractContainerName(srcPath);
+      // const srcBlob = this.extractBlobName(srcPath);
+      // const destContainer = this.extractContainerName(destPath);
+      // const destBlob = this.extractBlobName(destPath);
+      // await azureBlobService.copyBlob(srcContainer, srcBlob, destContainer, destBlob);
+      throw new Error('Azure storage not yet implemented');
+    }
+  }
 }
 
 // ✅ Export singleton instance

@@ -1,0 +1,26 @@
+{
+  "watch": [
+    "server.js",
+    "routes",
+    "controllers",
+    "models",
+    "workers",
+    "queue",
+    "services"
+  ],
+  "ext": "js,json",
+  "ignore": [
+    "test-frontend",
+    "test-frontend/**",
+    "uploads",
+    "uploads/**",
+    "datasets",
+    "datasets/**",
+    "node_modules",
+    ".git",
+    "*.log"
+  ],
+  "delay": "250",
+  "legacyWatch": false
+}
+

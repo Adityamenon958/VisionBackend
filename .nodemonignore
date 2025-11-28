@@ -1,0 +1,18 @@
+# Ignore test frontend and static test files
+/test-frontend
+/test_frontend
+/test-frontend/*
+test-frontend/*
+
+# Ignore runtime upload / storage folders
+/uploads
+/uploads/*
+/datasets
+/datasets/*
+
+# Ignore node_modules and git
+node_modules
+.git
+*.log
+.DS_Store
+

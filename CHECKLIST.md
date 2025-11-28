@@ -198,10 +198,183 @@ node workers/preprocessingWorker.js
 
 3. **Check MongoDB** - Verify dataset document exists with files manifest
 
+## Testing Multi-Folder Upload Support
+
+### Test 1: Single Folder Upload (No fileMeta) - Backward Compatibility
+
+**Purpose:** Verify that uploads without fileMeta default to folder='dataset'
+
+**cURL Command (Windows):**
+```bash
+curl -v -X POST "http://localhost:3000/api/dataset/upload" ^
+-F "company=acme" ^
+-F "project=line1" ^
+-F "version=v1" ^
+-F "files=@C:/Gsn Soln/VisionBackend/test_dataset/020250221_021215_lmc_8.4.jpg" ^
+-F "files=@C:/Gsn Soln/VisionBackend/test_dataset/020250221_021215_lmc_8.4.txt"
+```
+
+**Expected Result:**
+- Files stored in `images/dataset/` and `labels/dataset/`
+- GET `/api/dataset/{datasetId}` shows `folders.dataset` with all files
+- All files have `folder: "dataset"` in manifest
+
+**Verification:**
+```bash
+# Check dataset response includes folders summary
+curl http://localhost:3000/api/dataset/{datasetId}
+# Should show: "folders": { "dataset": { "images": 1, "labels": 1, "files": [...] } }
+```
+
+---
+
+### Test 2: Multi-Folder Upload (With fileMeta)
+
+**Purpose:** Verify files are stored in folder subdirectories and grouped correctly
+
+**Step 1: Create fileMeta.json**
+Create `test_dataset/fileMeta.json`:
+```json
+[
+  {"originalName":"020250221_021215_lmc_8.4.jpg","folder":"good"},
+  {"originalName":"020250221_021215_lmc_8.4.txt","folder":"good"},
+  {"originalName":"020250221_021215_lmc_8.4 (1).jpg","folder":"defect1"},
+  {"originalName":"020250221_021215_lmc_8.4 (1).txt","folder":"defect1"}
+]
+```
+
+**cURL Command (Windows):**
+```bash
+curl -v -X POST "http://localhost:3000/api/dataset/upload" ^
+-F "company=acme" ^
+-F "project=line1" ^
+-F "version=v2" ^
+-F "fileMeta=@C:/Gsn Soln/VisionBackend/test_dataset/fileMeta.json;type=application/json" ^
+-F "files=@C:/Gsn Soln/VisionBackend/test_dataset/020250221_021215_lmc_8.4.jpg" ^
+-F "files=@C:/Gsn Soln/VisionBackend/test_dataset/020250221_021215_lmc_8.4.txt" ^
+-F "files=@C:/Gsn Soln/VisionBackend/test_dataset/020250221_021215_lmc_8.4 (1).jpg" ^
+-F "files=@C:/Gsn Soln/VisionBackend/test_dataset/020250221_021215_lmc_8.4 (1).txt"
+```
+
+**Expected Result:**
+- Files stored in `images/good/` and `images/defect1/` (and corresponding label folders)
+- GET `/api/dataset/{datasetId}` shows `folders.good` and `folders.defect1`
+- Each file has correct `folder` and `storedPath` in manifest
+
+**Verification:**
+```bash
+# Check folder structure on disk
+# Should see: datasets/acme/line1/v2/images/good/... and images/defect1/...
+
+# Check API response
+curl http://localhost:3000/api/dataset/{datasetId}
+# Should show: "folders": { "good": {...}, "defect1": {...} }
+```
+
+---
+
+### Test 3: Preprocessing Worker Generates Flat Train/Val Structure
+
+**Purpose:** Verify worker copies files to flat train/val directories (no folder hierarchy)
+
+**After Test 2 completes preprocessing:**
+
+**Verification:**
+```bash
+# Check train/val structure is flat (no folders)
+# Should see:
+# datasets/acme/line1/v2/images/train/{storedName}.jpg (flat, no subfolders)
+# datasets/acme/line1/v2/images/val/{storedName}.jpg (flat, no subfolders)
+# datasets/acme/line1/v2/labels/train/{storedName}.txt (flat, no subfolders)
+# datasets/acme/line1/v2/labels/val/{storedName}.txt (flat, no subfolders)
+
+# Original folder structure should still exist:
+# datasets/acme/line1/v2/images/good/{storedName}.jpg (preserved)
+# datasets/acme/line1/v2/images/defect1/{storedName}.jpg (preserved)
+```
+
+**Expected Result:**
+- Train/val folders contain files directly (flat structure for YOLO training)
+- Original folder structure (`images/good/`, `images/defect1/`) remains intact
+- Files are copied (not moved), so originals exist for dashboard view
+
+---
+
+### Test 4: Thumbnails Generated from Original Folder Locations
+
+**Purpose:** Verify thumbnails are created from original folder paths, not train/val
+
+**After preprocessing completes:**
+
+**Verification:**
+```bash
+# Check thumbnails folder
+# Should see: datasets/acme/line1/v2/thumbnails/thumb_{storedName}.jpg
+
+# Verify thumbnails were generated from original locations
+# Worker should read from: images/good/{storedName}.jpg (not train/images/)
+```
+
+**Expected Result:**
+- Thumbnails exist in `thumbnails/` folder
+- Worker reads from original folder locations (`images/{folder}/...`)
+- Thumbnails accessible for dashboard preview
+
+---
+
+### Test 5: Dataset Files Manifest Includes Folder and storedPath
+
+**Purpose:** Verify manifest contains folder and storedPath fields
+
+**cURL Command:**
+```bash
+curl http://localhost:3000/api/dataset/{datasetId}
+```
+
+**Expected Response Structure:**
+```json
+{
+  "files": [
+    {
+      "storedName": "6925603e_abc123_image.jpg",
+      "originalName": "image.jpg",
+      "type": "image",
+      "size": 524288,
+      "folder": "good",
+      "storedPath": "images/good/6925603e_abc123_image.jpg"
+    },
+    {
+      "storedName": "6925603e_def456_image.txt",
+      "originalName": "image.txt",
+      "type": "label",
+      "size": 1024,
+      "folder": "good",
+      "storedPath": "labels/good/6925603e_def456_image.txt"
+    }
+  ],
+  "folders": {
+    "good": {
+      "images": 1,
+      "labels": 1,
+      "files": [...]
+    }
+  }
+}
+```
+
+**Verification:**
+- Every file entry has `folder` field
+- Every file entry has `storedPath` field (relative to dataset root)
+- `folders` summary groups files by folder name
+
+---
+
 ## Troubleshooting
 
 - **"MongoDB connection error"** → Check MongoDB is running
 - **"Redis connection error"** → Check Redis is running
 - **"Worker not processing"** → Check worker terminal for errors
 - **"Status stuck on queued"** → Check worker is running and Redis is connected
+- **"fileMeta parse error"** → Check JSON format is valid, backend will default to 'dataset' folder
+- **"Files not in expected folders"** → Verify fileMeta JSON matches uploaded file originalName exactly
 

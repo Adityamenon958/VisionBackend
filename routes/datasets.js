@@ -41,12 +41,24 @@ const storage = multer.diskStorage({
 });
 
 // ✅ File filter - only allow specific extensions
+// For 'files' field: images and labels only
+// For 'fileMeta' field: JSON files allowed
 const fileFilter = (req, file, cb) => {
   const ext = path.extname(file.originalname).toLowerCase();
+  
+  // ✅ Allow JSON files for fileMeta field
+  if (file.fieldname === 'fileMeta') {
+    if (ext === '.json' || file.mimetype === 'application/json') {
+      cb(null, true);
+      return;
+    } else {
+      cb(new Error('fileMeta must be a JSON file'), false);
+      return;
+    }
+  }
+  
+  // ✅ For 'files' field: only allow images and labels
   const allowedExtensions = ['.jpg', '.jpeg', '.png', '.txt'];
-
-  // ⚠️ CAUTION: Don't trust file.originalname alone - validate extension
-  // Malicious users could upload .exe files with .jpg extension
   if (allowedExtensions.includes(ext)) {
     cb(null, true); // Accept file
   } else {
@@ -69,12 +81,16 @@ const upload = multer({
  * 
  * Accepts multipart/form-data with:
  * - Field name "files" (array of files)
+ * - Field "fileMeta" (optional - JSON string as text field OR JSON file)
  * - Field "company" (string, required)
  * - Field "project" (string, required)
  * - Field "version" (string, optional, defaults to "v1")
  */
 router.post('/upload',
-  upload.array('files', 100), // ✅ Accept up to 100 files with field name "files"
+  upload.fields([
+    { name: 'files', maxCount: 500 }, // ✅ Accept up to 500 files
+    { name: 'fileMeta', maxCount: 1 } // ✅ Accept optional fileMeta (JSON file)
+  ]),
   uploadDataset
 );
 

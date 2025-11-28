@@ -36,7 +36,9 @@ const uploadDataset = async (req, res) => {
     }
 
     // ✅ Check if files were uploaded
-    if (!req.files || req.files.length === 0) {
+    // Note: With upload.fields(), req.files is an object with arrays, not a flat array
+    const uploadedFiles = req.files?.files || [];
+    if (!uploadedFiles || uploadedFiles.length === 0) {
       return res.status(400).json({
         error: 'No files uploaded'
       });
@@ -56,6 +58,48 @@ const uploadDataset = async (req, res) => {
     await dataset.save();
     const datasetId = dataset._id.toString();
 
+    // ✅ Parse optional fileMeta (JSON string mapping originalName -> folder)
+    // Expected format: [{ originalName: "img1.jpg", folder: "good" }, ...]
+    // fileMeta can be sent as:
+    // 1. Text field in form-data (req.body.fileMeta)
+    // 2. Uploaded JSON file (req.files.fileMeta[0])
+    let fileMetaMap = {};
+    let fileMetaRaw = req.body.fileMeta;
+
+    // ✅ If the frontend uploaded a JSON file as fileMeta
+    if (!fileMetaRaw && req.files?.fileMeta?.length) {
+      const metaFilePath = req.files.fileMeta[0].path;
+      try {
+        fileMetaRaw = await fsPromises.readFile(metaFilePath, 'utf-8');
+      } catch (readError) {
+        console.warn('Failed to read fileMeta file:', readError.message);
+      } finally {
+        // ✅ Remove the temp uploaded file
+        try {
+          await fsPromises.unlink(metaFilePath);
+        } catch (unlinkError) {
+          // Ignore cleanup errors
+        }
+      }
+    }
+
+    // ✅ Parse JSON safely
+    if (fileMetaRaw) {
+      try {
+        const fileMeta = JSON.parse(fileMetaRaw);
+        // Build map for fast lookup
+        for (const m of fileMeta) {
+          if (m && m.originalName) {
+            fileMetaMap[m.originalName] = m.folder || 'dataset';
+          }
+        }
+      } catch (e) {
+        // ⚠️ CAUTION: Ignore parse errors and fallback to default folder
+        console.warn('Failed to parse fileMeta, using default folder:', e.message);
+        fileMetaMap = {};
+      }
+    }
+
     // ✅ Process uploaded files
     const validExtensions = ['.jpg', '.jpeg', '.png', '.txt'];
     let totalImages = 0;
@@ -69,7 +113,8 @@ const uploadDataset = async (req, res) => {
     await storageAdapter.ensureDir(labelsPath);
 
     // ✅ Process each uploaded file
-    for (const file of req.files) {
+    // Note: Use uploadedFiles array (from req.files.files) instead of req.files
+    for (const file of uploadedFiles) {
       const originalName = file.originalname;
       const ext = path.extname(originalName).toLowerCase();
       const tempPath = file.path; // Multer saves to temp folder
@@ -101,25 +146,41 @@ const uploadDataset = async (req, res) => {
         continue;
       }
 
+      // ✅ Determine folder name from fileMeta (default: 'dataset')
+      const folderName = (fileMetaMap && fileMetaMap[originalName]) ? fileMetaMap[originalName] : 'dataset';
+
       // ✅ Generate unique filename to avoid collisions
       // Format: {datasetId}_{uuid}_{originalName}
       // ⚠️ CAUTION: This prevents filename collisions when multiple users
       // upload files with the same name
       const uniqueName = `${datasetId}_${uuidv4()}_${originalName}`;
+      
+      // ✅ Build destination paths to preserve folder grouping
+      // For images: ${imagesPath}/${folderName}/${uniqueName}
+      // For labels: ${labelsPath}/${folderName}/${uniqueName}
       const destPath = isImage
-        ? path.join(imagesPath, uniqueName)
-        : path.join(labelsPath, uniqueName);
+        ? path.join(imagesPath, folderName, uniqueName)
+        : path.join(labelsPath, folderName, uniqueName);
 
       try {
+        // ✅ Ensure folder subdirectory exists
+        await storageAdapter.ensureDir(path.dirname(destPath));
+
         // ✅ Move file from temp to final storage location
         await storageAdapter.saveFile(tempPath, destPath);
+
+        // ✅ Compute storedPath (relative to dataset root)
+        const datasetRoot = storageAdapter.buildDatasetPath(company, project, version);
+        const storedPath = path.relative(datasetRoot, destPath).replace(/\\/g, '/'); // Normalize to forward slashes
 
         // ✅ Add file entry to manifest BEFORE saving dataset
         dataset.files.push({
           storedName: uniqueName,
           originalName: originalName,
           type: isImage ? 'image' : 'label',
-          size: file.size
+          size: file.size,
+          folder: folderName,
+          storedPath: storedPath
         });
 
         // ✅ Update statistics
@@ -187,7 +248,7 @@ const uploadDataset = async (req, res) => {
 /**
  * GET /api/dataset/:datasetId
  * 
- * Returns full dataset metadata document
+ * Returns full dataset metadata document with folders summary
  */
 const getDataset = async (req, res) => {
   try {
@@ -202,7 +263,26 @@ const getDataset = async (req, res) => {
       });
     }
 
-    res.json(dataset);
+    // ✅ Compute folders summary (grouped by folder name)
+    // This helps the frontend present the separate folders view without extra processing
+    const folders = {};
+    for (const f of dataset.files) {
+      if (!folders[f.folder]) {
+        folders[f.folder] = { images: 0, labels: 0, files: [] };
+      }
+      if (f.type === 'image') folders[f.folder].images++;
+      if (f.type === 'label') folders[f.folder].labels++;
+      folders[f.folder].files.push({
+        storedName: f.storedName,
+        originalName: f.originalName,
+        type: f.type,
+        size: f.size,
+        storedPath: f.storedPath
+      });
+    }
+
+    // ✅ Include folders summary in response
+    res.json({ ...dataset.toObject(), folders });
 
   } catch (error) {
     console.error('Get dataset error:', error);
