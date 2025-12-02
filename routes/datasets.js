@@ -7,7 +7,11 @@ const fs = require('fs');
 const {
   uploadDataset,
   getDataset,
-  getDatasetStatus
+  getDatasetStatus,
+  getDatasetFolders,
+  getDatasetFiles,
+  getFileThumbnail,
+  listDatasets
 } = require('../controllers/datasetController');
 
 /**
@@ -77,6 +81,14 @@ const upload = multer({
 });
 
 /**
+ * GET /api/datasets
+ * 
+ * Returns list of all datasets with basic metadata
+ * Query params: ?company=xxx&project=xxx&status=ready (all optional)
+ */
+router.get('/', listDatasets);
+
+/**
  * POST /api/dataset/upload
  * 
  * Accepts multipart/form-data with:
@@ -95,18 +107,41 @@ router.post('/upload',
 );
 
 /**
- * GET /api/dataset/:datasetId
- * 
- * Returns full dataset metadata
- */
-router.get('/:datasetId', getDataset);
-
-/**
  * GET /api/dataset/:datasetId/status
  * 
  * Returns minimal status for polling
  */
 router.get('/:datasetId/status', getDatasetStatus);
+
+/**
+ * GET /api/dataset/:datasetId/folders
+ * 
+ * Returns folder summary with images/labels counts and size statistics
+ */
+router.get('/:datasetId/folders', getDatasetFolders);
+
+/**
+ * GET /api/dataset/:datasetId/files
+ * 
+ * Returns paginated file manifest with filters and sorting
+ */
+router.get('/:datasetId/files', getDatasetFiles);
+
+/**
+ * GET /api/dataset/:datasetId/file/:fileId/thumbnail
+ * 
+ * Serves thumbnail image if available
+ */
+router.get('/:datasetId/file/:fileId/thumbnail', getFileThumbnail);
+
+/**
+ * GET /api/dataset/:datasetId
+ * 
+ * Returns full dataset metadata
+ * 
+ * ⚠️ CAUTION: This route must be LAST to avoid matching /folders, /files, etc.
+ */
+router.get('/:datasetId', getDataset);
 
 module.exports = router;
 

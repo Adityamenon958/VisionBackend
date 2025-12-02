@@ -20,16 +20,23 @@ app.use(express.json());
 // ✅ Middleware: Parse URL-encoded form data
 app.use(express.urlencoded({ extended: true }));
 
-// ✅ CORS middleware (allow frontend to make requests)
-// ⚠️ CAUTION: In production, replace '*' with your frontend domain
+// --- production-safe CORS (replace existing CORS middleware) ---
+const allowedOrigin = process.env.CORS_ORIGIN || '*'; // set in Azure later
+
+app.set('trust proxy', 1); // required for Azure behind proxy
+
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
+  const origin = req.headers.origin;
+  if (allowedOrigin === '*' || (origin && origin === allowedOrigin)) {
+    res.header('Access-Control-Allow-Origin', allowedOrigin === '*' ? '*' : origin);
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
+    return next();
+  } else {
+    return res.status(403).json({ error: 'CORS origin denied' });
   }
-  next();
 });
 
 // ✅ Health check endpoint
@@ -40,6 +47,11 @@ app.get('/health', (req, res) => {
 // ✅ Register dataset routes
 // All routes in routes/datasets.js will be prefixed with /api/dataset
 app.use('/api/dataset', datasetRoutes);
+
+// ✅ Register list datasets endpoint (plural) - separate route for clarity
+// GET /api/datasets - List all datasets
+const { listDatasets } = require('./controllers/datasetController');
+app.get('/api/datasets', listDatasets);
 
 // ✅ 404 handler (route not found)
 app.use((req, res) => {

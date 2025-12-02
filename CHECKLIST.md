@@ -515,6 +515,237 @@ curl http://localhost:3000/api/dataset/{datasetId}
 
 ---
 
+## Testing New Dataset Management Endpoints
+
+### Test 11: Get Dataset Folders Summary
+
+**Purpose:** Verify folder summary endpoint returns correct statistics
+
+**cURL Command:**
+```bash
+# Replace {datasetId} with actual dataset ID
+curl http://localhost:3000/api/dataset/{datasetId}/folders
+```
+
+**Expected Response:**
+```json
+{
+  "datasetId": "507f1f77bcf86cd799439011",
+  "company": "acme-corp",
+  "project": "defect-detection",
+  "version": "v1",
+  "totalImages": 150,
+  "sizeBytes": 52428800,
+  "folders": {
+    "good": {
+      "images": 80,
+      "labels": 80,
+      "sizeBytes": 41943040
+    },
+    "defect": {
+      "images": 40,
+      "labels": 40,
+      "sizeBytes": 10485760
+    },
+    "dataset": {
+      "images": 30,
+      "labels": 0,
+      "sizeBytes": 0
+    }
+  }
+}
+```
+
+**Verification:**
+- Each folder shows correct image and label counts
+- `sizeBytes` is sum of all file sizes in that folder
+- Response includes dataset metadata (company, project, version)
+
+---
+
+### Test 12: Get Dataset Files (Paginated with Filters)
+
+**Purpose:** Verify paginated file listing with filters and sorting
+
+**cURL Commands:**
+
+**Basic request (first page):**
+```bash
+curl "http://localhost:3000/api/dataset/{datasetId}/files?page=1&limit=10"
+```
+
+**Filter by folder:**
+```bash
+curl "http://localhost:3000/api/dataset/{datasetId}/files?folder=good&limit=20"
+```
+
+**Filter by type:**
+```bash
+curl "http://localhost:3000/api/dataset/{datasetId}/files?type=image&page=1&limit=50"
+```
+
+**Sort by size (descending):**
+```bash
+curl "http://localhost:3000/api/dataset/{datasetId}/files?sort=size&order=desc&limit=10"
+```
+
+**Combined filters:**
+```bash
+curl "http://localhost:3000/api/dataset/{datasetId}/files?folder=good&type=image&sort=name&order=asc&page=1&limit=25"
+```
+
+**Expected Response:**
+```json
+{
+  "datasetId": "507f1f77bcf86cd799439011",
+  "page": 1,
+  "limit": 10,
+  "totalFiles": 150,
+  "totalPages": 15,
+  "files": [
+    {
+      "id": "507f1f77bcf86cd799439012",
+      "storedName": "507f1f77bcf86cd799439011_a1b2c3d4_image1.jpg",
+      "originalName": "image1.jpg",
+      "type": "image",
+      "size": 245760,
+      "folder": "good",
+      "storedPath": "images/good/507f1f77bcf86cd799439011_a1b2c3d4_image1.jpg",
+      "thumbnailAvailable": true
+    },
+    {
+      "id": "507f1f77bcf86cd799439013",
+      "storedName": "507f1f77bcf86cd799439011_e5f6g7h8_image1.txt",
+      "originalName": "image1.txt",
+      "type": "label",
+      "size": 1024,
+      "folder": "good",
+      "storedPath": "labels/good/507f1f77bcf86cd799439011_e5f6g7h8_image1.txt",
+      "thumbnailAvailable": false
+    }
+  ]
+}
+```
+
+**Verification:**
+- Pagination works correctly (page, limit, totalPages)
+- Folder filter returns only files from specified folder
+- Type filter returns only images or labels
+- Sorting works (by name or size, asc/desc)
+- `thumbnailAvailable` is true only for images with thumbnails
+- Each file has unique `id` (subdocument _id)
+
+**Error Cases:**
+```bash
+# Invalid page
+curl "http://localhost:3000/api/dataset/{datasetId}/files?page=0"
+# Expected: 400 Bad Request
+
+# Invalid type
+curl "http://localhost:3000/api/dataset/{datasetId}/files?type=invalid"
+# Expected: 400 Bad Request
+
+# Limit exceeds max (500)
+curl "http://localhost:3000/api/dataset/{datasetId}/files?limit=1000"
+# Expected: Limit capped at 500
+```
+
+---
+
+### Test 13: Get File Thumbnail
+
+**Purpose:** Verify thumbnail serving endpoint
+
+**Prerequisites:**
+- Dataset must be processed (status: 'ready')
+- Thumbnails must exist (generated during preprocessing)
+
+**Step 1: Get file ID from files endpoint**
+```bash
+# Get first image file ID
+curl "http://localhost:3000/api/dataset/{datasetId}/files?type=image&limit=1"
+# Copy the "id" field from response
+```
+
+**Step 2: Request thumbnail**
+```bash
+# Replace {datasetId} and {fileId} with actual values
+curl -o thumbnail.jpg "http://localhost:3000/api/dataset/{datasetId}/file/{fileId}/thumbnail"
+```
+
+**Expected Behavior:**
+- Returns image file (JPEG or PNG) with correct Content-Type
+- Sets Cache-Control header: `public, max-age=3600`
+- File can be saved and viewed
+
+**Error Cases:**
+```bash
+# Non-existent file ID
+curl "http://localhost:3000/api/dataset/{datasetId}/file/invalid_id/thumbnail"
+# Expected: 404 Not Found - "File not found"
+
+# Label file (no thumbnail)
+curl "http://localhost:3000/api/dataset/{datasetId}/file/{labelFileId}/thumbnail"
+# Expected: 404 Not Found - "Thumbnail not available for non-image files"
+
+# Thumbnail doesn't exist
+curl "http://localhost:3000/api/dataset/{datasetId}/file/{imageFileId}/thumbnail"
+# Expected: 404 Not Found - "Thumbnail not found"
+```
+
+**Verification:**
+- Thumbnail file is served correctly
+- Content-Type header is set (image/jpeg or image/png)
+- Cache-Control header is present
+- File can be opened in image viewer
+
+---
+
+### Test 14: Integration Test - Complete Workflow
+
+**Purpose:** Test all new endpoints together in a realistic workflow
+
+**Steps:**
+
+1. **Upload a dataset** (from Test 1)
+   - Save the `datasetId`
+
+2. **Wait for preprocessing to complete**
+   - Poll status endpoint until `status: "ready"`
+
+3. **Get folders summary**
+   ```bash
+   curl http://localhost:3000/api/dataset/{datasetId}/folders
+   ```
+   - Verify folder counts match uploaded files
+
+4. **List all files (paginated)**
+   ```bash
+   curl "http://localhost:3000/api/dataset/{datasetId}/files?page=1&limit=50"
+   ```
+   - Verify all files are listed
+   - Check `thumbnailAvailable` flags
+
+5. **Filter files by folder**
+   ```bash
+   curl "http://localhost:3000/api/dataset/{datasetId}/files?folder=good"
+   ```
+   - Verify only files from "good" folder are returned
+
+6. **Get a thumbnail**
+   ```bash
+   # Get file ID from step 4
+   curl -o test_thumbnail.jpg "http://localhost:3000/api/dataset/{datasetId}/file/{fileId}/thumbnail"
+   ```
+   - Verify thumbnail is served and can be viewed
+
+**Expected Result:**
+- All endpoints work correctly
+- Data is consistent across endpoints
+- Thumbnails are accessible for processed images
+
+---
+
 ## Troubleshooting
 
 - **"MongoDB connection error"** → Check MongoDB is running
@@ -526,4 +757,8 @@ curl http://localhost:3000/api/dataset/{datasetId}
 - **"Train/val folders empty"** → Check worker logs for copy errors, verify source files exist
 - **"Thumbnails not generated"** → Check worker logs, verify images are readable, check disk space
 - **"Progress not updating"** → Worker saves dataset periodically; if stuck, check for errors in worker terminal
+- **"Folder summary shows wrong counts"** → Verify dataset.files array is populated correctly in MongoDB
+- **"Files endpoint returns empty"** → Check filters (folder/type) match actual data, verify pagination parameters
+- **"Thumbnail returns 404"** → Ensure dataset is processed (status: 'ready'), check thumbnails folder exists, verify fileId is correct
+- **"Route not found"** → Verify route ordering in routes/datasets.js (specific routes before wildcard /:datasetId)
 

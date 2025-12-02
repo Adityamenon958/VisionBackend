@@ -172,6 +172,19 @@ class StorageAdapter {
   }
 
   /**
+   * Get full path to a thumbnail file
+   * @param {string} company - Company identifier
+   * @param {string} project - Project identifier
+   * @param {string} version - Version identifier
+   * @param {string} storedName - Stored filename (without thumb_ prefix)
+   * @returns {string} Full path to thumbnail file
+   */
+  getThumbnailPath(company, project, version, storedName) {
+    const thumbnailsPath = this.buildThumbnailsPath(company, project, version);
+    return path.join(thumbnailsPath, `thumb_${storedName}`);
+  }
+
+  /**
    * Copy a file from source to destination (preserves original)
    * 
    * This is used when we need to keep the original file intact
