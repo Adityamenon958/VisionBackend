@@ -322,13 +322,14 @@ const processPreprocessingJob = async (job) => {
     
     console.log(`   - Test sample: ${testImagesCopied} images copied`);
 
-    // ✅ Generate thumbnails from train+val images (sample up to 50)
-    // ⚠️ CAUTION: Generating thumbnails for all images can be slow
+    // ✅ Generate thumbnails for all train+val images
     // ✅ Read from original folder locations (images/{folder}/...) to preserve quality
-    const thumbnailSample = [...trainImages, ...valImages].slice(0, 50);
+    const allImagesForThumbnails = [...trainImages, ...valImages];
     let thumbnailsGenerated = 0;
 
-    for (const imageInfo of thumbnailSample) {
+    console.log(`   - Generating thumbnails for ${allImagesForThumbnails.length} images...`);
+
+    for (const imageInfo of allImagesForThumbnails) {
       try {
         // ✅ Use storedPath to read from original folder location
         const originalImagePath = path.join(datasetRoot, imageInfo.storedPath);
