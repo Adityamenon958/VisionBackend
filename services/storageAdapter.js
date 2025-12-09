@@ -143,6 +143,14 @@ class StorageAdapter {
   }
 
   /**
+   * Get base storage path
+   * @returns {string} Base path (e.g., /datasets)
+   */
+  getBasePath() {
+    return this.basePath;
+  }
+
+  /**
    * Build storage path for a dataset
    * Format: /datasets/{company}/{project}/{version}/
    */
@@ -209,6 +217,159 @@ class StorageAdapter {
       // const destBlob = this.extractBlobName(destPath);
       // await azureBlobService.copyBlob(srcContainer, srcBlob, destContainer, destBlob);
       throw new Error('Azure storage not yet implemented');
+    }
+  }
+
+  /**
+   * Rename a directory (folder rename - instant on same filesystem)
+   * 
+   * Used when renaming company/project - renames the folder instead of moving files
+   * This is much faster than copying files (instant vs minutes for large datasets)
+   * 
+   * @param {string} srcDir - Source directory path (e.g., /datasets/company/oldProject/)
+   * @param {string} destDir - Destination directory path (e.g., /datasets/company/newProject/)
+   */
+  async renameDirectory(srcDir, destDir) {
+    if (this.mode === 'local') {
+      // ✅ Check if source exists
+      if (!(await this.exists(srcDir))) {
+        throw new Error(`Source directory does not exist: ${srcDir}`);
+      }
+
+      // ✅ Ensure parent directory of destination exists
+      const destParent = path.dirname(destDir);
+      await this.ensureDir(destParent);
+
+      try {
+        // ✅ Use rename (instant on same filesystem - just changes folder name)
+        // This is the key: fs.rename() on directories is instant, no file copying!
+        await fs.rename(srcDir, destDir);
+        console.log(`✅ Renamed directory: ${srcDir} → ${destDir}`);
+      } catch (error) {
+        // ⚠️ If rename fails (cross-device), fall back to copy + delete
+        // This only happens if source and dest are on different drives
+        if (error.code === 'EXDEV') {
+          console.warn(`⚠️ Cross-device rename detected, using copy+delete fallback`);
+          // Recursively copy directory
+          await this._copyDirectoryRecursive(srcDir, destDir);
+          // Delete source directory
+          await this._removeDirectoryRecursive(srcDir);
+        } else {
+          throw error;
+        }
+      }
+
+      // ✅ Clean up empty parent directories after rename
+      await this._cleanupEmptyParents(srcDir);
+    } else if (this.mode === 'azure') {
+      // TODO: Rename directory in Azure Blob Storage (metadata-only operation)
+      throw new Error('Azure storage not yet implemented');
+    }
+  }
+
+  /**
+   * Move an entire directory from source to destination
+   * 
+   * @deprecated Use renameDirectory() instead - it's faster (instant rename vs file copying)
+   * Kept for backward compatibility
+   * 
+   * @param {string} srcDir - Source directory path
+   * @param {string} destDir - Destination directory path
+   */
+  async moveDirectory(srcDir, destDir) {
+    // ✅ Delegate to renameDirectory (same operation, better name)
+    return this.renameDirectory(srcDir, destDir);
+  }
+
+  /**
+   * Remove empty parent directories up to basePath
+   * Used after moving directories to clean up empty folders
+   * 
+   * @param {string} dirPath - Path to start cleaning from (will clean parents)
+   * @private
+   */
+  async _cleanupEmptyParents(dirPath) {
+    try {
+      let currentPath = path.dirname(dirPath);
+      const basePathNormalized = path.normalize(this.basePath);
+
+      // ✅ Walk up the directory tree, removing empty directories
+      // Stop when we reach the basePath (don't delete datasets folder itself)
+      while (currentPath !== basePathNormalized && currentPath.length > basePathNormalized.length) {
+        try {
+          // Check if directory is empty
+          const entries = await fs.readdir(currentPath);
+          
+          if (entries.length === 0) {
+            // Directory is empty, remove it
+            await fs.rmdir(currentPath);
+            console.log(`✅ Removed empty directory: ${currentPath}`);
+            
+            // Move up to parent directory
+            currentPath = path.dirname(currentPath);
+          } else {
+            // Directory has contents, stop cleaning
+            break;
+          }
+        } catch (error) {
+          // If we can't read or remove, stop (might not exist or have permissions)
+          if (error.code === 'ENOENT' || error.code === 'ENOTEMPTY') {
+            break;
+          }
+          // For other errors, log and continue
+          console.warn(`⚠️ Could not clean up ${currentPath}:`, error.message);
+          break;
+        }
+      }
+    } catch (error) {
+      // Non-critical error, just log it
+      console.warn(`⚠️ Error during cleanup of empty parents:`, error.message);
+    }
+  }
+
+  /**
+   * Helper: Recursively copy directory
+   * @private
+   */
+  async _copyDirectoryRecursive(srcDir, destDir) {
+    await this.ensureDir(destDir);
+    const entries = await fs.readdir(srcDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const srcPath = path.join(srcDir, entry.name);
+      const destPath = path.join(destDir, entry.name);
+
+      if (entry.isDirectory()) {
+        await this._copyDirectoryRecursive(srcPath, destPath);
+      } else {
+        await fs.copyFile(srcPath, destPath);
+      }
+    }
+  }
+
+  /**
+   * Helper: Recursively remove directory
+   * @private
+   */
+  async _removeDirectoryRecursive(dirPath) {
+    // ✅ Use recursive option for rmdir (Node 12+)
+    // This is simpler and handles nested directories automatically
+    try {
+      await fs.rmdir(dirPath, { recursive: true });
+    } catch (error) {
+      // Fallback: manual recursive deletion if rmdir fails
+      const entries = await fs.readdir(dirPath, { withFileTypes: true });
+
+      for (const entry of entries) {
+        const entryPath = path.join(dirPath, entry.name);
+        if (entry.isDirectory()) {
+          await this._removeDirectoryRecursive(entryPath);
+        } else {
+          await fs.unlink(entryPath);
+        }
+      }
+
+      await fs.rmdir(dirPath);
     }
   }
 }

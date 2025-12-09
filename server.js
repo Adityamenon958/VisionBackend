@@ -29,7 +29,7 @@ app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (allowedOrigin === '*' || (origin && origin === allowedOrigin)) {
     res.header('Access-Control-Allow-Origin', allowedOrigin === '*' ? '*' : origin);
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.header('Access-Control-Allow-Credentials', 'true');
     if (req.method === 'OPTIONS') return res.sendStatus(200);

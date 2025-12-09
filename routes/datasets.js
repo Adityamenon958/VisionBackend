@@ -11,7 +11,8 @@ const {
   getDatasetFolders,
   getDatasetFiles,
   getFileThumbnail,
-  listDatasets
+  listDatasets,
+  updateDataset
 } = require('../controllers/datasetController');
 
 /**
@@ -44,14 +45,13 @@ const storage = multer.diskStorage({
   }
 });
 
-// ✅ File filter - only allow specific extensions
-// For 'files' field: images and labels only
-// For 'fileMeta' field: JSON files allowed
+// ✅ File filter - validate fileMeta only
+// For 'files' field: Accept all files, let controller validate and skip invalid ones
+// For 'fileMeta' field: JSON files only (strict validation)
 const fileFilter = (req, file, cb) => {
-  const ext = path.extname(file.originalname).toLowerCase();
-  
-  // ✅ Allow JSON files for fileMeta field
+  // ✅ Only validate fileMeta field (must be JSON)
   if (file.fieldname === 'fileMeta') {
+    const ext = path.extname(file.originalname).toLowerCase();
     if (ext === '.json' || file.mimetype === 'application/json') {
       cb(null, true);
       return;
@@ -61,13 +61,10 @@ const fileFilter = (req, file, cb) => {
     }
   }
   
-  // ✅ For 'files' field: only allow images and labels
-  const allowedExtensions = ['.jpg', '.jpeg', '.png', '.txt'];
-  if (allowedExtensions.includes(ext)) {
-    cb(null, true); // Accept file
-  } else {
-    cb(new Error(`Invalid file type. Allowed: ${allowedExtensions.join(', ')}`), false);
-  }
+  // ✅ For 'files' field: Accept all files
+  // Controller will validate extensions and skip invalid files gracefully
+  // This allows mixed valid/invalid files to upload successfully
+  cb(null, true);
 };
 
 // ✅ Create multer instance
@@ -97,12 +94,26 @@ router.get('/', listDatasets);
  * - Field "company" (string, required)
  * - Field "project" (string, required)
  * - Field "version" (string, optional, defaults to "v1")
+ * 
+ * Note: Invalid files in 'files' field are skipped and reported in uploadErrors.
+ * Controller handles validation gracefully.
  */
 router.post('/upload',
   upload.fields([
-    { name: 'files', maxCount: 5000 }, // ✅ Accept up to 5000 files
-    { name: 'fileMeta', maxCount: 1 } // ✅ Accept optional fileMeta (JSON file)
+    { name: 'files', maxCount: 5000 }, // ✅ Accept up to 5000 files (controller validates)
+    { name: 'fileMeta', maxCount: 1 } // ✅ Accept optional fileMeta (JSON file, validated by fileFilter)
   ]),
+  // ✅ Error handler for Multer errors (e.g., fileMeta validation fails)
+  (err, req, res, next) => {
+    if (err) {
+      // Multer error (e.g., fileMeta is not JSON)
+      return res.status(400).json({
+        error: 'Upload error',
+        message: err.message
+      });
+    }
+    next();
+  },
   uploadDataset
 );
 
@@ -133,6 +144,21 @@ router.get('/:datasetId/files', getDatasetFiles);
  * Serves thumbnail image if available
  */
 router.get('/:datasetId/file/:fileId/thumbnail', getFileThumbnail);
+
+/**
+ * PATCH /api/dataset/:datasetId
+ * 
+ * Updates dataset company and/or project name
+ * 
+ * Request body:
+ * {
+ *   "company": "newCompanyName",  // Optional
+ *   "project": "newProjectName"    // Optional
+ * }
+ * 
+ * ⚠️ CAUTION: This route must be BEFORE GET /:datasetId to avoid route conflicts
+ */
+router.patch('/:datasetId', updateDataset);
 
 /**
  * GET /api/dataset/:datasetId

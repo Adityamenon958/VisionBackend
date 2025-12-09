@@ -580,6 +580,194 @@ const getFileThumbnail = async (req, res) => {
 };
 
 /**
+ * PATCH /api/dataset/:datasetId
+ * 
+ * Updates dataset company and/or project name
+ * Moves files from old path to new path
+ * Updates database metadata
+ */
+const updateDataset = async (req, res) => {
+  try {
+    const { datasetId } = req.params;
+    const { company, project } = req.body;
+
+    // ✅ Validate datasetId
+    if (!datasetId) {
+      return res.status(400).json({
+        error: 'Dataset ID is required'
+      });
+    }
+
+    // ✅ Validate at least one field to update
+    if (!company && !project) {
+      return res.status(400).json({
+        error: 'Validation error',
+        message: 'At least one field (company or project) must be provided'
+      });
+    }
+
+    // ✅ Validate field values
+    if (company !== undefined && (!company || typeof company !== 'string' || company.trim() === '')) {
+      return res.status(400).json({
+        error: 'Validation error',
+        message: 'Company name must be a non-empty string'
+      });
+    }
+
+    if (project !== undefined && (!project || typeof project !== 'string' || project.trim() === '')) {
+      return res.status(400).json({
+        error: 'Validation error',
+        message: 'Project name must be a non-empty string'
+      });
+    }
+
+    // ✅ Find dataset
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return res.status(404).json({
+        error: 'Dataset not found'
+      });
+    }
+
+    // ✅ Check if dataset is processing or queued (block rename)
+    if (dataset.status === 'processing' || dataset.status === 'queued') {
+      return res.status(400).json({
+        error: 'Validation error',
+        message: `Cannot rename dataset while ${dataset.status}. Current status: ${dataset.status}`
+      });
+    }
+
+    // ✅ Determine new values (use existing if not provided)
+    const newCompany = company ? company.trim() : dataset.company;
+    const newProject = project ? project.trim() : dataset.project;
+    const version = dataset.version;
+
+    // ✅ Check if anything actually changed
+    if (newCompany === dataset.company && newProject === dataset.project) {
+      return res.status(200).json({
+        datasetId: dataset._id.toString(),
+        message: 'No changes detected',
+        company: dataset.company,
+        project: dataset.project,
+        version: dataset.version,
+        storagePath: dataset.storagePath
+      });
+    }
+
+    // ✅ Check for conflicts (another dataset with same company/project/version)
+    const existingDataset = await Dataset.findOne({
+      company: newCompany,
+      project: newProject,
+      version: version,
+      _id: { $ne: datasetId } // Exclude current dataset
+    });
+
+    if (existingDataset) {
+      return res.status(409).json({
+        error: 'Conflict',
+        message: `A dataset with company '${newCompany}' and project '${newProject}' (version '${version}') already exists`
+      });
+    }
+
+    // ✅ Check for active jobs in queue for this dataset
+    const { preprocessingQueue } = require('../queue');
+    const jobs = await preprocessingQueue.getJobs(['waiting', 'active', 'delayed']);
+    const activeJob = jobs.find(job => job.data.datasetId === datasetId.toString());
+
+    if (activeJob) {
+      // Cancel the active job - it will be requeued with new paths if needed
+      await activeJob.remove();
+      console.log(`⚠️ Cancelled active job ${activeJob.id} for dataset ${datasetId}`);
+    }
+
+    // ✅ Store old values for folder renaming
+    const oldCompany = dataset.company;
+    const oldProject = dataset.project;
+    // Note: version is already declared above
+    
+    // ✅ Determine which folder level to rename
+    // Structure: /datasets/{company}/{project}/{version}/
+    // We rename at the project or company level (not version level) for efficiency
+    
+    const companyChanged = oldCompany !== newCompany;
+    const projectChanged = oldProject !== newProject;
+    
+    if (companyChanged || projectChanged) {
+      try {
+        // ✅ Case 1: Both company and project changed
+        // Rename: /datasets/oldCompany/oldProject/ → /datasets/newCompany/newProject/
+        if (companyChanged && projectChanged) {
+          const basePath = storageAdapter.getBasePath();
+          const oldProjectPath = path.join(basePath, oldCompany, oldProject);
+          const newProjectPath = path.join(basePath, newCompany, newProject);
+          
+          if (await storageAdapter.exists(oldProjectPath)) {
+            await storageAdapter.renameDirectory(oldProjectPath, newProjectPath);
+            console.log(`✅ Renamed project folder: ${oldProjectPath} → ${newProjectPath}`);
+          }
+        }
+        // ✅ Case 2: Only project changed (company same)
+        // Rename: /datasets/company/oldProject/ → /datasets/company/newProject/
+        else if (projectChanged) {
+          const basePath = storageAdapter.getBasePath();
+          const oldProjectPath = path.join(basePath, oldCompany, oldProject);
+          const newProjectPath = path.join(basePath, oldCompany, newProject);
+          
+          if (await storageAdapter.exists(oldProjectPath)) {
+            await storageAdapter.renameDirectory(oldProjectPath, newProjectPath);
+            console.log(`✅ Renamed project folder: ${oldProjectPath} → ${newProjectPath}`);
+          }
+        }
+        // ✅ Case 3: Only company changed (project same)
+        // Rename: /datasets/oldCompany/ → /datasets/newCompany/
+        else if (companyChanged) {
+          const basePath = storageAdapter.getBasePath();
+          const oldCompanyPath = path.join(basePath, oldCompany);
+          const newCompanyPath = path.join(basePath, newCompany);
+          
+          if (await storageAdapter.exists(oldCompanyPath)) {
+            await storageAdapter.renameDirectory(oldCompanyPath, newCompanyPath);
+            console.log(`✅ Renamed company folder: ${oldCompanyPath} → ${newCompanyPath}`);
+          }
+        }
+      } catch (error) {
+        console.error(`❌ Failed to rename folder:`, error);
+        return res.status(500).json({
+          error: 'Internal server error',
+          message: `Failed to rename dataset folder: ${error.message}`
+        });
+      }
+    }
+    
+    // ✅ Calculate new storage path after rename
+    const newPath = storageAdapter.buildDatasetPath(newCompany, newProject, version);
+
+    // ✅ Update database fields
+    dataset.company = newCompany;
+    dataset.project = newProject;
+    dataset.storagePath = newPath;
+    await dataset.save();
+
+    // ✅ Return success response
+    res.status(200).json({
+      datasetId: dataset._id.toString(),
+      message: 'Dataset updated successfully',
+      company: dataset.company,
+      project: dataset.project,
+      version: dataset.version,
+      storagePath: dataset.storagePath
+    });
+
+  } catch (error) {
+    console.error('Update dataset error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+};
+
+/**
  * GET /api/datasets
  * 
  * Returns list of all datasets with basic metadata
@@ -635,5 +823,6 @@ module.exports = {
   getDatasetFolders,
   getDatasetFiles,
   getFileThumbnail,
-  listDatasets
+  listDatasets,
+  updateDataset
 };
