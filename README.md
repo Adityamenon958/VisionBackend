@@ -84,7 +84,24 @@ You should see:
 ✅ Server running on http://localhost:3000
 ```
 
-### Step 5: Start the Preprocessing Worker
+### Step 5: Download Base YOLO Models (Optional but Recommended)
+
+**For faster training starts**, download base YOLO models locally:
+
+```bash
+npm run download-models
+```
+
+This downloads commonly used YOLO models (yolov8n.pt, yolov8s.pt, yolov8m.pt, yolov8l.pt) to `models/base/` directory.
+
+**Benefits:**
+- ✅ Faster training starts (no download delay)
+- ✅ Works offline
+- ✅ More predictable for production
+
+**Note:** If you skip this step, YOLO will download models automatically on first use (slower).
+
+### Step 6: Start the Preprocessing Worker
 
 **Open a new terminal window** and run:
 
@@ -98,9 +115,24 @@ You should see:
 ✅ Preprocessing worker started. Waiting for jobs...
 ```
 
-**Important:** Keep both terminals running:
+### Step 7: Start the Training Worker (Optional)
+
+**For training functionality**, open another terminal and run:
+
+```bash
+npm run start:training-worker
+```
+
+You should see:
+```
+✅ Training worker connected to MongoDB
+✅ Training worker started. Waiting for jobs...
+```
+
+**Important:** Keep these terminals running:
 - Terminal 1: API server (`npm run dev`)
-- Terminal 2: Preprocessing worker (`node workers/preprocessingWorker.js`)
+- Terminal 2: Preprocessing worker (`npm run start:worker`)
+- Terminal 3: Training worker (`npm run start:training-worker`) - if using training features
 
 ## 📁 Project Structure
 

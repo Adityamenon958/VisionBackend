@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "start:worker": "node workers/preprocessingWorker.js",
-    "dev": "nodemon --config nodemon.json server.js"
+    "start:training-worker": "node workers/trainingWorker.js",
+    "dev": "nodemon --config nodemon.json server.js",
+    "download-models": "node scripts/download-base-models.js"
   },
   "keywords": ["vision", "ml", "dataset", "yolo"],
   "author": "",

@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const datasetRoutes = require('./routes/datasets');
+const trainingRoutes = require('./routes/training');
+const modelRoutes = require('./routes/models');
 
 /**
  * Main Server File
@@ -44,9 +46,28 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// ✅ Request logging middleware (for debugging)
+app.use((req, res, next) => {
+  // Log ALL requests (for debugging thumbnail issue)
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`, {
+    query: Object.keys(req.query).length > 0 ? req.query : undefined,
+    origin: req.headers.origin,
+    referer: req.headers.referer
+  });
+  next();
+});
+
 // ✅ Register dataset routes
 // All routes in routes/datasets.js will be prefixed with /api/dataset
 app.use('/api/dataset', datasetRoutes);
+
+// ✅ Register training routes
+// All routes in routes/training.js will be prefixed with /api/train
+app.use('/api/train', trainingRoutes);
+
+// ✅ Register model registry routes
+// All routes in routes/models.js will be prefixed with /api/models
+app.use('/api/models', modelRoutes);
 
 // ✅ Register list datasets endpoint (plural) - separate route for clarity
 // GET /api/datasets - List all datasets
@@ -85,6 +106,10 @@ const startServer = async () => {
       console.log(`✅ Server running on http://localhost:${PORT}`);
       console.log(`📁 Dataset upload: POST http://localhost:${PORT}/api/dataset/upload`);
       console.log(`📊 Dataset status: GET http://localhost:${PORT}/api/dataset/:datasetId/status`);
+      console.log(`🚀 Training start: POST http://localhost:${PORT}/api/train`);
+      console.log(`📈 Training status: GET http://localhost:${PORT}/api/train/:jobId/status`);
+      console.log(`🤖 Models list: GET http://localhost:${PORT}/api/models?company=X&project=Y`);
+      console.log(`📦 Model details: GET http://localhost:${PORT}/api/models/:modelId`);
     });
 
   } catch (error) {

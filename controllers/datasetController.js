@@ -503,6 +503,14 @@ const getDatasetFiles = async (req, res) => {
 const getFileThumbnail = async (req, res) => {
   try {
     const { datasetId, fileId } = req.params;
+    
+    // 🔍 DEBUG: Log all incoming thumbnail requests
+    console.log(`[Thumbnail Request] GET /api/dataset/${datasetId}/file/${fileId}/thumbnail`);
+    console.log(`[Thumbnail Request] Headers:`, {
+      origin: req.headers.origin,
+      referer: req.headers.referer,
+      userAgent: req.headers['user-agent']?.substring(0, 50)
+    });
 
     // ✅ Validate parameters
     if (!datasetId || !fileId) {
@@ -524,8 +532,23 @@ const getFileThumbnail = async (req, res) => {
     const file = dataset.files.id(fileId);
 
     if (!file) {
+      // 🔍 DEBUG: Log fileId and available file IDs for debugging
+      const availableFileIds = dataset.files.map(f => f._id.toString());
+      console.error(`[Thumbnail Debug] File not found:`, {
+        requestedFileId: fileId,
+        datasetId: datasetId,
+        totalFiles: dataset.files.length,
+        availableFileIds: availableFileIds.slice(0, 5), // First 5 for debugging
+        fileIdType: typeof fileId,
+        fileIdLength: fileId?.length
+      });
       return res.status(404).json({
-        error: 'File not found'
+        error: 'File not found',
+        debug: {
+          requestedFileId: fileId,
+          totalFilesInDataset: dataset.files.length,
+          sampleFileIds: availableFileIds.slice(0, 3) // First 3 for comparison
+        }
       });
     }
 
@@ -548,8 +571,20 @@ const getFileThumbnail = async (req, res) => {
     const exists = await storageAdapter.exists(thumbnailPath);
 
     if (!exists) {
+      // 🔍 DEBUG: Log thumbnail path for debugging
+      console.error(`[Thumbnail Debug] Thumbnail file not found:`, {
+        thumbnailPath: thumbnailPath,
+        storedName: file.storedName,
+        company: dataset.company,
+        project: dataset.project,
+        version: dataset.version
+      });
       return res.status(404).json({
-        error: 'Thumbnail not found'
+        error: 'Thumbnail not found',
+        debug: {
+          thumbnailPath: thumbnailPath,
+          storedName: file.storedName
+        }
       });
     }
 

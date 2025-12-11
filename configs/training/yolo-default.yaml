@@ -1,0 +1,47 @@
+# YOLO Training Configuration Template
+# This template is used as a base for generating training configs
+# Placeholders will be replaced with actual values during training
+
+epochs: 100
+batch: 16
+imgsz: 640
+lr0: 0.01
+workers: 4
+
+# Dataset paths (will be set dynamically)
+data: null
+project: null
+name: train
+exist_ok: true
+
+# Additional YOLO parameters
+device: 0  # GPU device (0 for first GPU, cpu for CPU)
+patience: 50  # Early stopping patience
+save_period: 10  # Save checkpoint every N epochs
+optimizer: SGD
+momentum: 0.937
+weight_decay: 0.0005
+warmup_epochs: 3.0
+warmup_momentum: 0.8
+warmup_bias_lr: 0.1
+box: 7.5  # Box loss gain
+cls: 0.5  # Class loss gain
+dfl: 1.5  # DFL loss gain
+pose: 12.0  # Pose loss gain (if using pose estimation)
+kobj: 1.0  # Keypoint obj loss gain
+label_smoothing: 0.0
+nbs: 64  # Nominal batch size
+hsv_h: 0.015  # Image HSV-Hue augmentation
+hsv_s: 0.7  # Image HSV-Saturation augmentation
+hsv_v: 0.4  # Image HSV-Value augmentation
+degrees: 0.0  # Image rotation (+/- deg)
+translate: 0.1  # Image translation (+/- fraction)
+scale: 0.5  # Image scale (+/- gain)
+shear: 0.0  # Image shear (+/- deg)
+perspective: 0.0  # Image perspective (+/- fraction)
+flipud: 0.0  # Image flip up-down (probability)
+fliplr: 0.5  # Image flip left-right (probability)
+mosaic: 1.0  # Image mosaic (probability)
+mixup: 0.0  # Image mixup (probability)
+copy_paste: 0.0  # Segment copy-paste (probability)
+

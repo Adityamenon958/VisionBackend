@@ -20,6 +20,13 @@ const preprocessingQueue = new Bull('preprocess-dataset', {
   }
 });
 
+// Training queue for model training jobs
+const trainingQueue = new Bull('train-model', {
+  createClient: (type) => {
+    return createRedisClient();
+  }
+});
+
 // Separate monitor redis instance (not used by Bull)
 const monitorRedis = new Redis(redisUrl);
 
@@ -31,19 +38,33 @@ monitorRedis.on('error', (err) => {
   console.error('❌ Redis (monitor) connection error:', err);
 });
 
-// Queue event logs
+// Preprocessing queue event logs
 preprocessingQueue.on('completed', (job) => {
-  console.log(`✅ Job ${job.id} completed`);
+  console.log(`✅ Preprocessing job ${job.id} completed`);
 });
 
 preprocessingQueue.on('failed', (job, err) => {
-  console.error(`❌ Job ${job.id} failed:`, err?.message || err);
+  console.error(`❌ Preprocessing job ${job.id} failed:`, err?.message || err);
 });
 
 preprocessingQueue.on('stalled', (job) => {
-  console.warn(`⚠️ Job ${job.id} stalled`);
+  console.warn(`⚠️ Preprocessing job ${job.id} stalled`);
+});
+
+// Training queue event logs
+trainingQueue.on('completed', (job) => {
+  console.log(`✅ Training job ${job.id} completed`);
+});
+
+trainingQueue.on('failed', (job, err) => {
+  console.error(`❌ Training job ${job.id} failed:`, err?.message || err);
+});
+
+trainingQueue.on('stalled', (job) => {
+  console.warn(`⚠️ Training job ${job.id} stalled`);
 });
 
 module.exports = {
-  preprocessingQueue
+  preprocessingQueue,
+  trainingQueue
 };
