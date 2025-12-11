@@ -28,3 +28,18 @@ data/
 # Local test frontend — do not commit
 /test-frontend/
 
+# Model files (too large for Git - should not be committed)
+models/base/*.pt
+models/base/*.onnx
+models/base/*.pth
+models/base/*.weights
+
+# Trained models (company/project specific, shouldn't be in repo)
+models/*/
+!models/base/
+!models/base/README.md
+
+# Documentation files (markdown)
+*.md
+!README.md
+
