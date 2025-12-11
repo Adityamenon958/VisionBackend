@@ -11,7 +11,6 @@ const {
   getDatasetFolders,
   getDatasetFiles,
   getFileThumbnail,
-  listDatasets,
   updateDataset
 } = require('../controllers/datasetController');
 
@@ -77,13 +76,7 @@ const upload = multer({
   }
 });
 
-/**
- * GET /api/datasets
- * 
- * Returns list of all datasets with basic metadata
- * Query params: ?company=xxx&project=xxx&status=ready (all optional)
- */
-router.get('/', listDatasets);
+// Note: GET /api/datasets is handled in server.js directly
 
 /**
  * POST /api/dataset/upload
@@ -142,6 +135,7 @@ router.get('/:datasetId/files', getDatasetFiles);
  * GET /api/dataset/:datasetId/file/:fileId/thumbnail
  * 
  * Serves thumbnail image if available
+ * fileId can be storedName or file _id
  */
 router.get('/:datasetId/file/:fileId/thumbnail', getFileThumbnail);
 
