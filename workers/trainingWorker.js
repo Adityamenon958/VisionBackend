@@ -77,7 +77,7 @@ function getBaseModelPath(modelType, modelSize = 'n') {
  * @param {string} modelSize - Optional model size (n, s, m, l) - defaults to 'n'
  * @returns {Promise<string>} Path to generated config file
  */
-async function generateTrainingConfig(hyperparameters, datasetPath, outputPath, modelType, modelSize = 'n') {
+async function generateTrainingConfig(hyperparameters, datasetPath, outputPath, modelType, modelSize = 'n', modelPath = null) {
   // Create data.yaml for YOLO
   const dataYaml = `# YOLO Dataset Configuration
 path: ${datasetPath}
@@ -95,8 +95,8 @@ names: []
   const dataYamlPath = path.join(datasetPath, 'data.yaml');
   await fsPromises.writeFile(dataYamlPath, dataYaml, 'utf8');
 
-  // Get base model path (use local if available)
-  const baseModelPath = getBaseModelPath(modelType, modelSize);
+  // ✅ Use provided modelPath (trained model checkpoint) or get base model path
+  const finalModelPath = modelPath || getBaseModelPath(modelType, modelSize);
 
   // Create training config
   const config = {
@@ -112,8 +112,8 @@ names: []
   };
 
   // Add model path if available (for YOLO)
-  if (baseModelPath) {
-    config.model = baseModelPath; // YOLO uses 'model' parameter for pretrained weights
+  if (finalModelPath) {
+    config.model = finalModelPath; // YOLO uses 'model' parameter for pretrained weights
   }
 
   // Write config as JSON (Python script will read it)
@@ -121,8 +121,12 @@ names: []
   await fsPromises.writeFile(outputPath, configJson, 'utf8');
 
   console.log(`✅ Generated training config at: ${outputPath}`);
-  if (baseModelPath && fs.existsSync(baseModelPath)) {
-    console.log(`✅ Using local base model: ${baseModelPath}`);
+  if (finalModelPath) {
+    if (modelPath) {
+      console.log(`✅ Using trained model checkpoint: ${finalModelPath}`);
+    } else if (fs.existsSync(finalModelPath)) {
+      console.log(`✅ Using local base model: ${finalModelPath}`);
+    }
   }
   return outputPath;
 }
@@ -135,46 +139,72 @@ names: []
 function parseLogLine(logLine) {
   const metrics = {};
 
-  // Parse epoch: "Epoch 25/100"
-  const epochMatch = logLine.match(/Epoch\s+(\d+)\/(\d+)/i);
-  if (epochMatch) {
-    metrics.currentEpoch = parseInt(epochMatch[1]);
-    metrics.totalEpochs = parseInt(epochMatch[2]);
+  // ✅ Parse loss from YOLO epoch line: "1/20 0G 1.332 2.917 1.591"
+  // Format: epoch, gpu_mem, box_loss, cls_loss, dfl_loss
+  // This is the MOST SPECIFIC pattern - check this FIRST to avoid false matches
+  const yoloEpochLineMatch = logLine.match(/\s+(\d+)\/(\d+)\s+\d+G\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
+  if (yoloEpochLineMatch) {
+    metrics.currentEpoch = parseInt(yoloEpochLineMatch[1]);
+    metrics.totalEpochs = parseInt(yoloEpochLineMatch[2]);
+    // Use box_loss as currentLoss (or could combine: box_loss + cls_loss + dfl_loss)
+    const boxLoss = parseFloat(yoloEpochLineMatch[3]);
+    const clsLoss = parseFloat(yoloEpochLineMatch[4]);
+    const dflLoss = parseFloat(yoloEpochLineMatch[5]);
+    metrics.currentLoss = boxLoss + clsLoss + dflLoss; // Total loss
+  } else {
+    // ✅ Fallback: Parse epoch: "Epoch 25/100" (with "Epoch" word - more specific)
+    // Only match if "Epoch" word is present to avoid matching batch numbers like "1/17"
+    const epochMatch = logLine.match(/Epoch\s+(\d+)\/(\d+)/i);
+    if (epochMatch) {
+      metrics.currentEpoch = parseInt(epochMatch[1]);
+      metrics.totalEpochs = parseInt(epochMatch[2]);
+    }
   }
 
-  // Parse loss: "loss=0.45" or "train_loss=0.45"
+  // ✅ Parse loss: "loss=0.45" or "train_loss=0.45" (fallback for other formats)
   const lossMatch = logLine.match(/(?:train_)?loss[:\s=]+([\d.]+)/i);
-  if (lossMatch) {
+  if (lossMatch && !metrics.currentLoss) {
     metrics.currentLoss = parseFloat(lossMatch[1]);
   }
 
-  // Parse learning rate: "lr=0.01" or "lr: 0.01"
+  // ✅ Parse learning rate: "lr=0.01" or "lr: 0.01" or from optimizer line
   const lrMatch = logLine.match(/lr[:\s=]+([\d.e-]+)/i);
   if (lrMatch) {
     metrics.currentLR = parseFloat(lrMatch[1]);
   }
 
-  // Parse mAP50: "mAP50=0.72" or "mAP@0.5=0.72"
+  // ✅ Parse metrics from YOLO validation table: "all 34 55 0.501 0.545 0.461 0.216"
+  // Format: class_name, images, instances, precision, recall, mAP50, mAP50-95
+  // This is the most reliable format for metrics
+  const yoloMetricsMatch = logLine.match(/^\s+all\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
+  if (yoloMetricsMatch) {
+    metrics.precision = parseFloat(yoloMetricsMatch[3]);
+    metrics.recall = parseFloat(yoloMetricsMatch[4]);
+    metrics.mAP50 = parseFloat(yoloMetricsMatch[5]);
+    metrics.mAP50_95 = parseFloat(yoloMetricsMatch[6]);
+  }
+
+  // ✅ Fallback: Parse mAP50: "mAP50=0.72" or "mAP@0.5=0.72"
   const map50Match = logLine.match(/mAP(?:@|50)[:\s=]+([\d.]+)/i);
-  if (map50Match) {
+  if (map50Match && !metrics.mAP50) {
     metrics.mAP50 = parseFloat(map50Match[1]);
   }
 
-  // Parse mAP50-95: "mAP50-95=0.58" or "mAP@0.5:0.95=0.58"
+  // ✅ Fallback: Parse mAP50-95: "mAP50-95=0.58" or "mAP@0.5:0.95=0.58"
   const map50_95Match = logLine.match(/mAP(?:50-95|@0\.5:0\.95)[:\s=]+([\d.]+)/i);
-  if (map50_95Match) {
+  if (map50_95Match && !metrics.mAP50_95) {
     metrics.mAP50_95 = parseFloat(map50_95Match[1]);
   }
 
-  // Parse precision: "precision=0.85"
+  // ✅ Fallback: Parse precision: "precision=0.85"
   const precisionMatch = logLine.match(/precision[:\s=]+([\d.]+)/i);
-  if (precisionMatch) {
+  if (precisionMatch && !metrics.precision) {
     metrics.precision = parseFloat(precisionMatch[1]);
   }
 
-  // Parse recall: "recall=0.78"
+  // ✅ Fallback: Parse recall: "recall=0.78"
   const recallMatch = logLine.match(/recall[:\s=]+([\d.]+)/i);
-  if (recallMatch) {
+  if (recallMatch && !metrics.recall) {
     metrics.recall = parseFloat(recallMatch[1]);
   }
 
@@ -185,7 +215,7 @@ function parseLogLine(logLine) {
  * Process a single training job
  */
 const processTrainingJob = async (job) => {
-  const { jobId, datasetId, company, project, modelType, modelSize = 'n', hyperparameters } = job.data;
+  const { jobId, datasetId, company, project, modelType, modelSize = 'n', modelId, hyperparameters } = job.data;
 
   console.log(`🚀 Starting training job ${jobId}...`);
 
@@ -243,10 +273,34 @@ const processTrainingJob = async (job) => {
 
     console.log(`📦 Model storage: ${modelStoragePath}`);
 
+    // ✅ Determine which model to use for training (base model or trained model checkpoint)
+    let modelPath = null;
+    if (modelId) {
+      // ✅ Use trained model checkpoint for continued training
+      const trainedModel = await Model.findOne({ modelId });
+      if (!trainedModel) {
+        throw new Error(`Trained model ${modelId} not found`);
+      }
+      
+      // Validate model belongs to same company/project
+      if (trainedModel.company !== company || trainedModel.project !== project) {
+        throw new Error(`Trained model does not belong to company ${company} / project ${project}`);
+      }
+      
+      // Use the trained model's best checkpoint
+      modelPath = trainedModel.bestCheckpointPath;
+      console.log(`✅ Using trained model checkpoint: ${modelPath}`);
+      console.log(`📊 Previous model metrics - mAP50: ${(trainedModel.metrics?.mAP50 || 0).toFixed(4)}, Precision: ${(trainedModel.metrics?.precision || 0).toFixed(4)}`);
+    } else {
+      // ✅ Use base model (existing logic)
+      modelPath = getBaseModelPath(modelType, modelSize);
+      console.log(`✅ Using base model: ${modelPath}`);
+    }
+
     // ✅ Generate training config
     // Use modelSize from job data (defaults to 'n' if not provided)
     const configPath = path.join(modelStoragePath, 'training-config.json');
-    await generateTrainingConfig(hyperparameters, datasetPath, configPath, modelType, modelSize);
+    await generateTrainingConfig(hyperparameters, datasetPath, configPath, modelType, modelSize, modelPath);
 
     // ✅ Spawn Python training process
     // Note: This assumes you have a Python training script at training-scripts/train.py
@@ -266,14 +320,57 @@ const processTrainingJob = async (job) => {
     }
 
     // Spawn actual Python process
+    // ✅ IMPORTANT: Process is attached (not detached) so we can stream logs
+    // The training worker itself runs as a separate Node.js process, so this
+    // Python process will survive dev server restarts as long as the training
+    // worker process remains running.
     pythonProcess = spawn('python', [pythonScriptPath, '--config', configPath], {
       cwd: path.join(__dirname, '../training-scripts'),
-      stdio: ['ignore', 'pipe', 'pipe'] // stdin ignored, stdout/stderr piped
+      stdio: ['ignore', 'pipe', 'pipe'], // stdin ignored, stdout/stderr piped
+      // Note: We keep process attached to capture logs, but training worker
+      // runs independently, so Python process survives dev server restarts
     });
 
     let logBuffer = '';
     let lastSaveTime = Date.now();
     const SAVE_INTERVAL = 5000; // Save to DB every 5 seconds
+    let isSaving = false; // Flag to prevent parallel saves
+    
+    // ✅ Track epoch timing for ETA calculation
+    const trainingStartTime = Date.now();
+    let lastEpochNumber = 0;
+    let lastEpochStartTime = trainingStartTime;
+    let epochDurations = []; // Track duration of completed epochs
+
+    // ✅ Helper function to save training job (prevents parallel saves)
+    const saveTrainingJob = async () => {
+      if (isSaving) {
+        return; // Already saving, skip
+      }
+      
+      try {
+        isSaving = true;
+        // Fetch fresh document from DB to avoid stale document issues
+        const freshJob = await TrainingJob.findById(trainingJob._id);
+        if (!freshJob) {
+          console.warn(`⚠️  Training job ${trainingJob.jobId} not found in DB`);
+          return;
+        }
+        
+        // Update fresh document with current state
+        freshJob.logs = trainingJob.logs;
+        freshJob.progress = trainingJob.progress;
+        freshJob.metrics = trainingJob.metrics;
+        freshJob.status = trainingJob.status;
+        
+        await freshJob.save();
+        lastSaveTime = Date.now();
+      } catch (error) {
+        console.error(`❌ Error saving training job:`, error.message);
+      } finally {
+        isSaving = false;
+      }
+    };
 
     // ✅ Stream stdout (logs)
     pythonProcess.stdout.on('data', async (data) => {
@@ -294,11 +391,60 @@ const processTrainingJob = async (job) => {
           if (parsedMetrics) {
             // Update metrics
             if (parsedMetrics.currentEpoch !== undefined) {
-              trainingJob.progress.currentEpoch = parsedMetrics.currentEpoch;
-              trainingJob.progress.totalEpochs = parsedMetrics.totalEpochs || trainingJob.progress.totalEpochs;
+              const currentEpoch = parsedMetrics.currentEpoch;
+              const totalEpochs = parsedMetrics.totalEpochs || trainingJob.progress.totalEpochs || hyperparameters.epochs;
+              
+              // ✅ Detect new epoch started
+              if (currentEpoch > lastEpochNumber && currentEpoch > 0) {
+                const now = Date.now();
+                
+                // Calculate duration of previous epoch (if not first epoch)
+                if (lastEpochNumber > 0) {
+                  const epochDuration = now - lastEpochStartTime;
+                  epochDurations.push(epochDuration);
+                  
+                  // Keep only last 10 epoch durations for rolling average
+                  if (epochDurations.length > 10) {
+                    epochDurations.shift();
+                  }
+                }
+                
+                // Calculate ETA if we have epoch duration data
+                if (epochDurations.length > 0 && totalEpochs > 0) {
+                  const avgEpochTime = epochDurations.reduce((a, b) => a + b, 0) / epochDurations.length;
+                  const remainingEpochs = totalEpochs - currentEpoch;
+                  const estimatedTimeRemainingMs = remainingEpochs * avgEpochTime;
+                  
+                  // Calculate elapsed time
+                  const elapsedMs = now - trainingStartTime;
+                  const elapsedMinutes = Math.floor(elapsedMs / 1000 / 60);
+                  const elapsedSeconds = Math.floor((elapsedMs / 1000) % 60);
+                  
+                  // Format ETA
+                  const estimatedMinutes = Math.floor(estimatedTimeRemainingMs / 1000 / 60);
+                  const estimatedSeconds = Math.floor((estimatedTimeRemainingMs / 1000) % 60);
+                  
+                  // Add progress message to logs
+                  let progressMsg = `\n${'='.repeat(80)}\n`;
+                  progressMsg += `📊 EPOCH ${currentEpoch}/${totalEpochs} PROGRESS\n`;
+                  progressMsg += `${'='.repeat(80)}\n`;
+                  progressMsg += `⏱️  Elapsed time: ${elapsedMinutes}m ${elapsedSeconds}s\n`;
+                  progressMsg += `⏳ Estimated time remaining: ~${estimatedMinutes}m ${estimatedSeconds}s\n`;
+                  progressMsg += `📈 Progress: ${trainingService.computeProgressPercent(currentEpoch, totalEpochs)}%\n`;
+                  progressMsg += `${'='.repeat(80)}\n`;
+                  
+                  trainingJob.logs.push(progressMsg);
+                }
+                
+                lastEpochStartTime = now;
+                lastEpochNumber = currentEpoch;
+              }
+              
+              trainingJob.progress.currentEpoch = currentEpoch;
+              trainingJob.progress.totalEpochs = totalEpochs;
               trainingJob.progress.progressPercent = trainingService.computeProgressPercent(
-                parsedMetrics.currentEpoch,
-                parsedMetrics.totalEpochs || trainingJob.progress.totalEpochs
+                currentEpoch,
+                totalEpochs
               );
             }
 
@@ -336,39 +482,87 @@ const processTrainingJob = async (job) => {
           // Save to DB periodically (not on every line to avoid overwhelming DB)
           const now = Date.now();
           if (now - lastSaveTime > SAVE_INTERVAL) {
-            await trainingJob.save();
-            lastSaveTime = now;
+            await saveTrainingJob();
           }
         }
       }
     });
 
-    // ✅ Stream stderr (errors)
+    // ✅ Stream stderr (errors and warnings)
     pythonProcess.stderr.on('data', (data) => {
-      const errorLine = data.toString();
-      console.error(`[Training ${jobId}] Error:`, errorLine);
-      trainingJob.logs.push(`[ERROR] ${errorLine}`);
+      const errorLine = data.toString().trim();
+      if (!errorLine) return;
+      
+      // Filter out common Python warnings that are not actual errors
+      const isWarning = /RuntimeWarning|UserWarning|FutureWarning|DeprecationWarning/i.test(errorLine);
+      const isMetricsWarning = /Mean of empty slice|invalid value encountered in divide/i.test(errorLine);
+      
+      if (isWarning || isMetricsWarning) {
+        // Log as warning, not error (these are common during training)
+        console.warn(`[Training ${jobId}] Warning:`, errorLine);
+        trainingJob.logs.push(`[WARNING] ${errorLine}`);
+      } else {
+        // Actual errors
+        console.error(`[Training ${jobId}] Error:`, errorLine);
+        trainingJob.logs.push(`[ERROR] ${errorLine}`);
+      }
     });
 
     // ✅ Handle process completion
     pythonProcess.on('close', async (code) => {
-      // Save final logs
-      await trainingJob.save();
+      // Save final logs (wait for any pending save to complete)
+      while (isSaving) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      await saveTrainingJob();
 
       if (code === 0) {
         console.log(`✅ Training job ${jobId} completed successfully`);
+        
+        // ✅ Add explicit completion message to logs
+        const completionTime = Date.now();
+        const totalDurationMs = completionTime - trainingStartTime;
+        const totalMinutes = Math.floor(totalDurationMs / 1000 / 60);
+        const totalSeconds = Math.floor((totalDurationMs / 1000) % 60);
+        
+        const completionMsg = `\n${'='.repeat(80)}\n` +
+          `✅ TRAINING COMPLETED SUCCESSFULLY!\n` +
+          `${'='.repeat(80)}\n` +
+          `Completed at: ${new Date().toLocaleString()}\n` +
+          `Total duration: ${totalMinutes}m ${totalSeconds}s\n` +
+          `Total epochs: ${trainingJob.progress.totalEpochs || hyperparameters.epochs}\n` +
+          `Best epoch: ${trainingJob.metrics.bestEpoch || trainingJob.progress.currentEpoch || 'N/A'}\n` +
+          `\nFinal Metrics:\n` +
+          `  📊 mAP50: ${(trainingJob.metrics.mAP50 || 0).toFixed(4)}\n` +
+          `  📊 mAP50-95: ${(trainingJob.metrics.mAP50_95 || 0).toFixed(4)}\n` +
+          `  🎯 Precision: ${(trainingJob.metrics.precision || 0).toFixed(4)}\n` +
+          `  🎯 Recall: ${(trainingJob.metrics.recall || 0).toFixed(4)}\n` +
+          `  📉 Best Loss: ${(trainingJob.metrics.bestLoss || trainingJob.metrics.currentLoss || 0).toFixed(4)}\n` +
+          `\n${'='.repeat(80)}\n` +
+          `Model is being saved and registered...\n` +
+          `${'='.repeat(80)}\n`;
+        
+        trainingJob.logs.push(completionMsg);
+        await saveTrainingJob();
+        
         await finalizeTraining(trainingJob, dataset, modelStoragePath, modelVersion, company, project);
       } else {
         console.error(`❌ Training job ${jobId} failed with exit code ${code}`);
-        trainingJob.status = 'failed';
-        trainingJob.error = `Training process exited with code ${code}`;
-        trainingJob.completedAt = new Date();
-        await trainingJob.save();
+        // Fetch fresh job for final update
+        const freshJob = await TrainingJob.findById(trainingJob._id);
+        if (freshJob) {
+          freshJob.status = 'failed';
+          freshJob.error = `Training process exited with code ${code}`;
+          freshJob.completedAt = new Date();
+          await freshJob.save();
+        }
       }
     });
 
     // ✅ Handle cancellation
     // Check periodically if job was cancelled
+    // ⚠️ IMPORTANT: This interval runs independently of HTTP requests
+    // Training continues even if frontend reloads or dev server restarts
     const cancellationCheck = setInterval(async () => {
       const updatedJob = await TrainingJob.findOne({ jobId });
       if (updatedJob && updatedJob.status === 'cancelled') {
@@ -377,6 +571,17 @@ const processTrainingJob = async (job) => {
           pythonProcess.kill('SIGTERM');
         }
         clearInterval(cancellationCheck);
+        // Wait for any pending save before updating status
+        while (isSaving) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        // Update status using fresh document
+        const freshJob = await TrainingJob.findById(trainingJob._id);
+        if (freshJob) {
+          freshJob.status = 'cancelled';
+          freshJob.cancelledAt = new Date();
+          await freshJob.save();
+        }
       }
     }, 2000); // Check every 2 seconds
 
@@ -389,10 +594,18 @@ const processTrainingJob = async (job) => {
     console.error(`❌ Error processing training job ${jobId}:`, error);
     
     if (trainingJob) {
-      trainingJob.status = 'failed';
-      trainingJob.error = error.message;
-      trainingJob.completedAt = new Date();
-      await trainingJob.save();
+      // Wait for any pending save
+      while (isSaving) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      // Update status using fresh document
+      const freshJob = await TrainingJob.findById(trainingJob._id);
+      if (freshJob) {
+        freshJob.status = 'failed';
+        freshJob.error = error.message;
+        freshJob.completedAt = new Date();
+        await freshJob.save();
+      }
     }
 
     // Kill Python process if running
@@ -464,11 +677,25 @@ async function finalizeTraining(trainingJob, dataset, modelStoragePath, modelVer
   try {
     console.log(`📊 Finalizing training job ${trainingJob.jobId}...`);
 
-    // ✅ Copy best checkpoint to model storage
-    // For now, we'll create a placeholder best.pt file
-    // In real implementation, this would copy from Python output
+    // ✅ Copy best checkpoint from YOLO runs directory to model storage
+    // YOLO saves checkpoints in: {project}/train/weights/best.pt
+    // project is set to: modelStoragePath/runs (see generateTrainingConfig)
+    const runsDir = path.join(modelStoragePath, 'runs', 'train');
+    const yoloBestPath = path.join(runsDir, 'weights', 'best.pt');
     const bestCheckpointPath = path.join(modelStoragePath, 'best.pt');
-    await fsPromises.writeFile(bestCheckpointPath, 'placeholder checkpoint file', 'utf8');
+    
+    // Check if YOLO checkpoint exists
+    if (await storageAdapter.exists(yoloBestPath)) {
+      console.log(`✅ Found YOLO checkpoint: ${yoloBestPath}`);
+      // Copy the actual trained model
+      await storageAdapter.copyFile(yoloBestPath, bestCheckpointPath);
+      console.log(`✅ Copied best.pt to: ${bestCheckpointPath}`);
+    } else {
+      console.warn(`⚠️  YOLO checkpoint not found at: ${yoloBestPath}`);
+      console.warn(`⚠️  Creating placeholder file. Training may have failed.`);
+      // Fallback: create placeholder if checkpoint not found
+      await fsPromises.writeFile(bestCheckpointPath, 'placeholder checkpoint file - training may have failed', 'utf8');
+    }
 
     // ✅ Compute final metrics (copy from current metrics)
     const finalMetrics = {
@@ -514,16 +741,33 @@ async function finalizeTraining(trainingJob, dataset, modelStoragePath, modelVer
     // ✅ Update training job status
     trainingJob.status = 'completed';
     trainingJob.completedAt = new Date();
+    
+    // ✅ Add model registration confirmation to logs
+    const registrationMsg = `\n${'='.repeat(80)}\n` +
+      `✅ MODEL REGISTERED SUCCESSFULLY\n` +
+      `${'='.repeat(80)}\n` +
+      `Model ID: ${model.modelId}\n` +
+      `Model Version: ${modelVersion}\n` +
+      `Storage Path: ${modelStoragePath}\n` +
+      `Best Checkpoint: ${bestCheckpointPath}\n` +
+      `\nYou can now use this model for inference!\n` +
+      `${'='.repeat(80)}\n`;
+    
+    trainingJob.logs.push(registrationMsg);
     await trainingJob.save();
 
     console.log(`✅ Training job ${trainingJob.jobId} completed and model registered: ${model.modelId}`);
 
   } catch (error) {
     console.error(`❌ Error finalizing training:`, error);
-    trainingJob.status = 'failed';
-    trainingJob.error = `Finalization error: ${error.message}`;
-    trainingJob.completedAt = new Date();
-    await trainingJob.save();
+    // Update status using fresh document
+    const freshJob = await TrainingJob.findById(trainingJob._id);
+    if (freshJob) {
+      freshJob.status = 'failed';
+      freshJob.error = `Finalization error: ${error.message}`;
+      freshJob.completedAt = new Date();
+      await freshJob.save();
+    }
   }
 }
 

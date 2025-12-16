@@ -177,14 +177,17 @@ const processPreprocessingJob = async (job) => {
           trainCount++;
 
           // ✅ Copy corresponding label file using manifest (if exists)
+          // ⚠️ CRITICAL: Label filename must match image filename (without extension) for YOLO
           const originalBaseName = path.parse(imageInfo.fileEntry.originalName).name;
           const labelInfo = labelManifest.get(originalBaseName);
           
           if (labelInfo) {
             const labelSrcPath = path.join(datasetRoot, labelInfo.storedPath); // e.g., datasetRoot/labels/good/storedName
-            const labelDestPath = path.join(trainLabelsPath, labelInfo.storedName); // Flattened: train/labels/storedName
+            // Use image's storedName (without extension) + .txt for label filename
+            const imageBaseName = path.parse(imageInfo.storedName).name; // Remove .jpg extension
+            const labelDestPath = path.join(trainLabelsPath, `${imageBaseName}.txt`); // Match image filename
             if (await storageAdapter.exists(labelSrcPath)) {
-              await storageAdapter.copyFile(labelSrcPath, labelDestPath); // Copy preserves original
+              await storageAdapter.copyFile(labelSrcPath, labelDestPath); // Copy and rename to match image
             }
           }
         } else {
@@ -222,14 +225,17 @@ const processPreprocessingJob = async (job) => {
           valCount++;
 
           // ✅ Copy corresponding label file using manifest (if exists)
+          // ⚠️ CRITICAL: Label filename must match image filename (without extension) for YOLO
           const originalBaseName = path.parse(imageInfo.fileEntry.originalName).name;
           const labelInfo = labelManifest.get(originalBaseName);
           
           if (labelInfo) {
             const labelSrcPath = path.join(datasetRoot, labelInfo.storedPath); // e.g., datasetRoot/labels/good/storedName
-            const labelDestPath = path.join(valLabelsPath, labelInfo.storedName); // Flattened: val/labels/storedName
+            // Use image's storedName (without extension) + .txt for label filename
+            const imageBaseName = path.parse(imageInfo.storedName).name; // Remove .jpg extension
+            const labelDestPath = path.join(valLabelsPath, `${imageBaseName}.txt`); // Match image filename
             if (await storageAdapter.exists(labelSrcPath)) {
-              await storageAdapter.copyFile(labelSrcPath, labelDestPath); // Copy preserves original
+              await storageAdapter.copyFile(labelSrcPath, labelDestPath); // Copy and rename to match image
             }
           }
         } else {

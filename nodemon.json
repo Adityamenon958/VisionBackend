@@ -4,7 +4,6 @@
     "routes",
     "controllers",
     "models",
-    "workers",
     "queue",
     "services"
   ],
@@ -16,6 +15,8 @@
     "uploads/**",
     "datasets",
     "datasets/**",
+    "workers",
+    "workers/**",
     "node_modules",
     ".git",
     "*.log"

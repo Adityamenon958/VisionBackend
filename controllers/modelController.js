@@ -40,19 +40,30 @@ const listModels = async (req, res) => {
     // ✅ Find all models for company/project
     const models = await Model.find({ company, project })
       .sort({ createdAt: -1 }) // Newest first
-      .select('modelId modelVersion modelType status metrics createdAt')
+      .select('modelId modelVersion modelType status metrics insights createdAt')
       .lean();
 
-    // ✅ Format response
+    // ✅ Format response with all metrics and insights
     const formattedModels = models.map(model => ({
       modelId: model.modelId,
       modelVersion: model.modelVersion,
       modelType: model.modelType,
       status: model.status || 'completed',
-      metrics: {
-        mAP50: model.metrics?.mAP50,
-        precision: model.metrics?.precision,
-        recall: model.metrics?.recall
+      metrics: model.metrics || {
+        bestEpoch: null,
+        bestLoss: null,
+        precision: null,
+        recall: null,
+        mAP50: null,
+        mAP50_95: null,
+        perLabelStats: []
+      },
+      insights: model.insights || {
+        bestAccuracy: null,
+        bestmAP: null,
+        weakestLabels: [],
+        classImbalanceWarnings: [],
+        recommendations: []
       },
       createdAt: model.createdAt
     }));

@@ -84,7 +84,23 @@ You should see:
 ✅ Server running on http://localhost:3000
 ```
 
-### Step 5: Download Base YOLO Models (Optional but Recommended)
+### Step 5: Install Python Dependencies (Required for Training)
+
+**For actual YOLO training**, install Python dependencies:
+
+```bash
+cd training-scripts
+pip install -r requirements.txt
+```
+
+Or install manually:
+```bash
+pip install ultralytics torch torchvision
+```
+
+**Note:** The training worker will use simulation mode if Python dependencies are not installed.
+
+### Step 6: Download Base YOLO Models (Optional but Recommended)
 
 **For faster training starts**, download base YOLO models locally:
 
@@ -92,7 +108,7 @@ You should see:
 npm run download-models
 ```
 
-This downloads commonly used YOLO models (yolov8n.pt, yolov8s.pt, yolov8m.pt, yolov8l.pt) to `models/base/` directory.
+This downloads YOLOv11s model to `models/base/` directory.
 
 **Benefits:**
 - ✅ Faster training starts (no download delay)
@@ -115,7 +131,14 @@ You should see:
 ✅ Preprocessing worker started. Waiting for jobs...
 ```
 
-### Step 7: Start the Training Worker (Optional)
+### Step 7: Start the Training Worker (Required for Training)
+
+**⚠️ IMPORTANT:** The training worker must run as a **separate process** from the dev server. This ensures training continues even if:
+- The frontend page reloads
+- The dev server restarts (via nodemon)
+- HTTP connections close
+
+The training worker is **independent** and processes jobs from the queue.
 
 **For training functionality**, open another terminal and run:
 

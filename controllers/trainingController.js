@@ -1,5 +1,6 @@
 const TrainingJob = require('../models/TrainingJob');
 const Dataset = require('../models/Dataset');
+const Model = require('../models/Model');
 const { trainingQueue } = require('../queue');
 const trainingService = require('../services/trainingService');
 const fs = require('fs');
@@ -20,26 +21,56 @@ const path = require('path');
 /**
  * GET /api/train/base-models
  * 
- * List available base YOLO models in models/base/ directory
+ * List available base YOLO models and trained models for a project
+ * 
+ * Query params:
+ * - company (optional) - Filter trained models by company
+ * - project (optional) - Filter trained models by project
+ * 
+ * Returns both base models (from models/base/) and trained models (from MongoDB)
  */
 const getAvailableBaseModels = async (req, res) => {
   try {
     const baseModelsDir = path.join(process.cwd(), 'models', 'base');
     
-    // Check if directory exists
-    if (!fs.existsSync(baseModelsDir)) {
-      return res.status(200).json({
-        models: [],
-        message: 'Base models directory does not exist. Run: npm run download-models'
-      });
+    // ✅ Get trained models from MongoDB (if company and project provided)
+    const trainedModels = [];
+    if (req.query.company && req.query.project) {
+      const models = await Model.find({ company: req.query.company, project: req.query.project })
+        .sort({ createdAt: -1 }) // Newest first
+        .select('modelId modelVersion modelType metrics createdAt')
+        .lean();
+
+      trainedModels.push(...models.map(model => {
+        // Format name with metrics: "YOLO - v1 (mAP: 83%)"
+        const mAP50 = model.metrics?.mAP50 || 0;
+        const mAP50Percent = (mAP50 * 100).toFixed(0);
+        const name = `${model.modelType} - ${model.modelVersion} (mAP: ${mAP50Percent}%)`;
+
+        return {
+          type: 'trained',
+          modelId: model.modelId,
+          modelVersion: model.modelVersion,
+          modelType: model.modelType,
+          name: name,
+          metrics: {
+            mAP50: model.metrics?.mAP50,
+            precision: model.metrics?.precision,
+            recall: model.metrics?.recall
+          },
+          createdAt: model.createdAt
+        };
+      }));
     }
 
-    // Read directory and filter .pt files
-    const files = fs.readdirSync(baseModelsDir);
-    const modelFiles = files.filter(file => file.endsWith('.pt'));
+    // Read directory and filter .pt files (if base models directory exists)
+    const models = [];
+    if (fs.existsSync(baseModelsDir)) {
+      const files = fs.readdirSync(baseModelsDir);
+      const modelFiles = files.filter(file => file.endsWith('.pt'));
 
-    // Map to model info
-    const models = modelFiles.map(file => {
+      // Map to model info
+      const baseModelsList = modelFiles.map(file => {
       const filePath = path.join(baseModelsDir, file);
       const stats = fs.statSync(filePath);
       const sizeMB = (stats.size / (1024 * 1024)).toFixed(2);
@@ -60,6 +91,7 @@ const getAvailableBaseModels = async (req, res) => {
       };
 
       return {
+        type: 'base',
         filename: file,
         size: size,
         version: version,
@@ -67,15 +99,18 @@ const getAvailableBaseModels = async (req, res) => {
         sizeMB: parseFloat(sizeMB),
         path: filePath
       };
-    }).filter(model => model.size !== null); // Only include valid YOLO models
+      }).filter(model => model.size !== null); // Only include valid YOLO models
 
-    // Sort by size (n, s, m, l, x)
-    const sizeOrder = { 'n': 1, 's': 2, 'm': 3, 'l': 4, 'x': 5 };
-    models.sort((a, b) => (sizeOrder[a.size] || 99) - (sizeOrder[b.size] || 99));
+      // Sort by size (n, s, m, l, x)
+      const sizeOrder = { 'n': 1, 's': 2, 'm': 3, 'l': 4, 'x': 5 };
+      baseModelsList.sort((a, b) => (sizeOrder[a.size] || 99) - (sizeOrder[b.size] || 99));
+      models.push(...baseModelsList);
+    }
 
     return res.status(200).json({
-      models: models,
-      total: models.length
+      baseModels: models,
+      trainedModels: trainedModels,
+      total: models.length + trainedModels.length
     });
 
   } catch (error) {
@@ -149,7 +184,7 @@ const getDefaultHyperparameters = async (req, res) => {
  */
 const startTraining = async (req, res) => {
   try {
-    const { datasetId, modelType, modelSize, hyperparameters } = req.body;
+    const { datasetId, modelId, modelType, modelSize, hyperparameters } = req.body;
 
     // Validate required fields
     if (!datasetId) {
@@ -158,26 +193,68 @@ const startTraining = async (req, res) => {
       });
     }
 
-    if (!modelType) {
-      return res.status(400).json({
-        error: 'Missing required field: modelType'
-      });
-    }
-
-    // Validate modelType
-    if (!['YOLO', 'EfficientNet', 'Custom'].includes(modelType)) {
-      return res.status(400).json({
-        error: 'Invalid modelType. Must be one of: YOLO, EfficientNet, Custom'
-      });
-    }
-
-    // Validate modelSize for YOLO (optional, defaults to 'n')
+    // ✅ If modelId is provided, validate and use trained model
+    let trainedModel = null;
+    let finalModelType = modelType;
     let finalModelSize = modelSize || 'n';
-    if (modelType === 'YOLO' && modelSize) {
-      if (!['n', 's', 'm', 'l', 'x'].includes(modelSize)) {
-        return res.status(400).json({
-          error: 'Invalid modelSize. Must be one of: n (nano), s (small), m (medium), l (large), x (extra large)'
+
+    if (modelId) {
+      // Fetch trained model from database
+      trainedModel = await Model.findOne({ modelId });
+      
+      if (!trainedModel) {
+        return res.status(404).json({
+          error: 'Trained model not found',
+          modelId: modelId
         });
+      }
+
+      // ✅ Validate that modelType matches (if provided)
+      if (modelType && modelType !== trainedModel.modelType) {
+        return res.status(400).json({
+          error: `Model type mismatch. Trained model is ${trainedModel.modelType}, but ${modelType} was provided.`
+        });
+      }
+
+      // Use trained model's type and size
+      finalModelType = trainedModel.modelType;
+      // Note: trained models don't have modelSize stored, so we'll use the one from request or default
+      
+      // Validate that model belongs to same company/project as dataset
+      const dataset = await Dataset.findById(datasetId);
+      if (!dataset) {
+        return res.status(404).json({
+          error: 'Dataset not found'
+        });
+      }
+
+      if (trainedModel.company !== dataset.company || trainedModel.project !== dataset.project) {
+        return res.status(400).json({
+          error: 'Trained model does not belong to the same company/project as the dataset'
+        });
+      }
+    } else {
+      // ✅ If no modelId, validate modelType and modelSize (base model)
+      if (!modelType) {
+        return res.status(400).json({
+          error: 'Missing required field: modelType (or provide modelId for trained model)'
+        });
+      }
+
+      // Validate modelType
+      if (!['YOLO', 'EfficientNet', 'Custom'].includes(modelType)) {
+        return res.status(400).json({
+          error: 'Invalid modelType. Must be one of: YOLO, EfficientNet, Custom'
+        });
+      }
+
+      // Validate modelSize for YOLO (optional, defaults to 'n')
+      if (modelType === 'YOLO' && modelSize) {
+        if (!['n', 's', 'm', 'l', 'x'].includes(modelSize)) {
+          return res.status(400).json({
+            error: 'Invalid modelSize. Must be one of: n (nano), s (small), m (medium), l (large), x (extra large)'
+          });
+        }
       }
     }
 
@@ -191,8 +268,8 @@ const startTraining = async (req, res) => {
 
     const dataset = validation.dataset;
 
-    // Merge hyperparameters with defaults
-    const mergedHyperparameters = trainingService.mergeHyperparameters(modelType, hyperparameters);
+    // Merge hyperparameters with defaults (use finalModelType which may come from trained model)
+    const mergedHyperparameters = trainingService.mergeHyperparameters(finalModelType, hyperparameters);
 
     // Validate hyperparameters
     const hyperValidation = trainingService.validateHyperparameters(mergedHyperparameters);
@@ -211,7 +288,7 @@ const startTraining = async (req, res) => {
       datasetId: dataset._id,
       company: dataset.company,
       project: dataset.project,
-      modelType,
+      modelType: finalModelType,
       modelSize: finalModelSize,
       status: 'queued',
       hyperparameters: mergedHyperparameters
@@ -219,14 +296,15 @@ const startTraining = async (req, res) => {
 
     await trainingJob.save();
 
-    // Enqueue training job
+    // Enqueue training job (include modelId if using trained model)
     await trainingQueue.add({
       jobId,
       datasetId: dataset._id.toString(),
       company: dataset.company,
       project: dataset.project,
-      modelType,
+      modelType: finalModelType,
       modelSize: finalModelSize,
+      modelId: modelId || null, // ✅ Pass modelId if provided (for trained model)
       hyperparameters: mergedHyperparameters
     }, {
       attempts: 1,
@@ -271,15 +349,44 @@ const getTrainingStatus = async (req, res) => {
       });
     }
 
-    return res.status(200).json({
+    // ✅ Build base response with training job data
+    const response = {
       jobId: trainingJob.jobId,
       status: trainingJob.status,
       progress: trainingJob.progress,
       metrics: trainingJob.metrics,
+      finalMetrics: trainingJob.finalMetrics || null, // ✅ Include final metrics
+      hyperparameters: trainingJob.hyperparameters, // ✅ Include hyperparameters used
+      modelType: trainingJob.modelType,
+      modelSize: trainingJob.modelSize,
       startedAt: trainingJob.startedAt,
       completedAt: trainingJob.completedAt,
-      error: trainingJob.error
-    });
+      cancelledAt: trainingJob.cancelledAt,
+      error: trainingJob.error,
+      model: null // ✅ Will be populated if model is registered
+    };
+
+    // ✅ If training is completed, check if model was registered
+    if (trainingJob.status === 'completed') {
+      const registeredModel = await Model.findOne({ jobId: trainingJob._id })
+        .select('modelId modelVersion storagePath bestCheckpointPath downloadUrl metrics insights createdAt')
+        .lean();
+
+      if (registeredModel) {
+        response.model = {
+          modelId: registeredModel.modelId,
+          modelVersion: registeredModel.modelVersion,
+          storagePath: registeredModel.storagePath,
+          bestCheckpointPath: registeredModel.bestCheckpointPath,
+          downloadUrl: registeredModel.downloadUrl,
+          metrics: registeredModel.metrics,
+          insights: registeredModel.insights,
+          registeredAt: registeredModel.createdAt
+        };
+      }
+    }
+
+    return res.status(200).json(response);
 
   } catch (error) {
     console.error('Error getting training status:', error);
