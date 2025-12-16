@@ -87,6 +87,7 @@ def update_data_yaml(data_yaml_path, dataset_path):
             f.write('\n'.join(updated_lines))
         
         print(f"Updated data.yaml: {num_classes} classes")
+        sys.stdout.flush()  # Ensure message appears immediately
         return num_classes, class_names
         
     except Exception as e:
@@ -125,13 +126,24 @@ def train_yolo(config):
         # Load model
         if model_path and os.path.exists(model_path):
             print(f"Loading base model from: {model_path}")
+            sys.stdout.flush()
             model = YOLO(model_path)
+            print("✅ Model loaded successfully")
+            sys.stdout.flush()
         else:
             # Use default YOLOv8n if no model specified
             print("Using default YOLOv8n model")
+            sys.stdout.flush()
             model = YOLO('yolov8n.pt')
+            print("✅ Model loaded successfully")
+            sys.stdout.flush()
         
         # Prepare training arguments
+        # ✅ Explicitly set device to use GPU if available, otherwise CPU
+        import torch
+        device = '0' if torch.cuda.is_available() else 'cpu'
+        device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'
+        
         train_args = {
             'data': data_yaml,
             'epochs': epochs,
@@ -143,14 +155,35 @@ def train_yolo(config):
             'name': name,
             'exist_ok': exist_ok,
             'verbose': True,  # Enable verbose output for log parsing
+            'device': device,  # ✅ Explicitly set device (GPU if available)
         }
         
         # Start training
         print(f"Starting YOLO training...")
+        print(f"Device: {device_name} (device={device})")
         print(f"Config: epochs={epochs}, batch={batch}, imgsz={imgsz}, lr0={lr0}, workers={workers}")
         print(f"Dataset: {data_yaml}")
         print(f"Output: {project}/{name}")
         print("-" * 80)
+        
+        # ✅ Progress indicators for data loading phase
+        print("📦 Preparing dataset and data loaders...")
+        sys.stdout.flush()  # Ensure message appears immediately
+        
+        # Warn about large image sizes
+        if imgsz >= 1024:
+            print(f"⏳ Large image size ({imgsz}x{imgsz}) detected. Data loading and augmentation may take several minutes...")
+            print(f"💡 Tip: Consider using smaller image size (e.g., 640) for faster training on CPU")
+            sys.stdout.flush()
+        elif imgsz >= 640:
+            print(f"⏳ Medium image size ({imgsz}x{imgsz}) detected. Data loading may take 1-2 minutes...")
+            sys.stdout.flush()
+        
+        print("🔄 Creating data loaders and applying augmentations...")
+        sys.stdout.flush()
+        
+        print("🚀 Starting training (first epoch will begin shortly)...")
+        sys.stdout.flush()
         
         # Train the model
         results = model.train(**train_args)

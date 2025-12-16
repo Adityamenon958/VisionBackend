@@ -139,10 +139,10 @@ names: []
 function parseLogLine(logLine) {
   const metrics = {};
 
-  // ✅ Parse loss from YOLO epoch line: "1/20 0G 1.332 2.917 1.591"
-  // Format: epoch, gpu_mem, box_loss, cls_loss, dfl_loss
+  // ✅ Parse loss from YOLO epoch line: "1/20 0.438G 2.573 28.79 1.434"
+  // Format: epoch, gpu_mem (can be decimal like 0.438G), box_loss, cls_loss, dfl_loss
   // This is the MOST SPECIFIC pattern - check this FIRST to avoid false matches
-  const yoloEpochLineMatch = logLine.match(/\s+(\d+)\/(\d+)\s+\d+G\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
+  const yoloEpochLineMatch = logLine.match(/\s+(\d+)\/(\d+)\s+[\d.]+G\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
   if (yoloEpochLineMatch) {
     metrics.currentEpoch = parseInt(yoloEpochLineMatch[1]);
     metrics.totalEpochs = parseInt(yoloEpochLineMatch[2]);
@@ -324,9 +324,11 @@ const processTrainingJob = async (job) => {
     // The training worker itself runs as a separate Node.js process, so this
     // Python process will survive dev server restarts as long as the training
     // worker process remains running.
-    pythonProcess = spawn('python', [pythonScriptPath, '--config', configPath], {
+    // ✅ Use -u flag and PYTHONUNBUFFERED for real-time log streaming
+    pythonProcess = spawn('python', ['-u', pythonScriptPath, '--config', configPath], {
       cwd: path.join(__dirname, '../training-scripts'),
       stdio: ['ignore', 'pipe', 'pipe'], // stdin ignored, stdout/stderr piped
+      env: { ...process.env, PYTHONUNBUFFERED: '1' }, // ✅ Force unbuffered output
       // Note: We keep process attached to capture logs, but training worker
       // runs independently, so Python process survives dev server restarts
     });
