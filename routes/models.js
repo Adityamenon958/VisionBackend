@@ -6,7 +6,8 @@ const {
   getModelMetrics,
   getModelInsights,
   downloadModel,
-  listCheckpoints
+  listCheckpoints,
+  deleteModel
 } = require('../controllers/modelController');
 
 /**
@@ -19,6 +20,7 @@ const {
  * - Get model insights and recommendations
  * - Download model files
  * - List checkpoints
+ * - Delete models and their files
  */
 
 // GET /api/models - List all models (filtered by company/project)
@@ -39,5 +41,9 @@ router.get('/:modelId/download', downloadModel);
 // GET /api/models/:modelId/checkpoints - List all checkpoints
 router.get('/:modelId/checkpoints', listCheckpoints);
 
+// DELETE /api/models/:modelId - Delete model and its files
+router.delete('/:modelId', deleteModel);
+
 module.exports = router;
+
 

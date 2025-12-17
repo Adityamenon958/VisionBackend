@@ -391,12 +391,83 @@ const listCheckpoints = async (req, res) => {
   }
 };
 
+/**
+ * DELETE /api/models/:modelId
+ * 
+ * Delete trained model and its files (storage + MongoDB document)
+ */
+const deleteModel = async (req, res) => {
+  try {
+    const { modelId } = req.params;
+
+    if (!modelId) {
+      return res.status(400).json({
+        error: 'Missing required parameter: modelId'
+      });
+    }
+
+    // ✅ Find model
+    const model = await Model.findOne({ modelId });
+
+    if (!model) {
+      return res.status(404).json({
+        error: 'Model not found',
+        modelId: modelId
+      });
+    }
+
+    // ✅ Delete storage folder from disk if it exists
+    // The storagePath contains the entire model directory with checkpoints, charts, etc.
+    if (model.storagePath && fs.existsSync(model.storagePath)) {
+      try {
+        // Use fs.rmSync with recursive option (Node.js 14+)
+        // This deletes the entire model directory including:
+        // - best.pt checkpoint file
+        // - chart data (loss_curve.json, precision_curve.json, etc.)
+        // - any other files in the model directory
+        fs.rmSync(model.storagePath, { recursive: true, force: true });
+        console.log(`✅ Deleted model storage folder: ${model.storagePath}`);
+      } catch (error) {
+        console.warn(`⚠️ Could not delete model storage folder: ${error.message}`);
+        // Continue with MongoDB deletion even if file deletion fails
+      }
+    }
+
+    // ✅ Delete chart data folder if it's separate from storagePath
+    if (model.chartDataPath && model.chartDataPath !== model.storagePath && fs.existsSync(model.chartDataPath)) {
+      try {
+        fs.rmSync(model.chartDataPath, { recursive: true, force: true });
+        console.log(`✅ Deleted chart data folder: ${model.chartDataPath}`);
+      } catch (error) {
+        console.warn(`⚠️ Could not delete chart data folder: ${error.message}`);
+        // Continue with MongoDB deletion even if file deletion fails
+      }
+    }
+
+    // ✅ Delete MongoDB document
+    await Model.deleteOne({ modelId });
+
+    return res.status(200).json({
+      modelId: modelId,
+      message: 'Model and files deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('Error deleting model:', error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+};
+
 module.exports = {
   listModels,
   getModel,
   getModelMetrics,
   getModelInsights,
   downloadModel,
-  listCheckpoints
+  listCheckpoints,
+  deleteModel
 };
 

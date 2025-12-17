@@ -27,6 +27,13 @@ const trainingQueue = new Bull('train-model', {
   }
 });
 
+// Inference queue for prediction/inference jobs
+const inferenceQueue = new Bull('inference', {
+  createClient: (type) => {
+    return createRedisClient();
+  }
+});
+
 // Separate monitor redis instance (not used by Bull)
 const monitorRedis = new Redis(redisUrl);
 
@@ -64,7 +71,21 @@ trainingQueue.on('stalled', (job) => {
   console.warn(`⚠️ Training job ${job.id} stalled`);
 });
 
+// Inference queue event logs
+inferenceQueue.on('completed', (job) => {
+  console.log(`✅ Inference job ${job.id} completed`);
+});
+
+inferenceQueue.on('failed', (job, err) => {
+  console.error(`❌ Inference job ${job.id} failed:`, err?.message || err);
+});
+
+inferenceQueue.on('stalled', (job) => {
+  console.warn(`⚠️ Inference job ${job.id} stalled`);
+});
+
 module.exports = {
   preprocessingQueue,
-  trainingQueue
+  trainingQueue,
+  inferenceQueue
 };

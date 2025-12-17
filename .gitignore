@@ -11,6 +11,7 @@ npm-debug.log*
 # Uploads and temporary files
 uploads/
 datasets/
+results/
 
 # OS files
 .DS_Store
@@ -38,6 +39,13 @@ models/base/*.weights
 models/*/
 !models/base/
 !models/base/README.md
+
+# Python cache files (from inference-scripts and training-scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
 
 # Documentation files (markdown)
 *.md

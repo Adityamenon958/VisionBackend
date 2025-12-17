@@ -193,6 +193,40 @@ class StorageAdapter {
   }
 
   /**
+   * Build storage path for inference results
+   * Format: /results/{company}/{project}/{modelId}/inference_{inferenceId}/
+   * @param {string} company - Company identifier
+   * @param {string} project - Project identifier
+   * @param {string} modelId - Model identifier (from Model model)
+   * @param {string} inferenceId - Inference job identifier
+   * @returns {string} Full path to results folder
+   */
+  buildResultsPath(company, project, modelId, inferenceId) {
+    const resultsBasePath = path.join(process.cwd(), 'results');
+    return path.join(resultsBasePath, company, project, modelId, `inference_${inferenceId}`);
+  }
+
+  /**
+   * Build path for annotated images subfolder within results
+   * Format: {resultsPath}/annotated/
+   * @param {string} resultsPath - Base results path (from buildResultsPath)
+   * @returns {string} Full path to annotated images folder
+   */
+  buildAnnotatedImagesPath(resultsPath) {
+    return path.join(resultsPath, 'annotated');
+  }
+
+  /**
+   * Build path for metadata JSON file within results
+   * Format: {resultsPath}/metadata.json
+   * @param {string} resultsPath - Base results path (from buildResultsPath)
+   * @returns {string} Full path to metadata JSON file
+   */
+  buildMetadataPath(resultsPath) {
+    return path.join(resultsPath, 'metadata.json');
+  }
+
+  /**
    * Copy a file from source to destination (preserves original)
    * 
    * This is used when we need to keep the original file intact

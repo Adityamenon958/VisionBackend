@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const datasetRoutes = require('./routes/datasets');
 const trainingRoutes = require('./routes/training');
 const modelRoutes = require('./routes/models');
+const inferenceRoutes = require('./routes/inference');
 
 /**
  * Main Server File
@@ -69,6 +70,10 @@ app.use('/api/train', trainingRoutes);
 // All routes in routes/models.js will be prefixed with /api/models
 app.use('/api/models', modelRoutes);
 
+// ✅ Register inference routes
+// All routes in routes/inference.js will be prefixed with /api/inference
+app.use('/api/inference', inferenceRoutes);
+
 // ✅ Register list datasets endpoint (plural) - separate route for clarity
 // GET /api/datasets - List all datasets
 const { listDatasets } = require('./controllers/datasetController');
@@ -110,6 +115,14 @@ const startServer = async () => {
       console.log(`📈 Training status: GET http://localhost:${PORT}/api/train/:jobId/status`);
       console.log(`🤖 Models list: GET http://localhost:${PORT}/api/models?company=X&project=Y`);
       console.log(`📦 Model details: GET http://localhost:${PORT}/api/models/:modelId`);
+      console.log(`🗑️  Model delete: DELETE http://localhost:${PORT}/api/models/:modelId`);
+      console.log(`📋 Inference list: GET http://localhost:${PORT}/api/inference?company=X&project=Y`);
+      console.log(`🔮 Inference start: POST http://localhost:${PORT}/api/inference/start`);
+      console.log(`📊 Inference status: GET http://localhost:${PORT}/api/inference/:inferenceId/status`);
+      console.log(`📋 Inference results: GET http://localhost:${PORT}/api/inference/:inferenceId/results`);
+      console.log(`🖼️  Inference images: GET http://localhost:${PORT}/api/inference/:inferenceId/image/:filename`);
+      console.log(`❌ Inference cancel: POST http://localhost:${PORT}/api/inference/:inferenceId/cancel`);
+      console.log(`🗑️  Inference delete: DELETE http://localhost:${PORT}/api/inference/:inferenceId`);
     });
 
   } catch (error) {
