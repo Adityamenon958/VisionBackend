@@ -34,13 +34,14 @@ const storageAdapter = require('../services/storageAdapter');
  * Process a single inference job
  */
 const processInferenceJob = async (job) => {
-  const { inferenceId, modelId, company, project, sourceType, datasetId, testFolderPath } = job.data;
+  const { inferenceId, modelId, company, project, sourceType, datasetId, testFolderPath, customFolderPath } = job.data;
 
   console.log(`🔮 Starting inference job ${inferenceId}...`);
 
   let inferenceJob = null;
   let pythonProcess = null;
   let isSaving = false; // Flag to prevent parallel saves
+  let sourceFolderPath = null; // Will be set based on sourceType
 
   try {
     // ✅ Load inference job from MongoDB
@@ -112,20 +113,33 @@ const processInferenceJob = async (job) => {
         throw new Error(`Test folder not found: ${testFolderPath}`);
       }
 
-      // ✅ Count images in test folder
-      const imageFiles = fs.readdirSync(testFolderPath)
+      sourceFolderPath = testFolderPath;
+    } else if (sourceType === 'custom_folder') {
+      // ✅ Validate custom folder exists
+      if (!customFolderPath || !fs.existsSync(customFolderPath)) {
+        throw new Error(`Custom folder not found: ${customFolderPath}`);
+      }
+
+      sourceFolderPath = customFolderPath;
+    } else {
+      throw new Error(`Unsupported source type: ${sourceType}`);
+    }
+
+    // ✅ Count images in source folder (works for both test_folder and custom_folder)
+    const imageFiles = fs.readdirSync(sourceFolderPath)
         .filter(file => /\.(jpg|jpeg|png)$/i.test(file));
 
       if (imageFiles.length === 0) {
-        throw new Error(`No images found in test folder: ${testFolderPath}`);
+      throw new Error(`No images found in folder: ${sourceFolderPath}`);
       }
 
       // ✅ Update total images count
       inferenceJob.progress.totalImages = imageFiles.length;
       await saveInferenceJob();
 
-      console.log(`📁 Test folder: ${testFolderPath}`);
+    console.log(`📁 Source folder: ${sourceFolderPath}`);
       console.log(`📊 Total images: ${imageFiles.length}`);
+    console.log(`🔍 Source type: ${sourceType}`);
 
       // ✅ Build results paths
       const resultsPath = storageAdapter.buildResultsPath(company, project, model.modelId, inferenceId);
@@ -156,7 +170,7 @@ const processInferenceJob = async (job) => {
       
       const config = {
         model: model.bestCheckpointPath,
-        source: testFolderPath,
+      source: sourceFolderPath,
         output: resultsPath,
         conf: confidenceThreshold
       };
@@ -268,6 +282,16 @@ const processInferenceJob = async (job) => {
           await saveInferenceJob();
           console.log(`✅ Inference job ${inferenceId} results saved`);
 
+          // ✅ Clean up custom folder after successful inference
+          if (sourceType === 'custom_folder' && customFolderPath && fs.existsSync(customFolderPath)) {
+            try {
+              fs.rmSync(customFolderPath, { recursive: true, force: true });
+              console.log(`🗑️ Cleaned up custom folder: ${customFolderPath}`);
+            } catch (cleanupError) {
+              console.warn(`⚠️ Failed to cleanup custom folder ${customFolderPath}: ${cleanupError.message}`);
+            }
+          }
+
         } else {
           console.error(`❌ Inference job ${inferenceId} failed with exit code ${code}`);
           // Fetch fresh job for final update
@@ -277,6 +301,16 @@ const processInferenceJob = async (job) => {
             freshJob.error = `Python process exited with code ${code}`;
             freshJob.completedAt = new Date();
             await freshJob.save();
+          }
+
+          // ✅ Clean up custom folder even on failure
+          if (sourceType === 'custom_folder' && customFolderPath && fs.existsSync(customFolderPath)) {
+            try {
+              fs.rmSync(customFolderPath, { recursive: true, force: true });
+              console.log(`🗑️ Cleaned up custom folder after failure: ${customFolderPath}`);
+            } catch (cleanupError) {
+              console.warn(`⚠️ Failed to cleanup custom folder ${customFolderPath}: ${cleanupError.message}`);
+            }
           }
         }
       });
@@ -289,6 +323,17 @@ const processInferenceJob = async (job) => {
           if (pythonProcess && !pythonProcess.killed) {
             pythonProcess.kill('SIGTERM');
           }
+          
+          // ✅ Clean up custom folder on cancellation
+          if (sourceType === 'custom_folder' && customFolderPath && fs.existsSync(customFolderPath)) {
+            try {
+              fs.rmSync(customFolderPath, { recursive: true, force: true });
+              console.log(`🗑️ Cleaned up custom folder after cancellation: ${customFolderPath}`);
+            } catch (cleanupError) {
+              console.warn(`⚠️ Failed to cleanup custom folder ${customFolderPath}: ${cleanupError.message}`);
+            }
+          }
+          
           clearInterval(cancellationCheck);
         }
       }, 2000); // Check every 2 seconds
@@ -321,6 +366,16 @@ const processInferenceJob = async (job) => {
         freshJob.error = error.message;
         freshJob.completedAt = new Date();
         await freshJob.save();
+      }
+    }
+
+    // ✅ Clean up custom folder on error
+    if (sourceType === 'custom_folder' && customFolderPath && fs.existsSync(customFolderPath)) {
+      try {
+        fs.rmSync(customFolderPath, { recursive: true, force: true });
+        console.log(`🗑️ Cleaned up custom folder after error: ${customFolderPath}`);
+      } catch (cleanupError) {
+        console.warn(`⚠️ Failed to cleanup custom folder ${customFolderPath}: ${cleanupError.message}`);
       }
     }
 

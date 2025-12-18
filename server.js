@@ -116,6 +116,8 @@ const startServer = async () => {
       console.log(`🤖 Models list: GET http://localhost:${PORT}/api/models?company=X&project=Y`);
       console.log(`📦 Model details: GET http://localhost:${PORT}/api/models/:modelId`);
       console.log(`🗑️  Model delete: DELETE http://localhost:${PORT}/api/models/:modelId`);
+      console.log(`📋 Dataset dependencies: GET http://localhost:${PORT}/api/dataset/:datasetId/dependencies`);
+      console.log(`🗑️  Dataset delete: DELETE http://localhost:${PORT}/api/dataset/:datasetId`);
       console.log(`📋 Inference list: GET http://localhost:${PORT}/api/inference?company=X&project=Y`);
       console.log(`🔮 Inference start: POST http://localhost:${PORT}/api/inference/start`);
       console.log(`📊 Inference status: GET http://localhost:${PORT}/api/inference/:inferenceId/status`);

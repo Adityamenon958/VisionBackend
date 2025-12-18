@@ -11,7 +11,9 @@ const {
   getDatasetFolders,
   getDatasetFiles,
   getFileThumbnail,
-  updateDataset
+  updateDataset,
+  getDatasetDependencies,
+  deleteDataset
 } = require('../controllers/datasetController');
 
 /**
@@ -140,6 +142,14 @@ router.get('/:datasetId/files', getDatasetFiles);
 router.get('/:datasetId/file/:fileId/thumbnail', getFileThumbnail);
 
 /**
+ * GET /api/dataset/:datasetId/dependencies
+ * 
+ * Get dependencies (training jobs, models, inference jobs) that use this dataset
+ * Used for showing confirmation dialog before deletion
+ */
+router.get('/:datasetId/dependencies', getDatasetDependencies);
+
+/**
  * PATCH /api/dataset/:datasetId
  * 
  * Updates dataset company and/or project name
@@ -153,6 +163,18 @@ router.get('/:datasetId/file/:fileId/thumbnail', getFileThumbnail);
  * ⚠️ CAUTION: This route must be BEFORE GET /:datasetId to avoid route conflicts
  */
 router.patch('/:datasetId', updateDataset);
+
+/**
+ * DELETE /api/dataset/:datasetId
+ * 
+ * Soft delete dataset: Delete files but keep MongoDB document
+ * References in models/inference jobs will remain but show "Dataset deleted" status
+ * 
+ * ⚠️ CAUTION: Cannot delete if:
+ * - Dataset is processing or queued
+ * - Dataset is already deleted
+ */
+router.delete('/:datasetId', deleteDataset);
 
 /**
  * GET /api/dataset/:datasetId

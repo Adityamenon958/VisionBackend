@@ -23,19 +23,48 @@ const { v4: uuidv4 } = require('uuid');
 /**
  * POST /api/inference/start
  * 
- * Start batch inference on test folder from a dataset
+ * Start batch inference on test folder from a dataset OR custom uploaded images
  * 
- * Body: { modelId, datasetId }
+ * For dataset-based inference:
+ *   Body (JSON): { modelId, datasetId, confidenceThreshold? }
+ * 
+ * For custom image upload:
+ *   Body (multipart/form-data): 
+ *     - modelId (text field, required)
+ *     - confidenceThreshold? (text field, optional)
+ *     - images (file field, multiple images allowed, required if no datasetId)
  */
 const startBatchInference = async (req, res) => {
   try {
-    const { modelId, datasetId, confidenceThreshold } = req.body;
+    // ✅ Extract fields - support both JSON and form-data
+    const modelId = req.body.modelId;
+    const datasetId = req.body.datasetId;
+    const confidenceThreshold = req.body.confidenceThreshold;
+    const uploadedImages = req.files?.images || [];
 
-    // ✅ Validate required fields
-    if (!modelId || !datasetId) {
+    // ✅ Determine inference type: dataset-based or custom upload
+    const isCustomUpload = uploadedImages.length > 0;
+    const isDatasetBased = !!datasetId;
+
+    // ✅ Validate that either datasetId OR images are provided (not both, not neither)
+    if (!modelId) {
+      return res.status(400).json({
+        error: 'Missing required field: modelId'
+      });
+    }
+
+    if (!isDatasetBased && !isCustomUpload) {
       return res.status(400).json({
         error: 'Missing required fields',
-        required: ['modelId', 'datasetId']
+        message: 'Either datasetId (for dataset-based inference) or images (for custom upload) must be provided',
+        required: ['modelId', 'datasetId OR images']
+      });
+    }
+
+    if (isDatasetBased && isCustomUpload) {
+      return res.status(400).json({
+        error: 'Conflicting parameters',
+        message: 'Cannot provide both datasetId and custom images. Use either dataset-based inference OR custom upload.'
       });
     }
 
@@ -79,6 +108,14 @@ const startBatchInference = async (req, res) => {
       });
     }
 
+    let sourceType;
+    let testFolderPath = null;
+    let customFolderPath = null;
+    let totalImages = 0;
+    let datasetIdForJob = null;
+
+    // ✅ Handle dataset-based inference
+    if (isDatasetBased) {
     // ✅ Validate dataset exists
     const dataset = await Dataset.findById(datasetId);
     if (!dataset) {
@@ -117,7 +154,7 @@ const startBatchInference = async (req, res) => {
     }
 
     // ✅ Get test folder path
-    const testFolderPath = path.join(
+      testFolderPath = path.join(
       storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version),
       'images',
       'test'
@@ -129,41 +166,93 @@ const startBatchInference = async (req, res) => {
         error: 'Test folder not found',
         path: testFolderPath
       });
+      }
+
+      sourceType = 'test_folder';
+      totalImages = dataset.testCount;
+      datasetIdForJob = dataset._id.toString();
+    }
+
+    // ✅ Handle custom image upload
+    if (isCustomUpload) {
+      // ✅ Validate at least one image was uploaded
+      if (uploadedImages.length === 0) {
+        return res.status(400).json({
+          error: 'No images uploaded',
+          message: 'At least one image file is required for custom inference'
+        });
+      }
+
+      // ✅ Create temporary folder for uploaded images
+      const tempInferenceDir = path.join(process.cwd(), 'uploads', 'inference-temp', `inf_${Date.now()}_${uuidv4().substring(0, 8)}`);
+      await storageAdapter.ensureDir(tempInferenceDir);
+
+      // ✅ Move uploaded images to temp folder
+      for (const file of uploadedImages) {
+        const destPath = path.join(tempInferenceDir, file.originalname);
+        try {
+          await fs.promises.rename(file.path, destPath);
+        } catch (error) {
+          // If rename fails (cross-device), copy instead
+          await fs.promises.copyFile(file.path, destPath);
+          await fs.promises.unlink(file.path); // Delete temp file
+        }
+      }
+
+      customFolderPath = tempInferenceDir;
+      sourceType = 'custom_folder';
+      totalImages = uploadedImages.length;
     }
 
     // ✅ Generate unique inference ID
     const inferenceId = `inf_${Date.now()}_${uuidv4().substring(0, 8)}`;
 
     // ✅ Create InferenceJob document
-    const inferenceJob = new InferenceJob({
+    const inferenceJobData = {
       inferenceId,
       modelId: model._id,
       company: model.company,
       project: model.project,
-      sourceType: 'test_folder',
-      datasetId: dataset._id,
-      testFolderPath: testFolderPath,
+      sourceType: sourceType,
       status: 'queued',
       progress: {
-        totalImages: dataset.testCount,
+        totalImages: totalImages,
         processedImages: 0,
         progressPercent: 0
       }
-    });
+    };
 
+    // ✅ Add source-specific fields
+    if (sourceType === 'test_folder') {
+      inferenceJobData.datasetId = datasetIdForJob;
+      inferenceJobData.testFolderPath = testFolderPath;
+    } else if (sourceType === 'custom_folder') {
+      inferenceJobData.customFolderPath = customFolderPath;
+    }
+
+    const inferenceJob = new InferenceJob(inferenceJobData);
     await inferenceJob.save();
 
-    // ✅ Enqueue inference job
-    await inferenceQueue.add({
+    // ✅ Prepare job data for queue
+    const jobData = {
       inferenceId,
       modelId: model._id.toString(),
       company: model.company,
       project: model.project,
-      sourceType: 'test_folder',
-      datasetId: dataset._id.toString(),
-      testFolderPath: testFolderPath,
+      sourceType: sourceType,
       confidenceThreshold: conf
-    }, {
+    };
+
+    // ✅ Add source-specific fields to job data
+    if (sourceType === 'test_folder') {
+      jobData.datasetId = datasetIdForJob;
+      jobData.testFolderPath = testFolderPath;
+    } else if (sourceType === 'custom_folder') {
+      jobData.customFolderPath = customFolderPath;
+    }
+
+    // ✅ Enqueue inference job
+    await inferenceQueue.add(jobData, {
       attempts: 1,
       removeOnComplete: false,
       removeOnFail: false
@@ -172,7 +261,11 @@ const startBatchInference = async (req, res) => {
     return res.status(202).json({
       inferenceId: inferenceJob.inferenceId,
       status: inferenceJob.status,
-      message: 'Inference job queued successfully'
+      message: isCustomUpload 
+        ? 'Inference job queued successfully with custom images' 
+        : 'Inference job queued successfully',
+      sourceType: sourceType,
+      totalImages: totalImages
     });
 
   } catch (error) {
@@ -271,7 +364,7 @@ const getInferenceStatus = async (req, res) => {
     // ✅ Find inference job
     const inferenceJob = await InferenceJob.findOne({ inferenceId })
       .populate('modelId', 'modelId modelVersion modelType metrics')
-      .populate('datasetId', 'company project version testCount')
+      .populate('datasetId', 'company project version testCount deletedAt')
       .lean();
 
     if (!inferenceJob) {
@@ -298,6 +391,26 @@ const getInferenceStatus = async (req, res) => {
       cancelledAt: inferenceJob.cancelledAt,
       error: inferenceJob.error
     };
+
+    // ✅ Check if dataset is deleted (for test_folder type)
+    if (inferenceJob.datasetId) {
+      if (inferenceJob.datasetId.deletedAt) {
+        response.dataset = {
+          datasetId: inferenceJob.datasetId._id.toString(),
+          deleted: true,
+          deletedAt: inferenceJob.datasetId.deletedAt,
+          message: 'Dataset has been deleted'
+        };
+      } else {
+        response.dataset = {
+          datasetId: inferenceJob.datasetId._id.toString(),
+          company: inferenceJob.datasetId.company,
+          project: inferenceJob.datasetId.project,
+          version: inferenceJob.datasetId.version,
+          testCount: inferenceJob.datasetId.testCount
+        };
+      }
+    }
 
     // ✅ Include results summary if completed
     if (inferenceJob.status === 'completed' && inferenceJob.results) {
@@ -712,7 +825,7 @@ const listInferenceJobs = async (req, res) => {
     // ✅ Find inference jobs
     const inferenceJobs = await InferenceJob.find(filter)
       .populate('modelId', 'modelId modelVersion modelType metrics')
-      .populate('datasetId', 'company project version testCount')
+      .populate('datasetId', 'company project version testCount deletedAt')
       .sort({ createdAt: -1 }) // Newest first
       .lean();
 
@@ -729,11 +842,16 @@ const listInferenceJobs = async (req, res) => {
           modelType: job.modelId.modelType,
           metrics: job.modelId.metrics
         } : null,
-        dataset: job.datasetId ? {
+        dataset: job.datasetId ? (job.datasetId.deletedAt ? {
+          datasetId: job.datasetId._id.toString(),
+          deleted: true,
+          deletedAt: job.datasetId.deletedAt,
+          message: 'Dataset has been deleted'
+        } : {
           datasetId: job.datasetId._id.toString(),
           version: job.datasetId.version,
           testCount: job.datasetId.testCount
-        } : null,
+        }) : null,
         startedAt: job.startedAt,
         completedAt: job.completedAt,
         cancelledAt: job.cancelledAt,

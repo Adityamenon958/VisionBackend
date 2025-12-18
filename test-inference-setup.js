@@ -73,3 +73,6 @@ console.log('   1. Start inference worker: npm run start:inference-worker');
 console.log('   2. Test API endpoints with a real inference job');
 
 
+
+
+

@@ -39,10 +39,10 @@ const inferenceJobSchema = new mongoose.Schema({
     index: true
   },
 
-  // Source type: 'test_folder' or 'live_camera'
+  // Source type: 'test_folder', 'custom_folder', or 'live_camera'
   sourceType: {
     type: String,
-    enum: ['test_folder', 'live_camera'],
+    enum: ['test_folder', 'custom_folder', 'live_camera'],
     required: true
   },
 
@@ -60,6 +60,14 @@ const inferenceJobSchema = new mongoose.Schema({
     type: String,
     required: function() {
       return this.sourceType === 'test_folder';
+    }
+  },
+
+  // Path to custom uploaded folder (only for custom_folder sourceType)
+  customFolderPath: {
+    type: String,
+    required: function() {
+      return this.sourceType === 'custom_folder';
     }
   },
 

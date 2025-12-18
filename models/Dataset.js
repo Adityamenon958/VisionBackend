@@ -123,6 +123,13 @@ const datasetSchema = new mongoose.Schema({
   // Error message if status is 'failed'
   errorMessage: {
     type: String
+  },
+
+  // Soft delete: Mark dataset as deleted without removing the document
+  deletedAt: {
+    type: Date,
+    default: null,
+    index: true // Indexed for faster queries to filter deleted datasets
   }
 }, {
   timestamps: true // ✅ Automatically adds createdAt and updatedAt

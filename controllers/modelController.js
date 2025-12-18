@@ -100,7 +100,7 @@ const getModel = async (req, res) => {
     // ✅ Find model
     const model = await Model.findOne({ modelId })
       .populate('jobId', 'jobId status hyperparameters')
-      .populate('datasetId', 'company project version status totalImages trainCount valCount')
+      .populate('datasetId', 'company project version status totalImages trainCount valCount deletedAt')
       .lean();
 
     if (!model) {
@@ -126,6 +126,24 @@ const getModel = async (req, res) => {
       bestCheckpointPath: model.bestCheckpointPath,
       createdAt: model.createdAt
     };
+
+    // ✅ Check if dataset is deleted
+    if (model.datasetId && model.datasetId.deletedAt) {
+      response.dataset = {
+        datasetId: model.datasetId._id.toString(),
+        deleted: true,
+        deletedAt: model.datasetId.deletedAt,
+        message: 'Dataset has been deleted'
+      };
+    } else if (model.datasetId) {
+      response.dataset = {
+        datasetId: model.datasetId._id.toString(),
+        company: model.datasetId.company,
+        project: model.datasetId.project,
+        version: model.datasetId.version,
+        status: model.datasetId.status
+      };
+    }
 
     return res.status(200).json(response);
 
