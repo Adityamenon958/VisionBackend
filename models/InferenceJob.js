@@ -101,7 +101,13 @@ const inferenceJobSchema = new mongoose.Schema({
       type: String // Full path to results folder
     },
     annotatedImagesPath: {
-      type: String // Path to annotated images directory
+      type: String // Path to annotated images directory (original, before sorting)
+    },
+    goodImagesPath: {
+      type: String // Path to good/ folder (images with no detections)
+    },
+    defectImagesPath: {
+      type: String // Path to defect/ folder (images with detections)
     },
     metadataPath: {
       type: String // Path to JSON metadata file
@@ -113,6 +119,14 @@ const inferenceJobSchema = new mongoose.Schema({
     averageConfidence: {
       type: Number,
       default: 0
+    },
+    goodCount: {
+      type: Number,
+      default: 0 // Count of images with no detections (good)
+    },
+    defectCount: {
+      type: Number,
+      default: 0 // Count of images with detections (defect)
     },
     detectionsByClass: [{
       className: {

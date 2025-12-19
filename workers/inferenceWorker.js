@@ -121,6 +121,14 @@ const processInferenceJob = async (job) => {
       }
 
       sourceFolderPath = customFolderPath;
+    } else if (sourceType === 'live_camera') {
+      // ✅ Live camera inference (will be implemented in Phase 5)
+      console.log(`📹 Live camera inference not yet implemented`);
+      inferenceJob.status = 'failed';
+      inferenceJob.error = 'Live camera inference not yet implemented';
+      inferenceJob.completedAt = new Date();
+      await saveInferenceJob();
+      return; // Exit early for live_camera
     } else {
       throw new Error(`Unsupported source type: ${sourceType}`);
     }
@@ -252,6 +260,88 @@ const processInferenceJob = async (job) => {
             }
           }
 
+          // ✅ Organize images into good/defect folders based on detections
+          let goodImagesPath = null;
+          let defectImagesPath = null;
+          let goodCount = 0;
+          let defectCount = 0;
+
+          if (metadata && metadata.images && Array.isArray(metadata.images)) {
+            // ✅ Create good/ and defect/ folders
+            goodImagesPath = path.join(resultsPath, 'good');
+            defectImagesPath = path.join(resultsPath, 'defect');
+            
+            await storageAdapter.ensureDir(goodImagesPath);
+            await storageAdapter.ensureDir(defectImagesPath);
+
+            console.log(`📁 Organizing images into good/defect folders...`);
+
+            // ✅ Process each image from metadata
+            for (const imageData of metadata.images) {
+              const imageFilename = imageData.imagePath || imageData.annotatedPath?.split('/').pop();
+              if (!imageFilename) continue;
+
+              // ✅ Source path: annotated image in annotatedImagesPath
+              const sourceImagePath = path.join(annotatedImagesPath, imageFilename);
+              
+              // ✅ Check if image has detections
+              const hasDetections = imageData.detections && Array.isArray(imageData.detections) && imageData.detections.length > 0;
+              
+              // ✅ Determine destination folder
+              const destFolder = hasDetections ? defectImagesPath : goodImagesPath;
+              const destImagePath = path.join(destFolder, imageFilename);
+
+              try {
+                // ✅ Check if source image exists
+                if (fs.existsSync(sourceImagePath)) {
+                  // ✅ Move image to appropriate folder
+                  await fsPromises.rename(sourceImagePath, destImagePath);
+                  
+                  if (hasDetections) {
+                    defectCount++;
+                  } else {
+                    goodCount++;
+                  }
+                } else {
+                  console.warn(`⚠️ Source image not found: ${sourceImagePath}`);
+                }
+              } catch (error) {
+                console.error(`❌ Failed to move image ${imageFilename}:`, error.message);
+                // If rename fails (cross-device), try copy + delete
+                try {
+                  await fsPromises.copyFile(sourceImagePath, destImagePath);
+                  await fsPromises.unlink(sourceImagePath);
+                  
+                  if (hasDetections) {
+                    defectCount++;
+                  } else {
+                    goodCount++;
+                  }
+                } catch (copyError) {
+                  console.error(`❌ Failed to copy image ${imageFilename}:`, copyError.message);
+                }
+              }
+            }
+
+            console.log(`✅ Images organized: ${goodCount} good, ${defectCount} defect`);
+          } else {
+            // ✅ If no metadata, count images in annotated folder as fallback
+            if (fs.existsSync(annotatedImagesPath)) {
+              const allImages = fs.readdirSync(annotatedImagesPath)
+                .filter(file => /\.(jpg|jpeg|png)$/i.test(file));
+              
+              // ✅ Create folders anyway
+              goodImagesPath = path.join(resultsPath, 'good');
+              defectImagesPath = path.join(resultsPath, 'defect');
+              await storageAdapter.ensureDir(goodImagesPath);
+              await storageAdapter.ensureDir(defectImagesPath);
+              
+              // ✅ Without detection data, we can't determine good/defect, so keep in annotated folder
+              // But still set paths for API consistency
+              console.log(`⚠️ No metadata available, images remain in annotated/ folder`);
+            }
+          }
+
           // ✅ Update inference job with results
           inferenceJob.status = 'completed';
           inferenceJob.completedAt = new Date();
@@ -262,9 +352,13 @@ const processInferenceJob = async (job) => {
             inferenceJob.results = {
               resultsPath: resultsPath,
               annotatedImagesPath: annotatedImagesPath,
+              goodImagesPath: goodImagesPath,
+              defectImagesPath: defectImagesPath,
               metadataPath: metadataPath,
               totalDetections: metadata.totalDetections || 0,
               averageConfidence: metadata.averageConfidence || 0,
+              goodCount: goodCount,
+              defectCount: defectCount,
               detectionsByClass: metadata.detectionsByClass || []
             };
           } else {
@@ -272,9 +366,13 @@ const processInferenceJob = async (job) => {
             inferenceJob.results = {
               resultsPath: resultsPath,
               annotatedImagesPath: annotatedImagesPath,
+              goodImagesPath: goodImagesPath,
+              defectImagesPath: defectImagesPath,
               metadataPath: metadataPath,
               totalDetections: 0,
               averageConfidence: 0,
+              goodCount: 0,
+              defectCount: 0,
               detectionsByClass: []
             };
           }
@@ -341,15 +439,6 @@ const processInferenceJob = async (job) => {
       pythonProcess.on('exit', () => {
         clearInterval(cancellationCheck);
       });
-
-    } else if (sourceType === 'live_camera') {
-      // ✅ Live camera inference (will be implemented in Phase 5)
-      console.log(`📹 Live camera inference not yet implemented`);
-      inferenceJob.status = 'failed';
-      inferenceJob.error = 'Live camera inference not yet implemented';
-      inferenceJob.completedAt = new Date();
-      await saveInferenceJob();
-    }
 
   } catch (error) {
     console.error(`❌ Error processing inference job ${inferenceId}:`, error);

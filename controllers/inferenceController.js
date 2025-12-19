@@ -36,11 +36,22 @@ const { v4: uuidv4 } = require('uuid');
  */
 const startBatchInference = async (req, res) => {
   try {
+    // ✅ Log incoming request for debugging
+    console.log('🔍 [Inference Start] Request received:', {
+      method: req.method,
+      contentType: req.headers['content-type'],
+      body: req.body,
+      filesCount: Array.isArray(req.files) ? req.files.length : 0,
+      hasFiles: !!req.files
+    });
+
     // ✅ Extract fields - support both JSON and form-data
+    // ⚠️ NOTE: When using multer.array('images'), files are stored directly in req.files as an array
+    // NOT in req.files.images (that would be for .fields() with named fields)
     const modelId = req.body.modelId;
     const datasetId = req.body.datasetId;
     const confidenceThreshold = req.body.confidenceThreshold;
-    const uploadedImages = req.files?.images || [];
+    const uploadedImages = Array.isArray(req.files) ? req.files : [];
 
     // ✅ Determine inference type: dataset-based or custom upload
     const isCustomUpload = uploadedImages.length > 0;
@@ -48,8 +59,10 @@ const startBatchInference = async (req, res) => {
 
     // ✅ Validate that either datasetId OR images are provided (not both, not neither)
     if (!modelId) {
+      console.error('❌ [Inference Start] Missing modelId');
       return res.status(400).json({
-        error: 'Missing required field: modelId'
+        error: 'Missing required field: modelId',
+        received: { body: req.body, files: req.files ? 'present' : 'missing' }
       });
     }
 
@@ -436,14 +449,27 @@ const getInferenceStatus = async (req, res) => {
  * GET /api/inference/:inferenceId/results
  * 
  * Get full inference results (annotated images list, metadata)
+ * 
+ * Query params:
+ *   - filter: 'all' | 'good' | 'defect' (default: 'all')
  */
 const getInferenceResults = async (req, res) => {
   try {
     const { inferenceId } = req.params;
+    const { filter = 'all' } = req.query; // Filter: 'all', 'good', or 'defect'
 
     if (!inferenceId) {
       return res.status(400).json({
         error: 'Missing required parameter: inferenceId'
+      });
+    }
+
+    // ✅ Validate filter parameter
+    if (!['all', 'good', 'defect'].includes(filter)) {
+      return res.status(400).json({
+        error: 'Invalid filter parameter',
+        message: 'Filter must be one of: all, good, defect',
+        provided: filter
       });
     }
 
@@ -484,34 +510,123 @@ const getInferenceResults = async (req, res) => {
       }
     }
 
-    // ✅ List annotated images if directory exists
-    let annotatedImages = [];
-    if (inferenceJob.results.annotatedImagesPath && fs.existsSync(inferenceJob.results.annotatedImagesPath)) {
+    // ✅ List images from good/ and defect/ folders
+    let goodImages = [];
+    let defectImages = [];
+
+    // ✅ Get good images
+    if (inferenceJob.results.goodImagesPath && fs.existsSync(inferenceJob.results.goodImagesPath)) {
       try {
-        const files = fs.readdirSync(inferenceJob.results.annotatedImagesPath);
-        annotatedImages = files
+        const files = fs.readdirSync(inferenceJob.results.goodImagesPath);
+        goodImages = files
           .filter(file => /\.(jpg|jpeg|png)$/i.test(file))
           .map(file => ({
             filename: file,
-            url: `/api/inference/${inferenceId}/image/${file}` // Frontend can use this to display images
+            tag: 'good',
+            url: `/api/inference/${inferenceId}/image/${file}?folder=good`
+          }));
+      } catch (error) {
+        console.warn(`Could not list good images: ${error.message}`);
+      }
+    }
+
+    // ✅ Get defect images
+    if (inferenceJob.results.defectImagesPath && fs.existsSync(inferenceJob.results.defectImagesPath)) {
+      try {
+        const files = fs.readdirSync(inferenceJob.results.defectImagesPath);
+        defectImages = files
+          .filter(file => /\.(jpg|jpeg|png)$/i.test(file))
+          .map(file => ({
+            filename: file,
+            tag: 'defect',
+            url: `/api/inference/${inferenceId}/image/${file}?folder=defect`
+          }));
+      } catch (error) {
+        console.warn(`Could not list defect images: ${error.message}`);
+      }
+    }
+
+    // ✅ Backward compatibility: If no good/defect folders exist, fall back to annotated folder
+    let fallbackImages = [];
+    const hasNewStructure = goodImages.length > 0 || defectImages.length > 0 || 
+                            (inferenceJob.results.goodImagesPath && inferenceJob.results.defectImagesPath);
+    
+    if (!hasNewStructure && inferenceJob.results.annotatedImagesPath && fs.existsSync(inferenceJob.results.annotatedImagesPath)) {
+      try {
+        const files = fs.readdirSync(inferenceJob.results.annotatedImagesPath);
+        fallbackImages = files
+          .filter(file => /\.(jpg|jpeg|png)$/i.test(file))
+          .map(file => ({
+            filename: file,
+            tag: 'unreviewed', // Old jobs don't have tags
+            url: `/api/inference/${inferenceId}/image/${file}` // No folder param for old jobs
           }));
       } catch (error) {
         console.warn(`Could not list annotated images: ${error.message}`);
       }
     }
 
+    // ✅ Calculate statistics
+    const totalImages = hasNewStructure 
+      ? (goodImages.length + defectImages.length)
+      : fallbackImages.length;
+    const goodCount = hasNewStructure 
+      ? (inferenceJob.results.goodCount || goodImages.length)
+      : 0;
+    const defectCount = hasNewStructure
+      ? (inferenceJob.results.defectCount || defectImages.length)
+      : 0;
+
+    // ✅ Apply filter if specified
+    let filteredImages = [];
+    if (hasNewStructure) {
+      // New structure: filter by good/defect
+      if (filter === 'good') {
+        filteredImages = goodImages;
+      } else if (filter === 'defect') {
+        filteredImages = defectImages;
+      } else {
+        // 'all' - combine both arrays
+        filteredImages = [...goodImages, ...defectImages];
+      }
+    } else {
+      // Old structure: return all from annotated folder (filtering not supported)
+      filteredImages = fallbackImages;
+    }
+
     // ✅ Format response
     const response = {
       inferenceId: inferenceJob.inferenceId,
       status: inferenceJob.status,
+      filter: filter,
       results: {
         resultsPath: inferenceJob.results.resultsPath,
         annotatedImagesPath: inferenceJob.results.annotatedImagesPath,
+        goodImagesPath: inferenceJob.results.goodImagesPath,
+        defectImagesPath: inferenceJob.results.defectImagesPath,
         metadataPath: inferenceJob.results.metadataPath,
-        totalDetections: inferenceJob.results.totalDetections,
-        averageConfidence: inferenceJob.results.averageConfidence,
-        detectionsByClass: inferenceJob.results.detectionsByClass,
-        annotatedImages: annotatedImages,
+        totalDetections: inferenceJob.results.totalDetections || 0,
+        averageConfidence: inferenceJob.results.averageConfidence || 0,
+        detectionsByClass: inferenceJob.results.detectionsByClass || [],
+        // ✅ Images grouped by tag
+        annotatedImages: {
+          good: goodImages,
+          defect: defectImages,
+          all: filteredImages // Filtered results based on query param
+        },
+        // ✅ Backward compatibility: flat array for old jobs (deprecated, use annotatedImages.all)
+        // This ensures old frontend code still works
+        ...(fallbackImages.length > 0 && !hasNewStructure ? { 
+          images: fallbackImages // Old format for backward compatibility
+        } : {}),
+        // ✅ Statistics
+        statistics: {
+          total: totalImages,
+          good: goodCount,
+          defect: defectCount,
+          // Indicate if this is an old job without tagging
+          hasTags: hasNewStructure
+        },
         metadata: metadata
       },
       completedAt: inferenceJob.completedAt
@@ -532,10 +647,14 @@ const getInferenceResults = async (req, res) => {
  * GET /api/inference/:inferenceId/image/:filename
  * 
  * Serve annotated image file from inference results
+ * 
+ * Query params:
+ *   - folder: 'good' | 'defect' | undefined (default: searches annotated folder, then good/defect)
  */
 const getAnnotatedImage = async (req, res) => {
   try {
     const { inferenceId, filename } = req.params;
+    const { folder } = req.query; // Optional: 'good' or 'defect'
 
     if (!inferenceId || !filename) {
       return res.status(400).json({
@@ -562,19 +681,54 @@ const getAnnotatedImage = async (req, res) => {
       });
     }
 
-    if (!inferenceJob.results || !inferenceJob.results.annotatedImagesPath) {
+    if (!inferenceJob.results || !inferenceJob.results.resultsPath) {
       return res.status(404).json({
         error: 'Results not found',
         inferenceId: inferenceId
       });
     }
 
-    // ✅ Build full image path
-    const imagePath = path.join(inferenceJob.results.annotatedImagesPath, filename);
+    // ✅ Determine which folder to look in
+    let imagePath = null;
+    let basePath = null;
+
+    if (folder === 'good' && inferenceJob.results.goodImagesPath) {
+      imagePath = path.join(inferenceJob.results.goodImagesPath, filename);
+      basePath = inferenceJob.results.goodImagesPath;
+    } else if (folder === 'defect' && inferenceJob.results.defectImagesPath) {
+      imagePath = path.join(inferenceJob.results.defectImagesPath, filename);
+      basePath = inferenceJob.results.defectImagesPath;
+    } else {
+      // ✅ Default: try good/, then defect/, then annotated/ (for backward compatibility)
+      const searchPaths = [
+        { path: inferenceJob.results.goodImagesPath, name: 'good' },
+        { path: inferenceJob.results.defectImagesPath, name: 'defect' },
+        { path: inferenceJob.results.annotatedImagesPath, name: 'annotated' }
+      ].filter(p => p.path); // Filter out null/undefined paths
+
+      for (const searchPath of searchPaths) {
+        const testPath = path.join(searchPath.path, filename);
+        if (fs.existsSync(testPath)) {
+          imagePath = testPath;
+          basePath = searchPath.path;
+          break;
+        }
+      }
+    }
+
+    // ✅ If still not found, return 404
+    if (!imagePath || !basePath) {
+      return res.status(404).json({
+        error: 'Image not found',
+        filename: filename,
+        inferenceId: inferenceId,
+        searchedFolders: folder ? [folder] : ['good', 'defect', 'annotated']
+      });
+    }
 
     // ✅ Security: Prevent directory traversal
     const resolvedPath = path.resolve(imagePath);
-    const resolvedBasePath = path.resolve(inferenceJob.results.annotatedImagesPath);
+    const resolvedBasePath = path.resolve(basePath);
     
     if (!resolvedPath.startsWith(resolvedBasePath)) {
       return res.status(403).json({
@@ -583,7 +737,7 @@ const getAnnotatedImage = async (req, res) => {
       });
     }
 
-    // ✅ Check if file exists
+    // ✅ Check if file exists (double check)
     if (!fs.existsSync(imagePath)) {
       return res.status(404).json({
         error: 'Image not found',
