@@ -7,6 +7,8 @@ const fs = require('fs');
 const {
   startBatchInference,
   startLiveInference,
+  processLiveFrame,
+  stopLiveInference,
   getInferenceStatus,
   getInferenceResults,
   getAnnotatedImage,
@@ -86,9 +88,26 @@ router.post('/start', uploadInferenceImages.array('images', 1000), startBatchInf
  * POST /api/inference/live/start
  * Start live camera inference
  * 
- * Body: { modelId }
+ * Body: { modelId, confidenceThreshold? }
  */
 router.post('/live/start', startLiveInference);
+
+/**
+ * POST /api/inference/live/:inferenceId/frame
+ * Process a single frame from live camera
+ * 
+ * Body: {
+ *   image: "data:image/jpeg;base64,...",
+ *   confidenceThreshold?: 0.25
+ * }
+ */
+router.post('/live/:inferenceId/frame', processLiveFrame);
+
+/**
+ * POST /api/inference/live/:inferenceId/stop
+ * Stop live camera inference
+ */
+router.post('/live/:inferenceId/stop', stopLiveInference);
 
 /**
  * GET /api/inference/:inferenceId/status

@@ -109,6 +109,13 @@ const inferenceJobSchema = new mongoose.Schema({
     defectImagesPath: {
       type: String // Path to defect/ folder (images with detections)
     },
+    framesPath: {
+      type: String // Path to frames directory (for live camera inference)
+    },
+    totalFramesProcessed: {
+      type: Number,
+      default: 0 // Count of frames processed (for live camera inference)
+    },
     metadataPath: {
       type: String // Path to JSON metadata file
     },
