@@ -389,7 +389,7 @@ const startLiveInference = async (req, res) => {
 const processLiveFrame = async (req, res) => {
   try {
     const { inferenceId } = req.params;
-    const { image, confidenceThreshold } = req.body;
+    const { image, confidenceThreshold, returnAnnotatedImage = true } = req.body;
 
     // ✅ Validate inferenceId
     if (!inferenceId) {
@@ -461,7 +461,10 @@ const processLiveFrame = async (req, res) => {
     // ✅ Generate unique filenames for input and output
     const timestamp = Date.now();
     const inputFramePath = path.join(framesDir, `frame_${timestamp}_input.jpg`);
-    const outputFramePath = path.join(framesDir, `frame_${timestamp}_annotated.jpg`);
+    // Only create output path if we need annotated image
+    const outputFramePath = returnAnnotatedImage 
+      ? path.join(framesDir, `frame_${timestamp}_annotated.jpg`)
+      : null;
 
     // ✅ Decode base64 image and save to temp file
     try {
@@ -509,16 +512,25 @@ const processLiveFrame = async (req, res) => {
 
     const startTime = Date.now();
     
-    // ✅ Spawn Python process
-    const { spawn } = require('child_process');
-    const pythonProcess = spawn('python', [
+    // ✅ Build Python command arguments
+    const pythonArgs = [
       '-u', // Unbuffered output
       pythonScriptPath,
       '--model', model.bestCheckpointPath,
       '--image', inputFramePath,
-      '--output', outputFramePath,
       '--conf', conf.toString()
-    ], {
+    ];
+    
+    // ✅ Add output path or annotations-only flag
+    if (returnAnnotatedImage) {
+      pythonArgs.push('--output', outputFramePath);
+    } else {
+      pythonArgs.push('--annotations-only');
+    }
+    
+    // ✅ Spawn Python process
+    const { spawn } = require('child_process');
+    const pythonProcess = spawn('python', pythonArgs, {
       cwd: path.join(__dirname, '../inference-scripts'),
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, PYTHONUNBUFFERED: '1' }
@@ -564,14 +576,6 @@ const processLiveFrame = async (req, res) => {
       });
     }
 
-    // ✅ Check if output file was created
-    if (!fs.existsSync(outputFramePath)) {
-      return res.status(500).json({
-        error: 'Annotated image not generated',
-        message: 'Python script completed but output file not found'
-      });
-    }
-
     // ✅ Parse detection results from stdout (JSON)
     let detectionData = null;
     try {
@@ -582,30 +586,43 @@ const processLiveFrame = async (req, res) => {
       console.warn('Failed to parse detection data from Python output:', parseError);
     }
 
-    // ✅ Read annotated image and convert to base64
-    const annotatedImageBuffer = await fsPromises.readFile(outputFramePath);
-    const annotatedImageBase64 = annotatedImageBuffer.toString('base64');
-    const annotatedImageDataUrl = `data:image/jpeg;base64,${annotatedImageBase64}`;
+    // ✅ Read annotated image and convert to base64 (only if requested)
+    let annotatedImageDataUrl = null;
+    if (returnAnnotatedImage) {
+      // ✅ Check if output file was created
+      if (!outputFramePath || !fs.existsSync(outputFramePath)) {
+        return res.status(500).json({
+          error: 'Annotated image not generated',
+          message: 'Python script completed but output file not found'
+        });
+      }
+
+      const annotatedImageBuffer = await fsPromises.readFile(outputFramePath);
+      const annotatedImageBase64 = annotatedImageBuffer.toString('base64');
+      annotatedImageDataUrl = `data:image/jpeg;base64,${annotatedImageBase64}`;
+    }
 
     // ✅ Clean up temp files (keep only last N frames to prevent disk filling)
     try {
-      // Delete input frame (we only need annotated output)
+      // Delete input frame (we don't need it after processing)
       await fsPromises.unlink(inputFramePath);
 
-      // Clean up old frames (keep only last 10 annotated frames)
-      const files = await fsPromises.readdir(framesDir);
-      const annotatedFiles = files
-        .filter(f => f.includes('_annotated.jpg'))
-        .sort()
-        .reverse(); // Newest first
+      // Clean up old annotated frames (only if we're saving them)
+      if (returnAnnotatedImage && outputFramePath) {
+        const files = await fsPromises.readdir(framesDir);
+        const annotatedFiles = files
+          .filter(f => f.includes('_annotated.jpg'))
+          .sort()
+          .reverse(); // Newest first
 
-      // Delete files beyond the 10 most recent
-      if (annotatedFiles.length > 10) {
-        for (const oldFile of annotatedFiles.slice(10)) {
-          try {
-            await fsPromises.unlink(path.join(framesDir, oldFile));
-          } catch (e) {
-            // Ignore cleanup errors
+        // Delete files beyond the 10 most recent
+        if (annotatedFiles.length > 10) {
+          for (const oldFile of annotatedFiles.slice(10)) {
+            try {
+              await fsPromises.unlink(path.join(framesDir, oldFile));
+            } catch (e) {
+              // Ignore cleanup errors
+            }
           }
         }
       }
@@ -624,13 +641,19 @@ const processLiveFrame = async (req, res) => {
     inferenceJob.results.totalFramesProcessed = (inferenceJob.results.totalFramesProcessed || 0) + 1;
     await inferenceJob.save();
 
-    // ✅ Return annotated frame and detection data
-    return res.status(200).json({
-      annotatedImage: annotatedImageDataUrl,
+    // ✅ Return detection data (and annotated image if requested)
+    const response = {
       detections: detectionData?.detections || [],
       totalDetections: detectionData?.totalDetections || 0,
       processingTime: processingTime // milliseconds
-    });
+    };
+    
+    // ✅ Include annotated image only if requested
+    if (returnAnnotatedImage && annotatedImageDataUrl) {
+      response.annotatedImage = annotatedImageDataUrl;
+    }
+    
+    return res.status(200).json(response);
 
   } catch (error) {
     console.error('Error processing live frame:', error);

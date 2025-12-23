@@ -62,16 +62,17 @@ def decode_base64_image(base64_string):
         sys.exit(1)
 
 
-def process_frame(model_path, image_path_or_base64, output_path, conf=0.25, is_base64=False):
+def process_frame(model_path, image_path_or_base64, output_path, conf=0.25, is_base64=False, annotations_only=False):
     """
     Process a single frame with YOLO model.
     
     Args:
         model_path: Path to YOLO model checkpoint
         image_path_or_base64: Path to image file OR base64 string
-        output_path: Path to save annotated image
+        output_path: Path to save annotated image (ignored if annotations_only=True)
         conf: Confidence threshold
         is_base64: True if image_path_or_base64 is base64, False if file path
+        annotations_only: If True, skip drawing/saving annotated image (only return detections)
     
     Returns:
         dict: Detection results
@@ -130,16 +131,17 @@ def process_frame(model_path, image_path_or_base64, output_path, conf=0.25, is_b
                 'bbox': xyxy
             })
 
-        # ✅ Draw annotations on image
-        annotated_image = result.plot()  # YOLO's built-in plotting function
+        # ✅ Draw annotations on image (only if not in annotations-only mode)
+        if not annotations_only:
+            annotated_image = result.plot()  # YOLO's built-in plotting function
 
-        # ✅ Ensure output directory exists
-        output_dir = os.path.dirname(output_path)
-        if output_dir and not os.path.exists(output_dir):
-            os.makedirs(output_dir, exist_ok=True)
+            # ✅ Ensure output directory exists
+            output_dir = os.path.dirname(output_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
 
-        # ✅ Save annotated image
-        cv2.imwrite(output_path, annotated_image)
+            # ✅ Save annotated image
+            cv2.imwrite(output_path, annotated_image)
 
         # ✅ Print results as JSON (for backend to parse)
         result_data = {
@@ -170,8 +172,9 @@ def main():
     parser.add_argument('--model', required=True, help='Path to YOLO model checkpoint')
     parser.add_argument('--image', help='Path to input image file')
     parser.add_argument('--image-base64', help='Base64 encoded image string')
-    parser.add_argument('--output', required=True, help='Path to save annotated output image')
+    parser.add_argument('--output', help='Path to save annotated output image (required unless --annotations-only)')
     parser.add_argument('--conf', type=float, default=0.25, help='Confidence threshold (default: 0.25)')
+    parser.add_argument('--annotations-only', action='store_true', help='Skip drawing/saving annotated image, only return detection data')
 
     args = parser.parse_args()
 
@@ -184,17 +187,26 @@ def main():
         print("ERROR: Cannot provide both --image and --image-base64", file=sys.stderr)
         sys.exit(1)
 
+    # ✅ Validate output path (required unless annotations-only mode)
+    if not args.annotations_only and not args.output:
+        print("ERROR: --output is required unless --annotations-only is specified", file=sys.stderr)
+        sys.exit(1)
+
     # ✅ Determine input type
     is_base64 = args.image_base64 is not None
     image_input = args.image_base64 if is_base64 else args.image
+
+    # ✅ Use dummy output path if annotations-only mode (not used but required by function signature)
+    output_path = args.output if args.output else '/dev/null'
 
     # ✅ Process frame
     exit_code = process_frame(
         model_path=args.model,
         image_path_or_base64=image_input,
-        output_path=args.output,
+        output_path=output_path,
         conf=args.conf,
-        is_base64=is_base64
+        is_base64=is_base64,
+        annotations_only=args.annotations_only
     )
 
     sys.exit(exit_code)
@@ -202,4 +214,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
