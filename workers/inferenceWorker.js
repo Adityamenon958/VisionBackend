@@ -311,11 +311,13 @@ const processInferenceJob = async (job) => {
 
               // ✅ Process each image from metadata
               for (const imageData of imageFiles) {
-                const imageFilename = imageData.filePath || imageData.imagePath || imageData.annotatedPath?.split('/').pop();
+                // ✅ Skip video files immediately (they stay in annotated folder, not moved to good/defect)
+                if (imageData.fileType === 'video') {
+                  continue; // Skip videos - they're handled separately
+                }
+                
+                const imageFilename = imageData.filePath || imageData.imagePath || imageData.annotatedPath?.split('/').pop() || imageData.annotatedPath?.split('\\').pop();
                 if (!imageFilename) continue;
-
-                // ✅ Skip video files (they stay in annotated folder)
-                if (imageData.fileType === 'video') continue;
 
                 // ✅ Source path: annotated image in annotatedImagesPath
                 const sourceImagePath = path.join(annotatedImagesPath, imageFilename);
