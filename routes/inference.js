@@ -19,14 +19,14 @@ const {
   listDatasetsWithTestFolders
 } = require('../controllers/inferenceController');
 
-// ✅ Configure multer for custom image uploads
+// ✅ Configure multer for custom image and video uploads
 // ⚠️ CAUTION: Ensure temp directory exists to prevent errors
 const tempDir = path.join(process.cwd(), 'uploads', 'inference-temp');
 if (!fs.existsSync(tempDir)) {
   fs.mkdirSync(tempDir, { recursive: true });
 }
 
-// ✅ Multer configuration for inference image uploads
+// ✅ Multer configuration for inference image and video uploads
 const inferenceStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     // ✅ Save uploaded files to temp directory
@@ -39,10 +39,12 @@ const inferenceStorage = multer.diskStorage({
   }
 });
 
-// ✅ File filter - only accept image files
+// ✅ File filter - accept image and video files
 const inferenceFileFilter = (req, file, cb) => {
   const ext = path.extname(file.originalname).toLowerCase();
-  const validExtensions = ['.jpg', '.jpeg', '.png'];
+  const validImageExtensions = ['.jpg', '.jpeg', '.png'];
+  const validVideoExtensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v'];
+  const validExtensions = [...validImageExtensions, ...validVideoExtensions];
   
   if (validExtensions.includes(ext)) {
     cb(null, true);
@@ -56,8 +58,8 @@ const uploadInferenceImages = multer({
   storage: inferenceStorage,
   fileFilter: inferenceFileFilter,
   limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB per file limit
-    files: 1000 // Maximum 1000 images per upload
+    fileSize: 500 * 1024 * 1024, // 500MB per file limit (increased for videos)
+    files: 1000 // Maximum 1000 files per upload (images or videos)
   }
 });
 
@@ -76,12 +78,13 @@ router.get('/', listInferenceJobs);
  * For dataset-based inference:
  *   Body (JSON): { modelId, datasetId, confidenceThreshold? }
  * 
- * For custom image upload:
+ * For custom image/video upload:
  *   Body (multipart/form-data): 
  *     - modelId (text field)
  *     - confidenceThreshold? (text field, optional)
- *     - images (file field, multiple images allowed)
+ *     - images (file field, multiple images/videos allowed)
  */
+// ✅ Accept both images and videos in the 'images' field (backward compatible)
 router.post('/start', uploadInferenceImages.array('images', 1000), startBatchInference);
 
 /**

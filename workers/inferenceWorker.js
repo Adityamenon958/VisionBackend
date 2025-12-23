@@ -133,21 +133,43 @@ const processInferenceJob = async (job) => {
       throw new Error(`Unsupported source type: ${sourceType}`);
     }
 
-    // ✅ Count images in source folder (works for both test_folder and custom_folder)
-    const imageFiles = fs.readdirSync(sourceFolderPath)
-        .filter(file => /\.(jpg|jpeg|png)$/i.test(file));
+    // ✅ Detect files in source folder (images and videos)
+    const allFiles = fs.readdirSync(sourceFolderPath);
+    const imageFiles = allFiles.filter(file => /\.(jpg|jpeg|png)$/i.test(file));
+    const videoFiles = allFiles.filter(file => /\.(mp4|avi|mov|mkv|webm|flv|wmv|m4v)$/i.test(file));
+    const totalFiles = imageFiles.length + videoFiles.length;
 
-      if (imageFiles.length === 0) {
-      throw new Error(`No images found in folder: ${sourceFolderPath}`);
-      }
+    if (totalFiles === 0) {
+      throw new Error(`No images or videos found in folder: ${sourceFolderPath}`);
+    }
 
-      // ✅ Update total images count
-      inferenceJob.progress.totalImages = imageFiles.length;
-      await saveInferenceJob();
+    // ✅ Determine if this is a video-only, image-only, or mixed job
+    const hasVideos = videoFiles.length > 0;
+    const hasImages = imageFiles.length > 0;
+    const isVideoOnly = hasVideos && !hasImages;
+    const isMixed = hasVideos && hasImages;
+
+    // ✅ Store file type info in job for later use
+    inferenceJob.sourceFiles = {
+      images: imageFiles,
+      videos: videoFiles,
+      total: totalFiles,
+      isVideoOnly: isVideoOnly,
+      isMixed: isMixed
+    };
+
+    // ✅ Update total files count (images + videos)
+    inferenceJob.progress.totalImages = totalFiles; // Keep field name for backward compatibility
+    await saveInferenceJob();
 
     console.log(`📁 Source folder: ${sourceFolderPath}`);
-      console.log(`📊 Total images: ${imageFiles.length}`);
+    console.log(`📊 Total files: ${totalFiles} (${imageFiles.length} images, ${videoFiles.length} videos)`);
     console.log(`🔍 Source type: ${sourceType}`);
+    if (isVideoOnly) {
+      console.log(`🎬 Video-only inference detected`);
+    } else if (isMixed) {
+      console.log(`⚠️ Mixed images and videos detected - videos will be processed separately`);
+    }
 
       // ✅ Build results paths
       const resultsPath = storageAdapter.buildResultsPath(company, project, model.modelId, inferenceId);
@@ -210,8 +232,11 @@ const processInferenceJob = async (job) => {
           if (line.trim()) {
             console.log(`[Inference ${inferenceId}] ${line}`);
 
-            // ✅ Parse progress from logs (e.g., "Processing image 5/10")
-            const progressMatch = line.match(/Processing\s+image\s+(\d+)\/(\d+)/i);
+            // ✅ Parse progress from logs (e.g., "Processing image 5/10" or "Processing video 3/5")
+            const imageProgressMatch = line.match(/Processing\s+image\s+(\d+)\/(\d+)/i);
+            const videoProgressMatch = line.match(/Processing\s+video\s+(\d+)\/(\d+)/i);
+            const progressMatch = imageProgressMatch || videoProgressMatch;
+            
             if (progressMatch) {
               processedCount = parseInt(progressMatch[1]);
               const total = parseInt(progressMatch[2]);
@@ -261,84 +286,107 @@ const processInferenceJob = async (job) => {
           }
 
           // ✅ Organize images into good/defect folders based on detections
+          // ✅ Videos stay in annotated folder (can't be easily categorized)
           let goodImagesPath = null;
           let defectImagesPath = null;
           let goodCount = 0;
           let defectCount = 0;
+          let videoCount = 0;
 
-          if (metadata && metadata.images && Array.isArray(metadata.images)) {
-            // ✅ Create good/ and defect/ folders
-            goodImagesPath = path.join(resultsPath, 'good');
-            defectImagesPath = path.join(resultsPath, 'defect');
-            
-            await storageAdapter.ensureDir(goodImagesPath);
-            await storageAdapter.ensureDir(defectImagesPath);
+          // ✅ Support both old metadata format (images array) and new format (files/images/videos arrays)
+          const filesToProcess = metadata?.files || metadata?.images || [];
+          const imageFiles = metadata?.images || filesToProcess.filter(f => f.fileType !== 'video');
+          const videoFiles = metadata?.videos || filesToProcess.filter(f => f.fileType === 'video');
 
-            console.log(`📁 Organizing images into good/defect folders...`);
-
-            // ✅ Process each image from metadata
-            for (const imageData of metadata.images) {
-              const imageFilename = imageData.imagePath || imageData.annotatedPath?.split('/').pop();
-              if (!imageFilename) continue;
-
-              // ✅ Source path: annotated image in annotatedImagesPath
-              const sourceImagePath = path.join(annotatedImagesPath, imageFilename);
-              
-              // ✅ Check if image has detections
-              const hasDetections = imageData.detections && Array.isArray(imageData.detections) && imageData.detections.length > 0;
-              
-              // ✅ Determine destination folder
-              const destFolder = hasDetections ? defectImagesPath : goodImagesPath;
-              const destImagePath = path.join(destFolder, imageFilename);
-
-              try {
-                // ✅ Check if source image exists
-                if (fs.existsSync(sourceImagePath)) {
-                  // ✅ Move image to appropriate folder
-                  await fsPromises.rename(sourceImagePath, destImagePath);
-                  
-                  if (hasDetections) {
-                    defectCount++;
-                  } else {
-                    goodCount++;
-                  }
-                } else {
-                  console.warn(`⚠️ Source image not found: ${sourceImagePath}`);
-                }
-              } catch (error) {
-                console.error(`❌ Failed to move image ${imageFilename}:`, error.message);
-                // If rename fails (cross-device), try copy + delete
-                try {
-                  await fsPromises.copyFile(sourceImagePath, destImagePath);
-                  await fsPromises.unlink(sourceImagePath);
-                  
-                  if (hasDetections) {
-                    defectCount++;
-                  } else {
-                    goodCount++;
-                  }
-                } catch (copyError) {
-                  console.error(`❌ Failed to copy image ${imageFilename}:`, copyError.message);
-                }
-              }
-            }
-
-            console.log(`✅ Images organized: ${goodCount} good, ${defectCount} defect`);
-          } else {
-            // ✅ If no metadata, count images in annotated folder as fallback
-            if (fs.existsSync(annotatedImagesPath)) {
-              const allImages = fs.readdirSync(annotatedImagesPath)
-                .filter(file => /\.(jpg|jpeg|png)$/i.test(file));
-              
-              // ✅ Create folders anyway
+          if (metadata && (imageFiles.length > 0 || videoFiles.length > 0)) {
+            // ✅ Create good/ and defect/ folders for images
+            if (imageFiles.length > 0) {
               goodImagesPath = path.join(resultsPath, 'good');
               defectImagesPath = path.join(resultsPath, 'defect');
+              
               await storageAdapter.ensureDir(goodImagesPath);
               await storageAdapter.ensureDir(defectImagesPath);
+
+              console.log(`📁 Organizing images into good/defect folders...`);
+
+              // ✅ Process each image from metadata
+              for (const imageData of imageFiles) {
+                const imageFilename = imageData.filePath || imageData.imagePath || imageData.annotatedPath?.split('/').pop();
+                if (!imageFilename) continue;
+
+                // ✅ Skip video files (they stay in annotated folder)
+                if (imageData.fileType === 'video') continue;
+
+                // ✅ Source path: annotated image in annotatedImagesPath
+                const sourceImagePath = path.join(annotatedImagesPath, imageFilename);
+                
+                // ✅ Check if image has detections
+                const hasDetections = imageData.detections && Array.isArray(imageData.detections) && imageData.detections.length > 0;
+                
+                // ✅ Determine destination folder
+                const destFolder = hasDetections ? defectImagesPath : goodImagesPath;
+                const destImagePath = path.join(destFolder, imageFilename);
+
+                try {
+                  // ✅ Check if source image exists
+                  if (fs.existsSync(sourceImagePath)) {
+                    // ✅ Move image to appropriate folder
+                    await fsPromises.rename(sourceImagePath, destImagePath);
+                    
+                    if (hasDetections) {
+                      defectCount++;
+                    } else {
+                      goodCount++;
+                    }
+                  } else {
+                    console.warn(`⚠️ Source image not found: ${sourceImagePath}`);
+                  }
+                } catch (error) {
+                  console.error(`❌ Failed to move image ${imageFilename}:`, error.message);
+                  // If rename fails (cross-device), try copy + delete
+                  try {
+                    await fsPromises.copyFile(sourceImagePath, destImagePath);
+                    await fsPromises.unlink(sourceImagePath);
+                    
+                    if (hasDetections) {
+                      defectCount++;
+                    } else {
+                      goodCount++;
+                    }
+                  } catch (copyError) {
+                    console.error(`❌ Failed to copy image ${imageFilename}:`, copyError.message);
+                  }
+                }
+              }
+
+              console.log(`✅ Images organized: ${goodCount} good, ${defectCount} defect`);
+            }
+
+            // ✅ Count videos (they stay in annotated folder)
+            videoCount = videoFiles.length;
+            if (videoCount > 0) {
+              console.log(`🎬 ${videoCount} video(s) processed and saved to annotated folder`);
+            }
+          } else {
+            // ✅ If no metadata, count files in annotated folder as fallback
+            if (fs.existsSync(annotatedImagesPath)) {
+              const allFiles = fs.readdirSync(annotatedImagesPath);
+              const imageFiles = allFiles.filter(file => /\.(jpg|jpeg|png)$/i.test(file));
+              const videoFiles = allFiles.filter(file => /\.(mp4|avi|mov|mkv|webm|flv|wmv|m4v)$/i.test(file));
+              
+              // ✅ Create folders anyway
+              if (imageFiles.length > 0) {
+                goodImagesPath = path.join(resultsPath, 'good');
+                defectImagesPath = path.join(resultsPath, 'defect');
+                await storageAdapter.ensureDir(goodImagesPath);
+                await storageAdapter.ensureDir(defectImagesPath);
+              }
+              
+              videoCount = videoFiles.length;
               
               // ✅ Without detection data, we can't determine good/defect, so keep in annotated folder
               // But still set paths for API consistency
-              console.log(`⚠️ No metadata available, images remain in annotated/ folder`);
+              console.log(`⚠️ No metadata available, files remain in annotated/ folder`);
             }
           }
 
@@ -359,6 +407,10 @@ const processInferenceJob = async (job) => {
               averageConfidence: metadata.averageConfidence || 0,
               goodCount: goodCount,
               defectCount: defectCount,
+              videoCount: videoCount, // ✅ Add video count
+              totalFiles: metadata.totalFiles || metadata.totalImages || 0,
+              totalImages: metadata.totalImages || imageFiles.length || 0,
+              totalVideos: metadata.totalVideos || videoCount || 0,
               detectionsByClass: metadata.detectionsByClass || []
             };
           } else {
@@ -373,6 +425,10 @@ const processInferenceJob = async (job) => {
               averageConfidence: 0,
               goodCount: 0,
               defectCount: 0,
+              videoCount: videoCount,
+              totalFiles: 0,
+              totalImages: 0,
+              totalVideos: videoCount,
               detectionsByClass: []
             };
           }

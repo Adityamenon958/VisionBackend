@@ -24,16 +24,16 @@ const { v4: uuidv4 } = require('uuid');
 /**
  * POST /api/inference/start
  * 
- * Start batch inference on test folder from a dataset OR custom uploaded images
+ * Start batch inference on test folder from a dataset OR custom uploaded images/videos
  * 
  * For dataset-based inference:
  *   Body (JSON): { modelId, datasetId, confidenceThreshold? }
  * 
- * For custom image upload:
+ * For custom image/video upload:
  *   Body (multipart/form-data): 
  *     - modelId (text field, required)
  *     - confidenceThreshold? (text field, optional)
- *     - images (file field, multiple images allowed, required if no datasetId)
+ *     - images (file field, multiple images/videos allowed, required if no datasetId)
  */
 const startBatchInference = async (req, res) => {
   try {
@@ -187,21 +187,21 @@ const startBatchInference = async (req, res) => {
       datasetIdForJob = dataset._id.toString();
     }
 
-    // ✅ Handle custom image upload
+    // ✅ Handle custom image/video upload
     if (isCustomUpload) {
-      // ✅ Validate at least one image was uploaded
+      // ✅ Validate at least one file was uploaded
       if (uploadedImages.length === 0) {
         return res.status(400).json({
-          error: 'No images uploaded',
-          message: 'At least one image file is required for custom inference'
+          error: 'No files uploaded',
+          message: 'At least one image or video file is required for custom inference'
         });
       }
 
-      // ✅ Create temporary folder for uploaded images
+      // ✅ Create temporary folder for uploaded files (images/videos)
       const tempInferenceDir = path.join(process.cwd(), 'uploads', 'inference-temp', `inf_${Date.now()}_${uuidv4().substring(0, 8)}`);
       await storageAdapter.ensureDir(tempInferenceDir);
 
-      // ✅ Move uploaded images to temp folder
+      // ✅ Move uploaded files to temp folder
       for (const file of uploadedImages) {
         const destPath = path.join(tempInferenceDir, file.originalname);
         try {
@@ -276,10 +276,10 @@ const startBatchInference = async (req, res) => {
       inferenceId: inferenceJob.inferenceId,
       status: inferenceJob.status,
       message: isCustomUpload 
-        ? 'Inference job queued successfully with custom images' 
+        ? 'Inference job queued successfully with custom files' 
         : 'Inference job queued successfully',
       sourceType: sourceType,
-      totalImages: totalImages
+      totalImages: totalImages // Note: includes videos for backward compatibility
     });
 
   } catch (error) {
@@ -906,7 +906,24 @@ const getInferenceResults = async (req, res) => {
       }
     }
 
-    // ✅ Backward compatibility: If no good/defect folders exist, fall back to annotated folder
+    // ✅ Always get videos from annotated folder (videos are not categorized into good/defect)
+    let videos = [];
+    if (inferenceJob.results.annotatedImagesPath && fs.existsSync(inferenceJob.results.annotatedImagesPath)) {
+      try {
+        const files = fs.readdirSync(inferenceJob.results.annotatedImagesPath);
+        videos = files
+          .filter(file => /\.(mp4|avi|mov|mkv|webm|flv|wmv|m4v)$/i.test(file))
+          .map(file => ({
+            filename: file,
+            fileType: 'video',
+            url: `/api/inference/${inferenceId}/image/${file}` // Uses same endpoint as images
+          }));
+      } catch (error) {
+        console.warn(`Could not list videos from annotated folder: ${error.message}`);
+      }
+    }
+
+    // ✅ Backward compatibility: If no good/defect folders exist, fall back to annotated folder for images
     let fallbackImages = [];
     const hasNewStructure = goodImages.length > 0 || defectImages.length > 0 || 
                             (inferenceJob.results.goodImagesPath && inferenceJob.results.defectImagesPath);
@@ -930,6 +947,8 @@ const getInferenceResults = async (req, res) => {
     const totalImages = hasNewStructure 
       ? (goodImages.length + defectImages.length)
       : fallbackImages.length;
+    const totalVideos = videos.length;
+    const totalFiles = totalImages + totalVideos;
     const goodCount = hasNewStructure 
       ? (inferenceJob.results.goodCount || goodImages.length)
       : 0;
@@ -974,6 +993,8 @@ const getInferenceResults = async (req, res) => {
           defect: defectImages,
           all: filteredImages // Filtered results based on query param
         },
+        // ✅ Videos (always from annotated folder, not categorized)
+        videos: videos,
         // ✅ Backward compatibility: flat array for old jobs (deprecated, use annotatedImages.all)
         // This ensures old frontend code still works
         ...(fallbackImages.length > 0 && !hasNewStructure ? { 
@@ -981,7 +1002,9 @@ const getInferenceResults = async (req, res) => {
         } : {}),
         // ✅ Statistics
         statistics: {
-          total: totalImages,
+          total: totalFiles, // Total files (images + videos)
+          totalImages: totalImages,
+          totalVideos: totalVideos,
           good: goodCount,
           defect: defectCount,
           // Indicate if this is an old job without tagging
@@ -1006,10 +1029,12 @@ const getInferenceResults = async (req, res) => {
 /**
  * GET /api/inference/:inferenceId/image/:filename
  * 
- * Serve annotated image file from inference results
+ * Serve annotated image or video file from inference results
  * 
  * Query params:
  *   - folder: 'good' | 'defect' | undefined (default: searches annotated folder, then good/defect)
+ * 
+ * Note: Videos are always served from annotated folder (not good/defect)
  */
 const getAnnotatedImage = async (req, res) => {
   try {
@@ -1079,10 +1104,11 @@ const getAnnotatedImage = async (req, res) => {
     // ✅ If still not found, return 404
     if (!imagePath || !basePath) {
       return res.status(404).json({
-        error: 'Image not found',
+        error: 'File not found',
         filename: filename,
         inferenceId: inferenceId,
-        searchedFolders: folder ? [folder] : ['good', 'defect', 'annotated']
+        searchedFolders: folder ? [folder] : ['good', 'defect', 'annotated'],
+        message: 'Note: Videos are stored in annotated folder'
       });
     }
 
@@ -1100,13 +1126,18 @@ const getAnnotatedImage = async (req, res) => {
     // ✅ Check if file exists (double check)
     if (!fs.existsSync(imagePath)) {
       return res.status(404).json({
-        error: 'Image not found',
+        error: 'File not found',
         filename: filename,
         inferenceId: inferenceId
       });
     }
 
-    // ✅ Send image file
+    // ✅ Send file (works for both images and videos)
+    // Set appropriate content type based on file extension
+    const ext = path.extname(filename).toLowerCase();
+    if (['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v'].includes(ext)) {
+      res.setHeader('Content-Type', 'video/mp4'); // Default to mp4, browser will handle it
+    }
     res.sendFile(imagePath);
 
   } catch (error) {

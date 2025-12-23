@@ -2,9 +2,9 @@
 """
 YOLO Inference Script
 
-This script runs inference on images using a trained YOLO model.
+This script runs inference on images and videos using a trained YOLO model.
 It reads a JSON config file and runs YOLO inference, outputting
-annotated images and metadata.
+annotated images/videos and metadata.
 
 Usage:
     python run_inference.py --config /path/to/inference-config.json
@@ -42,9 +42,19 @@ def run_inference(config):
     try:
         # Extract config values
         model_path = config.get('model')
-        source = config.get('source')  # Image file or folder
+        source = config.get('source')  # Image/video file or folder
         output = config.get('output')  # Output directory
         conf = config.get('conf', 0.25)  # Confidence threshold
+        
+        # ✅ Detect if source contains videos
+        video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v']
+        is_video_file = os.path.isfile(source) and any(source.lower().endswith(ext) for ext in video_extensions)
+        
+        # ✅ If source is a folder, check for videos
+        has_videos = False
+        if os.path.isdir(source):
+            files = os.listdir(source)
+            has_videos = any(any(f.lower().endswith(ext) for ext in video_extensions) for f in files)
 
         # Validate required fields
         if not model_path:
@@ -81,16 +91,19 @@ def run_inference(config):
         print(f"Running inference on: {source}")
         print(f"Output directory: {output}")
         print(f"Confidence threshold: {conf}")
+        if is_video_file or has_videos:
+            print(f"🎬 Video files detected - will process videos")
         print("-" * 80)
         sys.stdout.flush()
 
         # ✅ Run inference
-        # YOLO's predict() method can handle both single images and folders
-        # It will save annotated images to: {output}/annotated/
+        # YOLO's predict() method can handle images, videos, and folders
+        # For images: saves annotated images to {output}/annotated/
+        # For videos: saves annotated videos to {output}/annotated/
         results = model.predict(
             source=source,
-            save=True,  # Save annotated images
-            save_txt=False,  # Don't save label files (we only need images)
+            save=True,  # Save annotated images/videos
+            save_txt=False,  # Don't save label files (we only need images/videos)
             conf=conf,  # Confidence threshold
             project=output,  # Output project directory
             name='annotated',  # Subdirectory name within project (creates output/annotated/)
@@ -102,57 +115,78 @@ def run_inference(config):
         sys.stdout.flush()
 
         # ✅ Collect metadata from results
-        total_images = len(results)
+        total_files = len(results)
         total_detections = 0
         all_detections = []
         detections_by_class = {}
+        video_files = []
+        image_files = []
 
         for i, result in enumerate(results):
-            image_path = result.path
-            image_name = os.path.basename(image_path)
+            file_path = result.path
+            file_name = os.path.basename(file_path)
+            
+            # ✅ Detect if this is a video file
+            is_video = any(file_name.lower().endswith(ext) for ext in video_extensions)
+            file_type = 'video' if is_video else 'image'
 
             # ✅ Update progress
-            print(f"Processing image {i + 1}/{total_images}: {image_name}")
+            if is_video:
+                print(f"Processing video {i + 1}/{total_files}: {file_name}")
+            else:
+                print(f"Processing image {i + 1}/{total_files}: {file_name}")
             sys.stdout.flush()
 
-            # Get detections
+            # ✅ For videos, YOLO processes frame by frame
+            # result.boxes contains detections from all frames combined
+            # For images, result.boxes contains detections from that image
             boxes = result.boxes
-            num_detections = len(boxes)
+            num_detections = len(boxes) if boxes is not None else 0
 
             total_detections += num_detections
 
-            image_detections = []
-            for box in boxes:
-                # Get class, confidence, and bounding box
-                cls = int(box.cls[0])
-                conf = float(box.conf[0])
-                xyxy = box.xyxy[0].tolist()  # [x1, y1, x2, y2]
+            file_detections = []
+            if boxes is not None:
+                for box in boxes:
+                    # Get class, confidence, and bounding box
+                    cls = int(box.cls[0])
+                    conf = float(box.conf[0])
+                    xyxy = box.xyxy[0].tolist()  # [x1, y1, x2, y2]
 
-                # Get class name
-                class_name = result.names[cls] if hasattr(result, 'names') else f'class_{cls}'
+                    # Get class name
+                    class_name = result.names[cls] if hasattr(result, 'names') else f'class_{cls}'
 
-                detection = {
-                    'class': class_name,
-                    'confidence': conf,
-                    'bbox': xyxy
-                }
-                image_detections.append(detection)
-
-                # ✅ Track detections by class
-                if class_name not in detections_by_class:
-                    detections_by_class[class_name] = {
-                        'count': 0,
-                        'confidences': []
+                    detection = {
+                        'class': class_name,
+                        'confidence': conf,
+                        'bbox': xyxy
                     }
-                detections_by_class[class_name]['count'] += 1
-                detections_by_class[class_name]['confidences'].append(conf)
+                    file_detections.append(detection)
 
-            # ✅ YOLO saves annotated images to {output}/annotated/{image_name}
-            all_detections.append({
-                'imagePath': image_name,
-                'annotatedPath': os.path.join('annotated', image_name),
-                'detections': image_detections
-            })
+                    # ✅ Track detections by class
+                    if class_name not in detections_by_class:
+                        detections_by_class[class_name] = {
+                            'count': 0,
+                            'confidences': []
+                        }
+                    detections_by_class[class_name]['count'] += 1
+                    detections_by_class[class_name]['confidences'].append(conf)
+
+            # ✅ YOLO saves annotated files to {output}/annotated/{file_name}
+            file_info = {
+                'filePath': file_name,
+                'fileType': file_type,
+                'annotatedPath': os.path.join('annotated', file_name),
+                'detections': file_detections,
+                'detectionCount': num_detections
+            }
+            
+            all_detections.append(file_info)
+            
+            if is_video:
+                video_files.append(file_info)
+            else:
+                image_files.append(file_info)
 
         # ✅ Calculate average confidence
         all_confidences = []
@@ -174,11 +208,15 @@ def run_inference(config):
 
         # ✅ Generate metadata JSON
         metadata = {
-            'totalImages': total_images,
+            'totalFiles': total_files,
+            'totalImages': len(image_files),
+            'totalVideos': len(video_files),
             'totalDetections': total_detections,
             'averageConfidence': average_confidence,
             'detectionsByClass': detections_by_class_list,
-            'images': all_detections
+            'files': all_detections,  # All files (images + videos)
+            'images': image_files,  # Image files only
+            'videos': video_files  # Video files only
         }
 
         # ✅ Save metadata to JSON file
@@ -187,7 +225,7 @@ def run_inference(config):
             json.dump(metadata, f, indent=2)
 
         print(f"✅ Metadata saved to: {metadata_path}")
-        print(f"📊 Total images processed: {total_images}")
+        print(f"📊 Total files processed: {total_files} ({len(image_files)} images, {len(video_files)} videos)")
         print(f"📊 Total detections: {total_detections}")
         print(f"📊 Average confidence: {average_confidence:.4f}")
         sys.stdout.flush()
