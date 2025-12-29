@@ -1,83 +1,101 @@
 const Bull = require('bull');
 const Redis = require('ioredis');
 
+/**
+ * Redis URL
+ * - Local: redis://127.0.0.1:6379
+ * - Azure: rediss://:<PRIMARY_KEY>@<HOSTNAME>:6380
+ */
 const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+const isTLS = redisUrl.startsWith('rediss://');
 
 /**
- * Create Redis client with Bull-safe options.
+ * Create Redis client with environment-safe options
  */
 function createRedisClient() {
   return new Redis(redisUrl, {
     enableReadyCheck: false,
     maxRetriesPerRequest: null,
+    ...(isTLS ? { tls: {} } : {}),
   });
 }
 
-// Bull queue with fresh Redis clients for each role
+/* ===========================
+   Bull Queues
+=========================== */
+
 const preprocessingQueue = new Bull('preprocess-dataset', {
-  createClient: (type) => {
-    return createRedisClient(); // Bull requires a new client for client/subscriber/bclient
-  }
+  createClient: () => createRedisClient(),
 });
 
-// Training queue for model training jobs
 const trainingQueue = new Bull('train-model', {
-  createClient: (type) => {
-    return createRedisClient();
-  }
+  createClient: () => createRedisClient(),
 });
 
-// Inference queue for prediction/inference jobs
 const inferenceQueue = new Bull('inference', {
-  createClient: (type) => {
-    return createRedisClient();
-  }
+  createClient: () => createRedisClient(),
 });
 
-// Separate monitor redis instance (not used by Bull)
-const monitorRedis = new Redis(redisUrl);
+/* ===========================
+   Optional Redis Monitor
+   (Only enabled in Azure)
+=========================== */
 
-monitorRedis.on('connect', () => {
-  console.log('✅ Redis (monitor) connected');
-});
+let monitorRedis = null;
 
-monitorRedis.on('error', (err) => {
-  console.error('❌ Redis (monitor) connection error:', err);
-});
+if (isTLS) {
+  monitorRedis = new Redis(redisUrl, {
+    tls: {},
+    enableReadyCheck: false,
+    maxRetriesPerRequest: null,
+  });
 
-// Preprocessing queue event logs
+  monitorRedis.on('connect', () => {
+    console.log('✅ Redis (monitor) connected');
+  });
+
+  monitorRedis.on('error', (err) => {
+    console.error('❌ Redis (monitor) connection error:', err.message);
+  });
+}
+
+/* ===========================
+   Queue Event Logs
+=========================== */
+
+// Preprocessing
 preprocessingQueue.on('completed', (job) => {
   console.log(`✅ Preprocessing job ${job.id} completed`);
 });
 
 preprocessingQueue.on('failed', (job, err) => {
-  console.error(`❌ Preprocessing job ${job.id} failed:`, err?.message || err);
+  console.error(`❌ Preprocessing job ${job.id} failed:`, err?.message);
 });
 
 preprocessingQueue.on('stalled', (job) => {
   console.warn(`⚠️ Preprocessing job ${job.id} stalled`);
 });
 
-// Training queue event logs
+// Training
 trainingQueue.on('completed', (job) => {
   console.log(`✅ Training job ${job.id} completed`);
 });
 
 trainingQueue.on('failed', (job, err) => {
-  console.error(`❌ Training job ${job.id} failed:`, err?.message || err);
+  console.error(`❌ Training job ${job.id} failed:`, err?.message);
 });
 
 trainingQueue.on('stalled', (job) => {
   console.warn(`⚠️ Training job ${job.id} stalled`);
 });
 
-// Inference queue event logs
+// Inference
 inferenceQueue.on('completed', (job) => {
   console.log(`✅ Inference job ${job.id} completed`);
 });
 
 inferenceQueue.on('failed', (job, err) => {
-  console.error(`❌ Inference job ${job.id} failed:`, err?.message || err);
+  console.error(`❌ Inference job ${job.id} failed:`, err?.message);
 });
 
 inferenceQueue.on('stalled', (job) => {
@@ -87,5 +105,5 @@ inferenceQueue.on('stalled', (job) => {
 module.exports = {
   preprocessingQueue,
   trainingQueue,
-  inferenceQueue
+  inferenceQueue,
 };
