@@ -8,6 +8,15 @@ const fs = require('fs');
 const fsPromises = require('fs').promises;
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const { spawn } = require('child_process');
+
+// ✅ Store long-lived Python processes for live camera inference
+// Key: inferenceId, Value: { process, modelPath, defaultConf, model, inferenceJob }
+const liveInferenceProcesses = new Map();
+
+// ✅ Store pending frame requests for matching responses
+// Key: inferenceId_requestId, Value: { resolve, reject, timestamp }
+const pendingFrameRequests = new Map();
 
 /**
  * Inference Controller - Handles inference/prediction job management
@@ -360,6 +369,148 @@ const startLiveInference = async (req, res) => {
 
     await inferenceJob.save();
 
+    // ✅ Spawn long-lived Python process for this inference session
+    const pythonScriptPath = path.join(__dirname, '../inference-scripts/process_frame_stream.py');
+    const scriptExists = await fsPromises.access(pythonScriptPath).then(() => true).catch(() => false);
+    
+    if (!scriptExists) {
+      return res.status(500).json({
+        error: 'Inference script not found',
+        path: pythonScriptPath
+      });
+    }
+
+    // ✅ Get default confidence threshold from request or use 0.25
+    const defaultConf = req.body.confidenceThreshold !== undefined 
+      ? parseFloat(req.body.confidenceThreshold) 
+      : 0.25;
+
+    // ✅ Spawn long-lived Python process
+    const pythonProcess = spawn('python', [
+      '-u', // Unbuffered output
+      pythonScriptPath,
+      '--model', model.bestCheckpointPath,
+      '--conf', defaultConf.toString()
+    ], {
+      cwd: path.join(__dirname, '../inference-scripts'),
+      stdio: ['pipe', 'pipe', 'pipe'], // stdin, stdout, stderr
+      env: { ...process.env, PYTHONUNBUFFERED: '1' }
+    });
+
+    let processReady = false;
+    let processError = null;
+
+    // ✅ Wait for process to be ready (read "Ready to process frames" from stderr)
+    pythonProcess.stderr.on('data', (data) => {
+      const message = data.toString();
+      if (message.includes('Ready to process frames')) {
+        processReady = true;
+      }
+      if (message.includes('ERROR')) {
+        processError = message;
+      }
+    });
+
+    // ✅ Wait a bit for process initialization (model loading)
+    await new Promise((resolve) => {
+      const checkReady = setInterval(() => {
+        if (processReady || processError) {
+          clearInterval(checkReady);
+          resolve();
+        }
+      }, 100);
+      
+      // Timeout after 10 seconds
+      setTimeout(() => {
+        clearInterval(checkReady);
+        resolve();
+      }, 10000);
+    });
+
+    // ✅ Check if process failed to start
+    if (processError) {
+      pythonProcess.kill();
+      return res.status(500).json({
+        error: 'Failed to start inference process',
+        message: processError
+      });
+    }
+
+    // ✅ Check if process is still alive
+    if (pythonProcess.killed) {
+      return res.status(500).json({
+        error: 'Inference process died during startup'
+      });
+    }
+
+    // ✅ Store process and cache model/inference job data
+    liveInferenceProcesses.set(inferenceId, {
+      process: pythonProcess,
+      modelPath: model.bestCheckpointPath,
+      defaultConf: defaultConf,
+      model: model,  // ✅ Cache model to avoid DB query per frame
+      inferenceJob: inferenceJob  // ✅ Cache inference job to avoid DB query per frame
+    });
+
+    // ✅ Set up continuous response listener for this process
+    // This listener routes responses to the correct pending request based on requestId
+    let responseBuffer = '';
+    pythonProcess.stdout.on('data', (data) => {
+      responseBuffer += data.toString();
+      
+      // Process complete JSON lines
+      const lines = responseBuffer.split('\n');
+      responseBuffer = lines.pop() || ''; // Keep incomplete line in buffer
+      
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine) continue;
+        
+        try {
+          const result = JSON.parse(trimmedLine);
+          
+          // ✅ Route response to matching pending request
+          if (result.requestId) {
+            const requestKey = `${inferenceId}_${result.requestId}`;
+            const pendingRequest = pendingFrameRequests.get(requestKey);
+            
+            if (pendingRequest) {
+              pendingFrameRequests.delete(requestKey);
+              pendingRequest.resolve(result);
+            }
+          }
+        } catch (parseError) {
+          // Not valid JSON, skip
+          continue;
+        }
+      }
+    });
+
+    // ✅ Handle process errors and cleanup
+    pythonProcess.on('error', (error) => {
+      console.error(`Python process error for ${inferenceId}:`, error);
+      // Reject all pending requests
+      for (const [key, value] of pendingFrameRequests.entries()) {
+        if (key.startsWith(`${inferenceId}_`)) {
+          value.reject(new Error('Process error'));
+          pendingFrameRequests.delete(key);
+        }
+      }
+      liveInferenceProcesses.delete(inferenceId);
+    });
+
+    pythonProcess.on('exit', (code) => {
+      console.log(`Python process exited for ${inferenceId} with code ${code}`);
+      // Reject all pending requests
+      for (const [key, value] of pendingFrameRequests.entries()) {
+        if (key.startsWith(`${inferenceId}_`)) {
+          value.reject(new Error('Process exited'));
+          pendingFrameRequests.delete(key);
+        }
+      }
+      liveInferenceProcesses.delete(inferenceId);
+    });
+
     return res.status(200).json({
       inferenceId: inferenceJob.inferenceId,
       status: inferenceJob.status,
@@ -406,15 +557,19 @@ const processLiveFrame = async (req, res) => {
       });
     }
 
-    // ✅ Find inference job
-    const inferenceJob = await InferenceJob.findOne({ inferenceId });
-
-    if (!inferenceJob) {
-      return res.status(404).json({
-        error: 'Inference job not found',
-        inferenceId: inferenceId
+    // ✅ Get cached process info (includes model and inference job - no DB query!)
+    const processInfo = liveInferenceProcesses.get(inferenceId);
+    
+    if (!processInfo) {
+      return res.status(400).json({
+        error: 'Inference session not found',
+        message: 'Please start the inference session first'
       });
     }
+
+    // ✅ Use cached inference job and model (no DB query needed!)
+    const inferenceJob = processInfo.inferenceJob;
+    const model = processInfo.model;
 
     // ✅ Validate job is running
     if (inferenceJob.status !== 'running') {
@@ -434,61 +589,10 @@ const processLiveFrame = async (req, res) => {
       });
     }
 
-    // ✅ Get model
-    const model = await Model.findById(inferenceJob.modelId);
-    if (!model) {
-      return res.status(404).json({
-        error: 'Model not found',
-        modelId: inferenceJob.modelId
-      });
-    }
-
-    // ✅ Validate model checkpoint exists
-    if (!model.bestCheckpointPath || !fs.existsSync(model.bestCheckpointPath)) {
-      return res.status(404).json({
-        error: 'Model checkpoint file not found',
-        modelId: model.modelId
-      });
-    }
-
-    // ✅ Get frames directory
-    const framesDir = inferenceJob.results?.framesPath || 
-                     path.join(process.cwd(), 'uploads', 'live-frames', inferenceId);
-    
-    // ✅ Ensure frames directory exists
-    await storageAdapter.ensureDir(framesDir);
-
-    // ✅ Generate unique filenames for input and output
-    const timestamp = Date.now();
-    const inputFramePath = path.join(framesDir, `frame_${timestamp}_input.jpg`);
-    // Only create output path if we need annotated image
-    const outputFramePath = returnAnnotatedImage 
-      ? path.join(framesDir, `frame_${timestamp}_annotated.jpg`)
-      : null;
-
-    // ✅ Decode base64 image and save to temp file
-    try {
-      // Remove data URL prefix if present
-      let base64Data = image;
-      if (image.includes(',')) {
-        base64Data = image.split(',')[1];
-      }
-
-      // Decode and save
-      const imageBuffer = Buffer.from(base64Data, 'base64');
-      await fsPromises.writeFile(inputFramePath, imageBuffer);
-    } catch (decodeError) {
-      return res.status(400).json({
-        error: 'Invalid image data',
-        message: 'Failed to decode base64 image',
-        details: decodeError.message
-      });
-    }
-
-    // ✅ Get confidence threshold (use provided or default)
+    // ✅ Get confidence threshold (use provided or default from process)
     const conf = confidenceThreshold !== undefined 
       ? parseFloat(confidenceThreshold) 
-      : 0.25;
+      : (processInfo.defaultConf || 0.25);
 
     if (isNaN(conf) || conf < 0 || conf > 1) {
       return res.status(400).json({
@@ -498,140 +602,83 @@ const processLiveFrame = async (req, res) => {
       });
     }
 
-    // ✅ Run Python inference script
-    const pythonScriptPath = path.join(__dirname, '../inference-scripts/process_frame.py');
-    
-    // Check if Python script exists
-    const scriptExists = await fsPromises.access(pythonScriptPath).then(() => true).catch(() => false);
-    if (!scriptExists) {
-      return res.status(500).json({
-        error: 'Inference script not found',
-        path: pythonScriptPath
+    // ✅ Validate process is alive
+    if (!processInfo.process || processInfo.process.killed) {
+      return res.status(400).json({
+        error: 'Inference process died',
+        message: 'Please restart the inference session'
       });
+    }
+
+    const pythonProcess = processInfo.process;
+
+    // ✅ Generate unique request ID for matching response
+    const requestId = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+    // ✅ Prepare image data (remove data URL prefix if present)
+    let base64Data = image;
+    if (image.includes(',')) {
+      base64Data = image.split(',')[1];
     }
 
     const startTime = Date.now();
-    
-    // ✅ Build Python command arguments
-    const pythonArgs = [
-      '-u', // Unbuffered output
-      pythonScriptPath,
-      '--model', model.bestCheckpointPath,
-      '--image', inputFramePath,
-      '--conf', conf.toString()
-    ];
-    
-    // ✅ Add output path or annotations-only flag
-    if (returnAnnotatedImage) {
-      pythonArgs.push('--output', outputFramePath);
-    } else {
-      pythonArgs.push('--annotations-only');
-    }
-    
-    // ✅ Spawn Python process
-    const { spawn } = require('child_process');
-    const pythonProcess = spawn('python', pythonArgs, {
-      cwd: path.join(__dirname, '../inference-scripts'),
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, PYTHONUNBUFFERED: '1' }
-    });
 
-    let stdout = '';
-    let stderr = '';
-
-    // ✅ Collect stdout (JSON result)
-    pythonProcess.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    // ✅ Collect stderr (errors)
-    pythonProcess.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    // ✅ Wait for process to complete
-    const exitCode = await new Promise((resolve) => {
-      pythonProcess.on('close', (code) => {
-        resolve(code);
+    // ✅ Set up response promise (response will be routed by continuous listener)
+    const responsePromise = new Promise((resolve, reject) => {
+      const requestKey = `${inferenceId}_${requestId}`;
+      
+      // ✅ Store pending request (continuous listener will route response here)
+      pendingFrameRequests.set(requestKey, {
+        resolve,
+        reject,
+        timestamp: Date.now()
       });
+
+      // ✅ Timeout after 5 seconds
+      setTimeout(() => {
+        const pendingRequest = pendingFrameRequests.get(requestKey);
+        if (pendingRequest) {
+          pendingFrameRequests.delete(requestKey);
+          pendingRequest.reject(new Error('Timeout waiting for response'));
+        }
+      }, 5000);
     });
+
+    // ✅ Send frame to Python process via stdin (JSON line) with request ID
+    const requestData = {
+      requestId: requestId,  // ✅ Include request ID for matching
+      image: base64Data,
+      conf: conf
+    };
+
+    // ✅ Send request to process
+    pythonProcess.stdin.write(JSON.stringify(requestData) + '\n');
+
+    let detectionData;
+    try {
+      detectionData = await responsePromise;
+    } catch (error) {
+      // ✅ Clean up pending request on error
+      const requestKey = `${inferenceId}_${requestId}`;
+      pendingFrameRequests.delete(requestKey);
+      
+      return res.status(500).json({
+        error: 'Frame processing timeout or error',
+        message: error.message
+      });
+    }
 
     const processingTime = Date.now() - startTime;
 
-    // ✅ Check if process failed
-    if (exitCode !== 0) {
-      console.error(`Python process failed with code ${exitCode}:`, stderr);
-      
-      // Clean up input file
-      try {
-        await fsPromises.unlink(inputFramePath);
-      } catch (e) {
-        // Ignore cleanup errors
-      }
-
+    // ✅ Check for errors in response
+    if (detectionData.error) {
       return res.status(500).json({
         error: 'Frame processing failed',
-        message: stderr || 'Python inference script failed',
-        exitCode: exitCode
+        message: detectionData.error
       });
     }
 
-    // ✅ Parse detection results from stdout (JSON)
-    let detectionData = null;
-    try {
-      if (stdout.trim()) {
-        detectionData = JSON.parse(stdout.trim());
-      }
-    } catch (parseError) {
-      console.warn('Failed to parse detection data from Python output:', parseError);
-    }
-
-    // ✅ Read annotated image and convert to base64 (only if requested)
-    let annotatedImageDataUrl = null;
-    if (returnAnnotatedImage) {
-      // ✅ Check if output file was created
-      if (!outputFramePath || !fs.existsSync(outputFramePath)) {
-        return res.status(500).json({
-          error: 'Annotated image not generated',
-          message: 'Python script completed but output file not found'
-        });
-      }
-
-      const annotatedImageBuffer = await fsPromises.readFile(outputFramePath);
-      const annotatedImageBase64 = annotatedImageBuffer.toString('base64');
-      annotatedImageDataUrl = `data:image/jpeg;base64,${annotatedImageBase64}`;
-    }
-
-    // ✅ Clean up temp files (keep only last N frames to prevent disk filling)
-    try {
-      // Delete input frame (we don't need it after processing)
-      await fsPromises.unlink(inputFramePath);
-
-      // Clean up old annotated frames (only if we're saving them)
-      if (returnAnnotatedImage && outputFramePath) {
-        const files = await fsPromises.readdir(framesDir);
-        const annotatedFiles = files
-          .filter(f => f.includes('_annotated.jpg'))
-          .sort()
-          .reverse(); // Newest first
-
-        // Delete files beyond the 10 most recent
-        if (annotatedFiles.length > 10) {
-          for (const oldFile of annotatedFiles.slice(10)) {
-            try {
-              await fsPromises.unlink(path.join(framesDir, oldFile));
-            } catch (e) {
-              // Ignore cleanup errors
-            }
-          }
-        }
-      }
-    } catch (cleanupError) {
-      console.warn('Frame cleanup warning:', cleanupError.message);
-      // Continue even if cleanup fails
-    }
-
-    // ✅ Update inference job statistics (optional - track frame count)
+    // ✅ Update inference job statistics (batch saves - every 20 frames to reduce DB load)
     if (!inferenceJob.results) {
       inferenceJob.results = {};
     }
@@ -639,19 +686,28 @@ const processLiveFrame = async (req, res) => {
       inferenceJob.results.totalFramesProcessed = 0;
     }
     inferenceJob.results.totalFramesProcessed = (inferenceJob.results.totalFramesProcessed || 0) + 1;
-    await inferenceJob.save();
+    
+    // ✅ Batch database saves (save every 20 frames instead of every frame)
+    // Note: We update the cached object, but only save to DB periodically
+    if (inferenceJob.results.totalFramesProcessed % 20 === 0) {
+      // ✅ Update cached object in map
+      processInfo.inferenceJob = inferenceJob;
+      await inferenceJob.save();
+    }
 
-    // ✅ Return detection data (and annotated image if requested)
+    // ✅ Return detection data with image dimensions
     const response = {
       detections: detectionData?.detections || [],
       totalDetections: detectionData?.totalDetections || 0,
-      processingTime: processingTime // milliseconds
+      processingTime: processingTime, // milliseconds
+      // ✅ Include image dimensions for coordinate scaling on frontend
+      imageWidth: detectionData?.imageWidth || 0,
+      imageHeight: detectionData?.imageHeight || 0
     };
     
-    // ✅ Include annotated image only if requested
-    if (returnAnnotatedImage && annotatedImageDataUrl) {
-      response.annotatedImage = annotatedImageDataUrl;
-    }
+    // ✅ Note: Annotated image not supported in stream mode (use overlay mode)
+    // If returnAnnotatedImage is true, we'd need to draw annotations on backend
+    // For now, overlay mode (returnAnnotatedImage: false) is recommended
     
     return res.status(200).json(response);
 
@@ -696,6 +752,19 @@ const stopLiveInference = async (req, res) => {
         status: inferenceJob.status,
         message: 'Job is already stopped or completed'
       });
+    }
+
+    // ✅ Kill long-lived Python process if it exists
+    const processInfo = liveInferenceProcesses.get(inferenceId);
+    if (processInfo && processInfo.process && !processInfo.process.killed) {
+      try {
+        processInfo.process.stdin.end(); // Close stdin
+        processInfo.process.kill('SIGTERM'); // Terminate process
+        console.log(`✅ Terminated Python process for inference ${inferenceId}`);
+      } catch (killError) {
+        console.warn(`⚠️ Failed to kill Python process: ${killError.message}`);
+      }
+      liveInferenceProcesses.delete(inferenceId);
     }
 
     // ✅ Update job status
