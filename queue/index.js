@@ -7,16 +7,21 @@ const Redis = require('ioredis');
  * - Azure: rediss://:<PRIMARY_KEY>@<HOSTNAME>:6380
  */
 const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-const isTLS = redisUrl.startsWith('rediss://');
+const isAzureRedis = redisUrl.startsWith('rediss://');
 
 /**
- * Create Redis client with environment-safe options
+ * Create Redis client (Bull-safe + Azure-safe)
  */
 function createRedisClient() {
   return new Redis(redisUrl, {
     enableReadyCheck: false,
     maxRetriesPerRequest: null,
-    ...(isTLS ? { tls: {} } : {}),
+
+    ...(isAzureRedis && {
+      tls: {
+        rejectUnauthorized: true,
+      },
+    }),
   });
 }
 
@@ -38,26 +43,18 @@ const inferenceQueue = new Bull('inference', {
 
 /* ===========================
    Optional Redis Monitor
-   (Only enabled in Azure)
+   (Safe for Azure & Local)
 =========================== */
 
-let monitorRedis = null;
+const monitorRedis = createRedisClient();
 
-if (isTLS) {
-  monitorRedis = new Redis(redisUrl, {
-    tls: {},
-    enableReadyCheck: false,
-    maxRetriesPerRequest: null,
-  });
+monitorRedis.on('connect', () => {
+  console.log('✅ Redis (monitor) connected');
+});
 
-  monitorRedis.on('connect', () => {
-    console.log('✅ Redis (monitor) connected');
-  });
-
-  monitorRedis.on('error', (err) => {
-    console.error('❌ Redis (monitor) connection error:', err.message);
-  });
-}
+monitorRedis.on('error', (err) => {
+  console.error('❌ Redis (monitor) connection error:', err.message);
+});
 
 /* ===========================
    Queue Event Logs
@@ -69,11 +66,11 @@ preprocessingQueue.on('completed', (job) => {
 });
 
 preprocessingQueue.on('failed', (job, err) => {
-  console.error(`❌ Preprocessing job ${job.id} failed:`, err?.message);
+  console.error(`❌ Preprocessing job ${job?.id} failed:`, err?.message);
 });
 
 preprocessingQueue.on('stalled', (job) => {
-  console.warn(`⚠️ Preprocessing job ${job.id} stalled`);
+  console.warn(`⚠️ Preprocessing job ${job?.id} stalled`);
 });
 
 // Training
@@ -82,11 +79,11 @@ trainingQueue.on('completed', (job) => {
 });
 
 trainingQueue.on('failed', (job, err) => {
-  console.error(`❌ Training job ${job.id} failed:`, err?.message);
+  console.error(`❌ Training job ${job?.id} failed:`, err?.message);
 });
 
 trainingQueue.on('stalled', (job) => {
-  console.warn(`⚠️ Training job ${job.id} stalled`);
+  console.warn(`⚠️ Training job ${job?.id} stalled`);
 });
 
 // Inference
@@ -95,12 +92,16 @@ inferenceQueue.on('completed', (job) => {
 });
 
 inferenceQueue.on('failed', (job, err) => {
-  console.error(`❌ Inference job ${job.id} failed:`, err?.message);
+  console.error(`❌ Inference job ${job?.id} failed:`, err?.message);
 });
 
 inferenceQueue.on('stalled', (job) => {
-  console.warn(`⚠️ Inference job ${job.id} stalled`);
+  console.warn(`⚠️ Inference job ${job?.id} stalled`);
 });
+
+/* ===========================
+   Exports
+=========================== */
 
 module.exports = {
   preprocessingQueue,
