@@ -2,109 +2,112 @@ const Bull = require('bull');
 const Redis = require('ioredis');
 
 /**
- * Redis URL
- * - Local: redis://127.0.0.1:6379
- * - Azure: rediss://:<PRIMARY_KEY>@<HOSTNAME>:6380
+ * Lazy-initialized queues (VERY IMPORTANT)
+ * This prevents Redis/Bull from starting before MongoDB
  */
-const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-const isAzureRedis = redisUrl.startsWith('rediss://');
+let queues = null;
 
 /**
- * Create Redis client (Bull-safe + Azure-safe)
+ * Detect Azure Redis
+ * Azure uses HOST + PASSWORD + TLS
  */
-function createRedisClient() {
-  return new Redis(redisUrl, {
-    enableReadyCheck: false,
-    maxRetriesPerRequest: null,
-
-    ...(isAzureRedis && {
-      tls: {
-        rejectUnauthorized: true,
-      },
-    }),
-  });
+function isAzureRedis() {
+  return (
+    !!process.env.REDIS_HOST &&
+    !!process.env.REDIS_PASSWORD
+  );
 }
 
-/* ===========================
-   Bull Queues
-=========================== */
+/**
+ * Build Redis config safely
+ */
+function getRedisConfig() {
+  if (isAzureRedis()) {
+    return {
+      host: process.env.REDIS_HOST,
+      port: Number(process.env.REDIS_PORT || 6380),
+      password: process.env.REDIS_PASSWORD,
+      tls: {}, // REQUIRED for Azure Redis
+      enableReadyCheck: false,
+      maxRetriesPerRequest: null,
+    };
+  }
 
-const preprocessingQueue = new Bull('preprocess-dataset', {
-  createClient: () => createRedisClient(),
-});
+  // Local Redis
+  return {
+    host: '127.0.0.1',
+    port: 6379,
+    enableReadyCheck: false,
+    maxRetriesPerRequest: null,
+  };
+}
 
-const trainingQueue = new Bull('train-model', {
-  createClient: () => createRedisClient(),
-});
+/**
+ * Bull-safe Redis client factory
+ * Bull REQUIRES a fresh client per role
+ */
+function createRedisClient() {
+  return new Redis(getRedisConfig());
+}
 
-const inferenceQueue = new Bull('inference', {
-  createClient: () => createRedisClient(),
-});
+/**
+ * Initialize queues ONLY when called
+ */
+function initQueues() {
+  if (queues) return queues; // prevent double init
 
-/* ===========================
-   Optional Redis Monitor
-   (Safe for Azure & Local)
-=========================== */
+  console.log('⏳ Initializing Bull queues...');
 
-const monitorRedis = createRedisClient();
+  const preprocessingQueue = new Bull('preprocess-dataset', {
+    createClient: createRedisClient,
+  });
 
-monitorRedis.on('connect', () => {
-  console.log('✅ Redis (monitor) connected');
-});
+  const trainingQueue = new Bull('train-model', {
+    createClient: createRedisClient,
+  });
 
-monitorRedis.on('error', (err) => {
-  console.error('❌ Redis (monitor) connection error:', err.message);
-});
+  const inferenceQueue = new Bull('inference', {
+    createClient: createRedisClient,
+  });
 
-/* ===========================
-   Queue Event Logs
-=========================== */
+  /* ===========================
+     Queue Event Logs
+  =========================== */
 
-// Preprocessing
-preprocessingQueue.on('completed', (job) => {
-  console.log(`✅ Preprocessing job ${job.id} completed`);
-});
+  preprocessingQueue.on('completed', (job) =>
+    console.log(`✅ Preprocessing job ${job.id} completed`)
+  );
 
-preprocessingQueue.on('failed', (job, err) => {
-  console.error(`❌ Preprocessing job ${job?.id} failed:`, err?.message);
-});
+  preprocessingQueue.on('failed', (job, err) =>
+    console.error(`❌ Preprocessing job ${job?.id} failed:`, err?.message)
+  );
 
-preprocessingQueue.on('stalled', (job) => {
-  console.warn(`⚠️ Preprocessing job ${job?.id} stalled`);
-});
+  trainingQueue.on('completed', (job) =>
+    console.log(`✅ Training job ${job.id} completed`)
+  );
 
-// Training
-trainingQueue.on('completed', (job) => {
-  console.log(`✅ Training job ${job.id} completed`);
-});
+  trainingQueue.on('failed', (job, err) =>
+    console.error(`❌ Training job ${job?.id} failed:`, err?.message)
+  );
 
-trainingQueue.on('failed', (job, err) => {
-  console.error(`❌ Training job ${job?.id} failed:`, err?.message);
-});
+  inferenceQueue.on('completed', (job) =>
+    console.log(`✅ Inference job ${job.id} completed`)
+  );
 
-trainingQueue.on('stalled', (job) => {
-  console.warn(`⚠️ Training job ${job?.id} stalled`);
-});
+  inferenceQueue.on('failed', (job, err) =>
+    console.error(`❌ Inference job ${job?.id} failed:`, err?.message)
+  );
 
-// Inference
-inferenceQueue.on('completed', (job) => {
-  console.log(`✅ Inference job ${job.id} completed`);
-});
+  queues = {
+    preprocessingQueue,
+    trainingQueue,
+    inferenceQueue,
+  };
 
-inferenceQueue.on('failed', (job, err) => {
-  console.error(`❌ Inference job ${job?.id} failed:`, err?.message);
-});
-
-inferenceQueue.on('stalled', (job) => {
-  console.warn(`⚠️ Inference job ${job?.id} stalled`);
-});
-
-/* ===========================
-   Exports
-=========================== */
+  console.log('✅ Bull queues initialized');
+  return queues;
+}
 
 module.exports = {
-  preprocessingQueue,
-  trainingQueue,
-  inferenceQueue,
+  initQueues,
 };

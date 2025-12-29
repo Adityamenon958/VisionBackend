@@ -1,12 +1,44 @@
 // workers/trainingWorker.js
-require('dotenv').config(); // load .env so process.env.MONGO_URI is available
+const path = require('path');
+require('dotenv').config({
+  path: path.resolve(process.cwd(), '.env'),
+});
+ // load .env so process.env.MONGO_URI is available
+ console.log('🧪 Worker ENV check:', {
+  MONGO_URI: process.env.MONGO_URI ? 'FOUND' : 'MISSING',
+  REDIS_HOST: process.env.REDIS_HOST || 'LOCAL',
+});
+
+
+    
 
 const mongoose = require('mongoose');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
-const path = require('path');
+const Bull = require('bull');
+
+const redisConfig = process.env.REDIS_HOST
+  ? {
+      host: process.env.REDIS_HOST,
+      port: Number(process.env.REDIS_PORT || 6380),
+      password: process.env.REDIS_PASSWORD,
+      tls: {},
+      enableReadyCheck: false,
+      maxRetriesPerRequest: null,
+    }
+  : {
+      host: '127.0.0.1',
+      port: 6379,
+      enableReadyCheck: false,
+      maxRetriesPerRequest: null,
+    };
+    const trainingQueue = new Bull('train-model', {
+      redis: redisConfig,
+    });
+
+
 const { spawn } = require('child_process');
-const { trainingQueue } = require('../queue');
+
 const TrainingJob = require('../models/TrainingJob');
 const Dataset = require('../models/Dataset');
 const Model = require('../models/Model');
@@ -780,13 +812,19 @@ const startWorker = async () => {
   try {
     // ✅ Connect to MongoDB
     const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017/visiondb';
-    await mongoose.connect(mongoUri);
+    await mongoose.connect(mongoUri, {
+      serverSelectionTimeoutMS: 30000, // wait longer for Atlas primary
+      socketTimeoutMS: 45000,
+      family: 4, // FORCE IPv4 (critical on Windows)
+    });
+    
     console.log('✅ Training worker connected to MongoDB');
 
     // ✅ Process jobs from queue
-    trainingQueue.process(async (job) => {
+    trainingQueue.process(1, async (job) => {
       await processTrainingJob(job);
     });
+    
 
     console.log('✅ Training worker started. Waiting for jobs...');
 
