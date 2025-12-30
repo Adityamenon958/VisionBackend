@@ -1,10 +1,12 @@
 // workers/preprocessingWorker.js (top of file)
-require('dotenv').config(); // load .env so process.env.MONGO_URI is available
+const path = require('path');
+require('dotenv').config({
+  path: path.resolve(process.cwd(), '.env'),
+});
 
 const mongoose = require('mongoose');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
-const path = require('path');
 const sharp = require('sharp');
 const { preprocessingQueue } = require('../queue');
 const Dataset = require('../models/Dataset');
@@ -471,7 +473,11 @@ const processPreprocessingJob = async (job) => {
 const startWorker = async () => {
   // ✅ Connect to MongoDB
   const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017/visiondb';
-  await mongoose.connect(mongoUri);
+  await mongoose.connect(mongoUri, {
+    serverSelectionTimeoutMS: 30000, // wait longer for Atlas primary
+    socketTimeoutMS: 45000,
+    family: 4, // FORCE IPv4 (critical on Windows)
+  });
   console.log('✅ Worker connected to MongoDB');
 
   // ✅ Process jobs from the queue
@@ -489,6 +495,13 @@ process.on('unhandledRejection', (reason) => {
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
+});
+
+// ✅ Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, shutting down gracefully...');
+  await mongoose.connection.close();
+  process.exit(0);
 });
 
 // ✅ Start worker if this file is run directly

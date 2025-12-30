@@ -108,6 +108,28 @@ function initQueues() {
   return queues;
 }
 
+/**
+ * Helper function to get queues (auto-initializes if needed)
+ * This ensures queues are initialized before use
+ */
+function getQueues() {
+  if (!queues) {
+    initQueues();
+  }
+  return queues;
+}
+
 module.exports = {
   initQueues,
+  // ✅ Export queues as getters (lazy initialization)
+  // This allows controllers to import queues directly
+  get trainingQueue() {
+    return getQueues().trainingQueue;
+  },
+  get preprocessingQueue() {
+    return getQueues().preprocessingQueue;
+  },
+  get inferenceQueue() {
+    return getQueues().inferenceQueue;
+  }
 };

@@ -106,6 +106,11 @@ const startServer = async () => {
     await mongoose.connect(mongoUri);
     console.log('✅ Connected to MongoDB');
 
+    // ✅ Initialize Bull queues (after MongoDB connection)
+    // This ensures Redis/Bull starts after MongoDB is ready
+    const { initQueues } = require('./queue');
+    initQueues();
+
     // ✅ Start Express server
     app.listen(PORT, () => {
       console.log(`✅ Server running on http://localhost:${PORT}`);

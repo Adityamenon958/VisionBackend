@@ -1,10 +1,12 @@
 // workers/inferenceWorker.js
-require('dotenv').config(); // load .env so process.env.MONGO_URI is available
+const path = require('path');
+require('dotenv').config({
+  path: path.resolve(process.cwd(), '.env'),
+});
 
 const mongoose = require('mongoose');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
-const path = require('path');
 const { spawn } = require('child_process');
 const { inferenceQueue } = require('../queue');
 const InferenceJob = require('../models/InferenceJob');
@@ -540,7 +542,11 @@ const startWorker = async () => {
   try {
     // ✅ Connect to MongoDB
     const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017/visiondb';
-    await mongoose.connect(mongoUri);
+    await mongoose.connect(mongoUri, {
+      serverSelectionTimeoutMS: 30000, // wait longer for Atlas primary
+      socketTimeoutMS: 45000,
+      family: 4, // FORCE IPv4 (critical on Windows)
+    });
     console.log('✅ Inference worker connected to MongoDB');
 
     // ✅ Process inference jobs from queue
@@ -563,6 +569,13 @@ mongoose.connection.on('error', (err) => {
 
 mongoose.connection.on('disconnected', () => {
   console.warn('⚠️ MongoDB disconnected');
+});
+
+// ✅ Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, shutting down gracefully...');
+  await mongoose.connection.close();
+  process.exit(0);
 });
 
 // ✅ Start the worker

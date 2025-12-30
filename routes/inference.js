@@ -19,33 +19,29 @@ const {
   listDatasetsWithTestFolders
 } = require('../controllers/inferenceController');
 
-// ✅ Configure multer for custom image and video uploads
-// ⚠️ CAUTION: Ensure temp directory exists to prevent errors
-const tempDir = path.join(process.cwd(), 'uploads', 'inference-temp');
-if (!fs.existsSync(tempDir)) {
-  fs.mkdirSync(tempDir, { recursive: true });
-}
+/**
+ * Inference Routes
+ * 
+ * These routes handle inference job management:
+ * - Start batch inference (images/videos)
+ * - Start/stop live camera inference
+ * - Get inference status and results
+ * - Get annotated images/videos
+ * - Cancel/delete inference jobs
+ * - List inference history
+ */
 
-// ✅ Multer configuration for inference image and video uploads
-const inferenceStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    // ✅ Save uploaded files to temp directory
-    cb(null, tempDir);
-  },
-  filename: (req, file, cb) => {
-    // ✅ Generate unique temp filename to avoid collisions
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, `inf-${uniqueSuffix}-${file.originalname}`);
-  }
-});
+// ✅ Configure multer for inference file uploads
+const inferenceTempDir = path.join(process.cwd(), 'uploads', 'inference-temp');
+if (!fs.existsSync(inferenceTempDir)) {
+  fs.mkdirSync(inferenceTempDir, { recursive: true });
+}
 
 // ✅ File filter - accept image and video files
 const inferenceFileFilter = (req, file, cb) => {
   const ext = path.extname(file.originalname).toLowerCase();
-  const validImageExtensions = ['.jpg', '.jpeg', '.png'];
-  const validVideoExtensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v'];
-  const validExtensions = [...validImageExtensions, ...validVideoExtensions];
-  
+  const validExtensions = ['.jpg', '.jpeg', '.png', '.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v'];
+
   if (validExtensions.includes(ext)) {
     cb(null, true);
   } else {
@@ -55,108 +51,56 @@ const inferenceFileFilter = (req, file, cb) => {
 
 // ✅ Create multer instance for inference uploads
 const uploadInferenceImages = multer({
-  storage: inferenceStorage,
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      cb(null, inferenceTempDir);
+    },
+    filename: (req, file, cb) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      cb(null, `inf-${uniqueSuffix}-${file.originalname}`);
+    }
+  }),
   fileFilter: inferenceFileFilter,
   limits: {
     fileSize: 500 * 1024 * 1024, // 500MB per file limit (increased for videos)
-    files: 1000 // Maximum 1000 files per upload (images or videos)
+    files: 1000 // Maximum 1000 files per upload
   }
 });
 
-/**
- * GET /api/inference
- * List all inference jobs for company/project
- * 
- * Query params: company (required), project (required), status (optional)
- */
-router.get('/', listInferenceJobs);
-
-/**
- * POST /api/inference/start
- * Start batch inference on test folder OR custom uploaded images
- * 
- * For dataset-based inference:
- *   Body (JSON): { modelId, datasetId, confidenceThreshold? }
- * 
- * For custom image/video upload:
- *   Body (multipart/form-data): 
- *     - modelId (text field)
- *     - confidenceThreshold? (text field, optional)
- *     - images (file field, multiple images/videos allowed)
- */
-// ✅ Accept both images and videos in the 'images' field (backward compatible)
-router.post('/start', uploadInferenceImages.array('images', 1000), startBatchInference);
-
-/**
- * POST /api/inference/live/start
- * Start live camera inference
- * 
- * Body: { modelId, confidenceThreshold? }
- */
-router.post('/live/start', startLiveInference);
-
-/**
- * POST /api/inference/live/:inferenceId/frame
- * Process a single frame from live camera
- * 
- * Body: {
- *   image: "data:image/jpeg;base64,...",
- *   confidenceThreshold?: 0.25
- * }
- */
-router.post('/live/:inferenceId/frame', processLiveFrame);
-
-/**
- * POST /api/inference/live/:inferenceId/stop
- * Stop live camera inference
- */
-router.post('/live/:inferenceId/stop', stopLiveInference);
-
-/**
- * GET /api/inference/:inferenceId/status
- * Get inference job status and progress
- */
-router.get('/:inferenceId/status', getInferenceStatus);
-
-/**
- * GET /api/inference/:inferenceId/results
- * Get inference results (annotated images, metadata)
- */
-router.get('/:inferenceId/results', getInferenceResults);
-
-/**
- * GET /api/inference/:inferenceId/image/:filename
- * Serve annotated image file from inference results
- */
-router.get('/:inferenceId/image/:filename', getAnnotatedImage);
-
-/**
- * POST /api/inference/:inferenceId/cancel
- * Cancel a running inference job
- */
-router.post('/:inferenceId/cancel', cancelInference);
-
-/**
- * DELETE /api/inference/:inferenceId
- * Delete inference job and its results (files + MongoDB document)
- */
-router.delete('/:inferenceId', deleteInference);
-
-/**
- * GET /api/inference/models
- * List available trained models for company/project
- * 
- * Query params: company, project
- */
+// GET /api/inference/models - List available models for inference
 router.get('/models', listAvailableModels);
 
-/**
- * GET /api/inference/datasets
- * List datasets with test folders for company/project
- * 
- * Query params: company, project
- */
+// GET /api/inference/datasets - List datasets with test folders
 router.get('/datasets', listDatasetsWithTestFolders);
 
-module.exports = router;
+// GET /api/inference/history - List inference jobs (with filters)
+router.get('/history', listInferenceJobs);
 
+// POST /api/inference/start - Start batch inference (images/videos)
+router.post('/start', uploadInferenceImages.array('files', 1000), startBatchInference);
+
+// POST /api/inference/live/start - Start live camera inference
+router.post('/live/start', startLiveInference);
+
+// POST /api/inference/live/:inferenceId/frame - Process a frame from live camera
+router.post('/live/:inferenceId/frame', processLiveFrame);
+
+// POST /api/inference/live/:inferenceId/stop - Stop live camera inference
+router.post('/live/:inferenceId/stop', stopLiveInference);
+
+// GET /api/inference/:inferenceId/status - Get inference job status
+router.get('/:inferenceId/status', getInferenceStatus);
+
+// GET /api/inference/:inferenceId/results - Get inference results
+router.get('/:inferenceId/results', getInferenceResults);
+
+// GET /api/inference/:inferenceId/image/:filename - Get annotated image/video
+router.get('/:inferenceId/image/:filename', getAnnotatedImage);
+
+// POST /api/inference/:inferenceId/cancel - Cancel a running inference job
+router.post('/:inferenceId/cancel', cancelInference);
+
+// DELETE /api/inference/:inferenceId - Delete an inference job
+router.delete('/:inferenceId', deleteInference);
+
+module.exports = router;
