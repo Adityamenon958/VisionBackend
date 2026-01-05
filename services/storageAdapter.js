@@ -1,6 +1,7 @@
 const fs = require('fs').promises;
 const path = require('path');
 const { existsSync, mkdirSync } = require('fs');
+const { BlobServiceClient } = require('@azure/storage-blob');
 
 /**
  * Storage Adapter - Abstracts file storage operations
@@ -23,6 +24,15 @@ class StorageAdapter {
     if (!existsSync(this.basePath)) {
       mkdirSync(this.basePath, { recursive: true });
     }
+
+    // Initialize Azure Blob Service Client if in Azure mode
+    if (this.mode === 'azure') {
+      const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
+      if (!connectionString) {
+        throw new Error('AZURE_STORAGE_CONNECTION_STRING environment variable is required for Azure storage mode');
+      }
+      this.blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
+    }
   }
 
   /**
@@ -34,9 +44,8 @@ class StorageAdapter {
       // ✅ Recursive: true creates all parent directories if needed
       await fs.mkdir(dirPath, { recursive: true });
     } else if (this.mode === 'azure') {
-      // TODO: Implement Azure Blob container creation
-      // await azureBlobService.createContainerIfNotExists(containerName);
-      throw new Error('Azure storage not yet implemented');
+      // NO-OP for Azure Blob Storage (containers are created automatically)
+      return true;
     }
   }
 
@@ -54,10 +63,44 @@ class StorageAdapter {
         return false;
       }
     } else if (this.mode === 'azure') {
-      // TODO: Check if blob exists in Azure
-      // return await azureBlobService.blobExists(containerName, blobName);
-      throw new Error('Azure storage not yet implemented');
+      const { containerName, blobName } = this._parseAzurePath(filePath);
+      const containerClient = this.blobServiceClient.getContainerClient(containerName);
+      const blobClient = containerClient.getBlobClient(blobName);
+      return await blobClient.exists();
     }
+  }
+
+  /**
+   * Read a file and return its buffer
+   * @param {string} filePath - Path to file
+   * @returns {Promise<Buffer>} File content as buffer
+   */
+  async readFile(filePath) {
+    if (this.mode === 'local') {
+      return await fs.readFile(filePath);
+    } else if (this.mode === 'azure') {
+      const { containerName, blobName } = this._parseAzurePath(filePath);
+      const containerClient = this.blobServiceClient.getContainerClient(containerName);
+      const blobClient = containerClient.getBlobClient(blobName);
+      const downloadResponse = await blobClient.download();
+      const buffer = await this._streamToBuffer(downloadResponse.readableStreamBody);
+      return buffer;
+    }
+  }
+
+  /**
+   * Convert a readable stream to buffer
+   * @param {NodeJS.ReadableStream} stream - Readable stream
+   * @returns {Promise<Buffer>} Buffer containing stream data
+   * @private
+   */
+  async _streamToBuffer(stream) {
+    return new Promise((resolve, reject) => {
+      const chunks = [];
+      stream.on('data', (chunk) => chunks.push(chunk));
+      stream.on('end', () => resolve(Buffer.concat(chunks)));
+      stream.on('error', reject);
+    });
   }
 
   /**
@@ -91,12 +134,20 @@ class StorageAdapter {
         }
       }
     } else if (this.mode === 'azure') {
-      // TODO: Upload to Azure Blob Storage
-      // const containerName = this.extractContainerName(destPath);
-      // const blobName = this.extractBlobName(destPath);
-      // await azureBlobService.uploadFile(srcTempPath, containerName, blobName);
-      // await fs.unlink(srcTempPath); // Clean up temp file
-      throw new Error('Azure storage not yet implemented');
+      const { containerName, blobName } = this._parseAzurePath(destPath);
+      const containerClient = this.blobServiceClient.getContainerClient(containerName);
+      const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+      
+      // Read local temp file
+      const fileBuffer = await fs.readFile(srcTempPath);
+      
+      // Upload buffer to Azure Blob Storage
+      await blockBlobClient.upload(fileBuffer, fileBuffer.length, {
+        overwrite: true
+      });
+      
+      // Delete temp file after upload
+      await fs.unlink(srcTempPath);
     }
   }
 
@@ -313,6 +364,41 @@ class StorageAdapter {
   async moveDirectory(srcDir, destDir) {
     // ✅ Delegate to renameDirectory (same operation, better name)
     return this.renameDirectory(srcDir, destDir);
+  }
+
+  /**
+   * Parse Azure path to extract container name and blob name
+   * Supports both absolute and relative paths
+   * @param {string} filePath - Path to parse (e.g., "datasets/company/project/file.jpg" or "C:/path/datasets/company/file.jpg")
+   * @returns {{containerName: string, blobName: string}}
+   * @private
+   */
+  _parseAzurePath(filePath) {
+    // Normalize path separators (handle both / and \)
+    const normalizedPath = filePath.replace(/\\/g, '/');
+    
+    // Find container folder anywhere in the path (not just at start)
+    // This supports both absolute paths like "C:/path/datasets/..." and relative paths like "datasets/..."
+    let containerName;
+    let blobName;
+    
+    if (normalizedPath.includes('/datasets/')) {
+      containerName = 'datasets';
+      const containerIndex = normalizedPath.indexOf('/datasets/');
+      blobName = normalizedPath.substring(containerIndex + '/datasets/'.length);
+    } else if (normalizedPath.includes('/results/')) {
+      containerName = 'results';
+      const containerIndex = normalizedPath.indexOf('/results/');
+      blobName = normalizedPath.substring(containerIndex + '/results/'.length);
+    } else if (normalizedPath.includes('/models/')) {
+      containerName = 'models';
+      const containerIndex = normalizedPath.indexOf('/models/');
+      blobName = normalizedPath.substring(containerIndex + '/models/'.length);
+    } else {
+      throw new Error(`Azure path must contain '/datasets/', '/results/', or '/models/'. Got: ${filePath}`);
+    }
+    
+    return { containerName, blobName };
   }
 
   /**

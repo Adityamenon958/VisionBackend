@@ -520,7 +520,7 @@ const getDatasetFiles = async (req, res) => {
 /**
  * GET /api/dataset/:datasetId/file/:fileId/thumbnail
  * 
- * Serves thumbnail image if available
+ * Serves thumbnail image if available, falls back to original image if thumbnail doesn't exist
  * fileId can be storedName or file _id
  */
 const getFileThumbnail = async (req, res) => {
@@ -547,19 +547,37 @@ const getFileThumbnail = async (req, res) => {
       });
     }
 
-    // ✅ Build full path to image file
-    const datasetRoot = dataset.storagePath;
-    const imagePath = path.join(datasetRoot, file.storedPath);
+    // ✅ Build thumbnail path using storageAdapter helper
+    const thumbnailPath = storageAdapter.getThumbnailPath(
+      dataset.company,
+      dataset.project,
+      dataset.version,
+      file.storedName
+    );
 
-    // ✅ Check if file exists
-    if (!fs.existsSync(imagePath)) {
+    // ✅ Check if thumbnail exists, if not fall back to original image
+    const fileToServe = (await storageAdapter.exists(thumbnailPath)) 
+      ? thumbnailPath 
+      : path.join(dataset.storagePath, file.storedPath);
+
+    // ✅ Verify file exists before serving
+    if (!(await storageAdapter.exists(fileToServe))) {
       return res.status(404).json({
-        error: 'Image file not found on disk'
+        error: 'Image file not found'
       });
     }
 
-    // ✅ Serve image file
-    res.sendFile(path.resolve(imagePath));
+    // ✅ Read file content using storageAdapter
+    const fileBuffer = await storageAdapter.readFile(fileToServe);
+
+    // ✅ Set appropriate content type for image
+    const ext = path.extname(file.storedName).toLowerCase();
+    const contentType = ext === '.png' ? 'image/png' : 
+                       ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 
+                       'image/jpeg';
+
+    res.set('Content-Type', contentType);
+    res.send(fileBuffer);
 
   } catch (error) {
     console.error('Get thumbnail error:', error);
