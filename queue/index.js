@@ -26,6 +26,7 @@ function getRedisConfig() {
     return {
       host: process.env.REDIS_HOST,
       port: Number(process.env.REDIS_PORT || 6380),
+      username: process.env.REDIS_USERNAME || 'default',
       password: process.env.REDIS_PASSWORD,
       tls: {}, // REQUIRED for Azure Redis
       enableReadyCheck: false,
