@@ -22,6 +22,7 @@ const redisConfig = process.env.REDIS_HOST
       host: process.env.REDIS_HOST,
       port: Number(process.env.REDIS_PORT || 6380),
       password: process.env.REDIS_PASSWORD,
+      username: null,
       tls: {},
       enableReadyCheck: false,
       maxRetriesPerRequest: null,
