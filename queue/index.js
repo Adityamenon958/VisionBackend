@@ -1,5 +1,4 @@
 const Bull = require('bull');
-const Redis = require('ioredis');
 
 /**
  * Lazy-initialized queues (VERY IMPORTANT)
@@ -44,14 +43,6 @@ function getRedisConfig() {
 }
 
 /**
- * Bull-safe Redis client factory
- * Bull REQUIRES a fresh client per role
- */
-function createRedisClient() {
-  return new Redis(getRedisConfig());
-}
-
-/**
  * Initialize queues ONLY when called
  */
 function initQueues() {
@@ -59,16 +50,19 @@ function initQueues() {
 
   console.log('⏳ Initializing Bull queues...');
 
+  // Single Redis config object for all queues
+  const redisConfig = getRedisConfig();
+
   const preprocessingQueue = new Bull('preprocess-dataset', {
-    createClient: createRedisClient,
+    redis: redisConfig,
   });
 
   const trainingQueue = new Bull('train-model', {
-    createClient: createRedisClient,
+    redis: redisConfig,
   });
 
   const inferenceQueue = new Bull('inference', {
-    createClient: createRedisClient,
+    redis: redisConfig,
   });
 
   /* ===========================
