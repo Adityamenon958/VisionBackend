@@ -8,7 +8,9 @@ Before you start, make sure you have installed:
 
 1. **Node.js** (v16 or higher) - [Download](https://nodejs.org/)
 2. **MongoDB** - [Download](https://www.mongodb.com/try/download/community) or use MongoDB Atlas (cloud)
-3. **Redis** - [Download](https://redis.io/download) or use Redis Cloud
+3. **Redis/Memurai** - 
+   - **Windows:** Use [Memurai Desktop](https://www.memurai.com/get-memurai) (free for development) - See [MEMURAI_SETUP_WINDOWS.md](./MEMURAI_SETUP_WINDOWS.md) for detailed setup
+   - **Linux/Mac:** [Download Redis](https://redis.io/download) or use Redis Cloud
 
 ## 🚀 Quick Start
 
@@ -58,15 +60,28 @@ sudo systemctl start mongod
 mongod
 ```
 
-**Redis:**
+**Redis/Memurai:**
 ```bash
-# Windows: Download and run redis-server.exe
-# Or use WSL:
+# Windows: Use Memurai (Redis-compatible for Windows)
+# Option 1: Install Memurai Desktop (recommended)
+# Download from: https://www.memurai.com/get-memurai
+# After installation, start the service:
+Start-Service Memurai
+
+# Option 2: Run Memurai manually
+memurai-server
+
+# Option 3: Use WSL with Redis
 wsl redis-server
+
+# Option 4: Use Docker
+docker run -d -p 6379:6379 --name redis redis:latest
 
 # Linux/Mac:
 redis-server
 ```
+
+**📖 For detailed Memurai setup instructions on Windows, see [MEMURAI_SETUP_WINDOWS.md](./MEMURAI_SETUP_WINDOWS.md)**
 
 ### Step 4: Start the API Server
 
@@ -352,8 +367,10 @@ The `await` keyword "waits" for the operation to complete before continuing.
 - **Check:** Is `MONGO_URI` correct in `.env`?
 
 ### "Redis connection error"
-- **Check:** Is Redis running? `redis-server` or check service status
-- **Check:** Is `REDIS_URL` correct in `.env`?
+- **Windows:** Check if Memurai is running: `Get-Service Memurai` or `memurai-cli ping`
+- **Linux/Mac:** Check if Redis is running: `redis-server` or check service status
+- **Check:** Is `REDIS_URL` correct in `.env`? Should be `redis://localhost:6379`
+- **Windows users:** See [MEMURAI_SETUP_WINDOWS.md](./MEMURAI_SETUP_WINDOWS.md) for troubleshooting
 
 ### "Worker not processing jobs"
 - **Check:** Is the worker running? (Terminal 2)
