@@ -213,18 +213,33 @@ const uploadDataset = async (req, res) => {
 
     // ✅ Enqueue preprocessing job
     // ⚠️ CAUTION: Job payload must be serializable (plain objects, no functions)
-    await preprocessingQueue.add({
+    console.log('[QUEUE-ENQUEUE] Preparing preprocessing job', {
+      datasetId,
+      redisHost: process.env.REDIS_HOST,
+      redisPort: process.env.REDIS_PORT,
+      queueName: preprocessingQueue?.name,
+    });
+
+    const jobPayload = {
       datasetId: datasetId,
       storagePath: dataset.storagePath,
       company,
       project,
       version
-    }, {
+    };
+
+    const job = await preprocessingQueue.add(jobPayload, {
       attempts: 3, // Retry up to 3 times on failure
       backoff: {
         type: 'exponential',
         delay: 2000 // Start with 2s delay, doubles each retry
       }
+    });
+
+    console.log('[QUEUE-ENQUEUE] Preprocessing job enqueued', {
+      jobId: job.id,
+      datasetId,
+      queueName: preprocessingQueue.name,
     });
 
     // ✅ Return 202 Accepted (async processing started)

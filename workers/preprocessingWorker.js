@@ -4,6 +4,14 @@ require('dotenv').config({
   path: path.resolve(process.cwd(), '.env'),
 });
 
+// ✅ Log Redis environment at startup
+console.log('[WORKER-BOOT] Redis environment', {
+  host: process.env.REDIS_HOST,
+  port: process.env.REDIS_PORT,
+  hasPassword: !!process.env.REDIS_PASSWORD,
+  tlsEnabled: !!process.env.REDIS_HOST,
+});
+
 const mongoose = require('mongoose');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
@@ -480,8 +488,32 @@ const startWorker = async () => {
   });
   console.log('✅ Worker connected to MongoDB');
 
+  // ✅ Ensure queue readiness
+  await preprocessingQueue.isReady();
+  console.log('[WORKER-QUEUE] preprocessingQueue is ready and listening');
+
+  // ✅ Add queue lifecycle event logs
+  preprocessingQueue.on('error', (err) => {
+    console.error('[WORKER-QUEUE] Redis/Queue error', err);
+  });
+
+  preprocessingQueue.on('waiting', (jobId) => {
+    console.log('[WORKER-QUEUE] Job waiting', jobId);
+  });
+
+  preprocessingQueue.on('active', (job) => {
+    console.log('[WORKER-QUEUE] Job active', {
+      jobId: job.id,
+      datasetId: job.data?.datasetId,
+    });
+  });
+
   // ✅ Process jobs from the queue
-  preprocessingQueue.process(async (job) => {
+  preprocessingQueue.process(1, async (job) => {
+    console.log('[WORKER-JOB] Received preprocessing job', {
+      jobId: job.id,
+      datasetId: job.data?.datasetId,
+    });
     return await processPreprocessingJob(job);
   });
 
@@ -513,4 +545,3 @@ if (require.main === module) {
 }
 
 module.exports = { startWorker, processPreprocessingJob };
-
