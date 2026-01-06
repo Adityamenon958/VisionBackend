@@ -16,6 +16,8 @@ const mongoose = require('mongoose');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 const Bull = require('bull');
+const { BlobServiceClient } = require('@azure/storage-blob');
+const os = require('os');
 
 const redisConfig = process.env.REDIS_HOST
   ? {
@@ -99,6 +101,98 @@ function getBaseModelPath(modelType, modelSize = 'n') {
   
   // For other model types, return null (let Python script handle it)
   return null;
+}
+
+/**
+ * Download base model from Azure Blob Storage for a training job
+ * @param {string} jobId - Training job ID
+ * @param {string} modelSize - Model size (n, s, m, l, x)
+ * @param {object} logger - Logger object (defaults to console)
+ * @returns {Promise<{localModelPath: string, jobTempDir: string}>} Local model path and temp directory
+ */
+async function downloadBaseModelForJob({ jobId, modelSize, logger = console }) {
+  // Validate inputs
+  if (!jobId) {
+    throw new Error('jobId is required');
+  }
+  if (!modelSize) {
+    throw new Error('modelSize is required');
+  }
+
+  // Get Azure Storage connection string
+  const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
+  if (!connectionString) {
+    throw new Error('AZURE_STORAGE_CONNECTION_STRING environment variable is required');
+  }
+
+  // Initialize Blob Service Client
+  const blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
+  const containerName = 'models';
+  const blobName = `base/yolov8${modelSize}.pt`;
+
+  // Create job-specific temp directory
+  const jobTempDir = path.join(process.cwd(), 'uploads', 'training-temp', jobId);
+  const localModelPath = path.join(jobTempDir, 'base.pt');
+
+  try {
+    // Ensure temp directory exists
+    await fsPromises.mkdir(jobTempDir, { recursive: true });
+    logger.log(`✅ Created temp directory: ${jobTempDir}`);
+
+    // Get blob client
+    const containerClient = blobServiceClient.getContainerClient(containerName);
+    const blobClient = containerClient.getBlobClient(blobName);
+
+    // Verify blob exists
+    const blobExists = await blobClient.exists();
+    if (!blobExists) {
+      throw new Error(`Base model blob not found: ${containerName}/${blobName}`);
+    }
+
+    logger.log(`📥 Downloading base model from Azure Blob: ${containerName}/${blobName}`);
+
+    // Download blob
+    const downloadResponse = await blobClient.download();
+    if (!downloadResponse.readableStreamBody) {
+      throw new Error('Failed to get download stream from blob');
+    }
+
+    // Convert stream to buffer
+    const chunks = [];
+    for await (const chunk of downloadResponse.readableStreamBody) {
+      chunks.push(chunk);
+    }
+    const fileBuffer = Buffer.concat(chunks);
+
+    // Verify downloaded file size
+    if (fileBuffer.length === 0) {
+      throw new Error('Downloaded file is empty');
+    }
+
+    // Write file to local path
+    await fsPromises.writeFile(localModelPath, fileBuffer);
+    logger.log(`✅ Downloaded base model (${(fileBuffer.length / (1024 * 1024)).toFixed(2)} MB) to: ${localModelPath}`);
+
+    // Verify file was written successfully
+    const stats = await fsPromises.stat(localModelPath);
+    if (stats.size === 0) {
+      throw new Error('Downloaded file size is 0 after write');
+    }
+
+    return {
+      localModelPath,
+      jobTempDir
+    };
+
+  } catch (error) {
+    // Clean up temp directory on error
+    try {
+      await fsPromises.rmdir(jobTempDir, { recursive: true });
+    } catch (cleanupError) {
+      logger.warn(`⚠️ Failed to clean up temp directory: ${cleanupError.message}`);
+    }
+    throw new Error(`Failed to download base model: ${error.message}`);
+  }
 }
 
 /**
@@ -325,9 +419,29 @@ const processTrainingJob = async (job) => {
       console.log(`✅ Using trained model checkpoint: ${modelPath}`);
       console.log(`📊 Previous model metrics - mAP50: ${(trainedModel.metrics?.mAP50 || 0).toFixed(4)}, Precision: ${(trainedModel.metrics?.precision || 0).toFixed(4)}`);
     } else {
-      // ✅ Use base model (existing logic)
-      modelPath = getBaseModelPath(modelType, modelSize);
-      console.log(`✅ Using base model: ${modelPath}`);
+      // ✅ Download base model from Azure Blob Storage (if Azure connection string exists)
+      if (process.env.AZURE_STORAGE_CONNECTION_STRING) {
+        try {
+          const { localModelPath, jobTempDir } = await downloadBaseModelForJob({
+            jobId,
+            modelSize,
+            logger: console
+          });
+          modelPath = localModelPath;
+          console.log(`🔒 Using base model from Blob: ${localModelPath}`);
+        } catch (downloadError) {
+          // Update training job status to failed
+          trainingJob.status = 'failed';
+          trainingJob.error = downloadError.message;
+          trainingJob.logs.push(`❌ Failed to download base model: ${downloadError.message}`);
+          await trainingJob.save();
+          throw downloadError;
+        }
+      } else {
+        // ✅ Use base model (existing local logic)
+        modelPath = getBaseModelPath(modelType, modelSize);
+        console.log(`✅ Using base model: ${modelPath}`);
+      }
     }
 
     // ✅ Generate training config
