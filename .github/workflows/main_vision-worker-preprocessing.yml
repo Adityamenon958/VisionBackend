@@ -4,9 +4,6 @@
 name: Build and deploy Node.js app to Azure Web App - vision-worker-preprocessing
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
@@ -62,4 +59,5 @@ jobs:
           app-name: 'vision-worker-preprocessing'
           slot-name: 'Production'
           package: .
+
           
