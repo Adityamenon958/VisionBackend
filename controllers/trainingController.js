@@ -5,6 +5,7 @@ const { trainingQueue } = require('../queue');
 const trainingService = require('../services/trainingService');
 const fs = require('fs');
 const path = require('path');
+const { BlobServiceClient } = require('@azure/storage-blob');
 
 /**
  * Training Controller - Handles training job management
@@ -63,48 +64,130 @@ const getAvailableBaseModels = async (req, res) => {
       }));
     }
 
-    // Read directory and filter .pt files (if base models directory exists)
+    // ✅ DUAL MODE: Read base models from Azure Blob Storage OR local filesystem
     const models = [];
-    if (fs.existsSync(baseModelsDir)) {
-      const files = fs.readdirSync(baseModelsDir);
-      const modelFiles = files.filter(file => file.endsWith('.pt'));
+    const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
+    
+    if (connectionString) {
+      // ✅ Azure Blob Storage mode
+      console.log('[getAvailableBaseModels] Using Azure Blob Storage mode');
+      
+      try {
+        const blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
+        const containerName = 'models';
+        const prefix = 'base/';
+        
+        const containerClient = blobServiceClient.getContainerClient(containerName);
+        const baseModelsList = [];
+        
+        // List blobs with prefix "base/"
+        for await (const blob of containerClient.listBlobsFlat({ prefix })) {
+          // Skip directory placeholders (blobs ending with "/")
+          if (blob.name.endsWith('/')) {
+            continue;
+          }
+          
+          // Extract filename from blob name (e.g., "base/yolov8n.pt" -> "yolov8n.pt")
+          const filename = blob.name.substring(prefix.length);
+          
+          // Only process .pt files
+          if (!filename.endsWith('.pt')) {
+            continue;
+          }
+          
+          // Extract model size from filename (yolov8n.pt -> 'n', yolov11s.pt -> 's')
+          const v8Match = filename.match(/yolov8([nsmlx])\.pt/);
+          const v11Match = filename.match(/yolov11([nsmlx])\.pt/);
+          const size = v8Match ? v8Match[1] : (v11Match ? v11Match[1] : null);
+          const version = v8Match ? 'v8' : (v11Match ? 'v11' : null);
+          
+          // Skip invalid YOLO models
+          if (!size || !version) {
+            continue;
+          }
+          
+          // Map size codes to readable names
+          const sizeNames = {
+            'n': 'Nano',
+            's': 'Small',
+            'm': 'Medium',
+            'l': 'Large',
+            'x': 'Extra Large'
+          };
+          
+          const sizeMB = blob.properties.contentLength 
+            ? (blob.properties.contentLength / (1024 * 1024)).toFixed(2)
+            : '0.00';
+          
+          baseModelsList.push({
+            type: 'base',
+            filename: filename,
+            size: size,
+            version: version,
+            name: `YOLO${version} ${sizeNames[size]}`,
+            sizeMB: parseFloat(sizeMB),
+            path: `/models/${blob.name}` // Logical path for Azure mode
+          });
+        }
+        
+        // Sort by size (n, s, m, l, x)
+        const sizeOrder = { 'n': 1, 's': 2, 'm': 3, 'l': 4, 'x': 5 };
+        baseModelsList.sort((a, b) => (sizeOrder[a.size] || 99) - (sizeOrder[b.size] || 99));
+        models.push(...baseModelsList);
+        
+        console.log(`[getAvailableBaseModels] Found ${baseModelsList.length} base models in Azure Blob Storage`);
+        
+      } catch (error) {
+        console.error('[getAvailableBaseModels] Error reading from Azure Blob Storage:', error.message);
+        // Fall through to return empty array (don't break the API)
+      }
+    } else {
+      // ✅ Local filesystem mode
+      console.log('[getAvailableBaseModels] Using local filesystem mode');
+      
+      if (fs.existsSync(baseModelsDir)) {
+        const files = fs.readdirSync(baseModelsDir);
+        const modelFiles = files.filter(file => file.endsWith('.pt'));
 
-      // Map to model info
-      const baseModelsList = modelFiles.map(file => {
-      const filePath = path.join(baseModelsDir, file);
-      const stats = fs.statSync(filePath);
-      const sizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+        // Map to model info
+        const baseModelsList = modelFiles.map(file => {
+          const filePath = path.join(baseModelsDir, file);
+          const stats = fs.statSync(filePath);
+          const sizeMB = (stats.size / (1024 * 1024)).toFixed(2);
 
-      // Extract model size from filename (yolov8n.pt -> 'n', yolov11s.pt -> 's')
-      const v8Match = file.match(/yolov8([nsmlx])\.pt/);
-      const v11Match = file.match(/yolov11([nsmlx])\.pt/);
-      const size = v8Match ? v8Match[1] : (v11Match ? v11Match[1] : null);
-      const version = v8Match ? 'v8' : (v11Match ? 'v11' : null);
+          // Extract model size from filename (yolov8n.pt -> 'n', yolov11s.pt -> 's')
+          const v8Match = file.match(/yolov8([nsmlx])\.pt/);
+          const v11Match = file.match(/yolov11([nsmlx])\.pt/);
+          const size = v8Match ? v8Match[1] : (v11Match ? v11Match[1] : null);
+          const version = v8Match ? 'v8' : (v11Match ? 'v11' : null);
 
-      // Map size codes to readable names
-      const sizeNames = {
-        'n': 'Nano',
-        's': 'Small',
-        'm': 'Medium',
-        'l': 'Large',
-        'x': 'Extra Large'
-      };
+          // Map size codes to readable names
+          const sizeNames = {
+            'n': 'Nano',
+            's': 'Small',
+            'm': 'Medium',
+            'l': 'Large',
+            'x': 'Extra Large'
+          };
 
-      return {
-        type: 'base',
-        filename: file,
-        size: size,
-        version: version,
-        name: size && version ? `YOLO${version} ${sizeNames[size]}` : file.replace('.pt', ''),
-        sizeMB: parseFloat(sizeMB),
-        path: filePath
-      };
-      }).filter(model => model.size !== null); // Only include valid YOLO models
+          return {
+            type: 'base',
+            filename: file,
+            size: size,
+            version: version,
+            name: size && version ? `YOLO${version} ${sizeNames[size]}` : file.replace('.pt', ''),
+            sizeMB: parseFloat(sizeMB),
+            path: filePath
+          };
+        }).filter(model => model.size !== null); // Only include valid YOLO models
 
-      // Sort by size (n, s, m, l, x)
-      const sizeOrder = { 'n': 1, 's': 2, 'm': 3, 'l': 4, 'x': 5 };
-      baseModelsList.sort((a, b) => (sizeOrder[a.size] || 99) - (sizeOrder[b.size] || 99));
-      models.push(...baseModelsList);
+        // Sort by size (n, s, m, l, x)
+        const sizeOrder = { 'n': 1, 's': 2, 'm': 3, 'l': 4, 'x': 5 };
+        baseModelsList.sort((a, b) => (sizeOrder[a.size] || 99) - (sizeOrder[b.size] || 99));
+        models.push(...baseModelsList);
+        
+        console.log(`[getAvailableBaseModels] Found ${baseModelsList.length} base models in local filesystem`);
+      }
     }
 
     return res.status(200).json({
