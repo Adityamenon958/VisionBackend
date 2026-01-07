@@ -295,13 +295,25 @@ class StorageAdapter {
       // ✅ Copy file (does not delete source)
       await fs.copyFile(srcPath, destPath);
     } else if (this.mode === 'azure') {
-      // TODO: Copy blob in Azure Blob Storage
-      // const srcContainer = this.extractContainerName(srcPath);
-      // const srcBlob = this.extractBlobName(srcPath);
-      // const destContainer = this.extractContainerName(destPath);
-      // const destBlob = this.extractBlobName(destPath);
-      // await azureBlobService.copyBlob(srcContainer, srcBlob, destContainer, destBlob);
-      throw new Error('Azure storage not yet implemented');
+      console.log('[StorageAdapter][Azure] copyFile:', srcPath, '→', destPath);
+      
+      const { containerName: srcContainer, blobName: srcBlob } = this._parseAzurePath(srcPath);
+      const { containerName: destContainer, blobName: destBlob } = this._parseAzurePath(destPath);
+      
+      const srcContainerClient = this.blobServiceClient.getContainerClient(srcContainer);
+      const srcBlobClient = srcContainerClient.getBlobClient(srcBlob);
+      
+      const destContainerClient = this.blobServiceClient.getContainerClient(destContainer);
+      const destBlobClient = destContainerClient.getBlockBlobClient(destBlob);
+      
+      // Get source blob URL
+      const srcBlobUrl = srcBlobClient.url;
+      
+      // Start async copy operation
+      const copyOperation = await destBlobClient.beginCopyFromURL(srcBlobUrl);
+      
+      // Wait for copy to complete
+      await copyOperation.pollUntilDone();
     }
   }
 
@@ -364,6 +376,53 @@ class StorageAdapter {
   async moveDirectory(srcDir, destDir) {
     // ✅ Delegate to renameDirectory (same operation, better name)
     return this.renameDirectory(srcDir, destDir);
+  }
+
+  /**
+   * List files/blobs under a prefix
+   * @param {string} prefix - Path prefix to list (e.g., "datasets/company/project/images/train/")
+   * @returns {Promise<Array<{blobPath: string, name: string, size: number}>>}
+   */
+  async listFiles(prefix) {
+    if (this.mode === 'local') {
+      throw new Error('listFiles not implemented for local mode');
+    } else if (this.mode === 'azure') {
+      const { containerName, blobName: prefixBlobName } = this._parseAzurePath(prefix);
+      const containerClient = this.blobServiceClient.getContainerClient(containerName);
+      
+      const files = [];
+      for await (const blob of containerClient.listBlobsFlat({ prefix: prefixBlobName })) {
+        const fullBlobPath = `${containerName}/${blob.name}`;
+        files.push({
+          blobPath: fullBlobPath,
+          name: blob.name,
+          size: blob.properties.contentLength || 0
+        });
+      }
+      
+      return files;
+    }
+  }
+
+  /**
+   * Save a buffer directly to storage
+   * @param {Buffer} buffer - Buffer to save
+   * @param {string} destPath - Destination path
+   */
+  async saveBuffer(buffer, destPath) {
+    if (this.mode === 'local') {
+      const destDir = path.dirname(destPath);
+      await this.ensureDir(destDir);
+      await fs.writeFile(destPath, buffer);
+    } else if (this.mode === 'azure') {
+      const { containerName, blobName } = this._parseAzurePath(destPath);
+      const containerClient = this.blobServiceClient.getContainerClient(containerName);
+      const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+      
+      await blockBlobClient.upload(buffer, buffer.length, {
+        overwrite: true
+      });
+    }
   }
 
   /**
