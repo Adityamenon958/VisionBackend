@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
+const { initQueues } = require('./queue');
 const datasetRoutes = require('./routes/datasets');
 const trainingRoutes = require('./routes/training');
 const modelRoutes = require('./routes/models');
@@ -113,8 +114,13 @@ const startServer = async () => {
 
     // ✅ Initialize Bull queues (after MongoDB connection)
     // This ensures Redis/Bull starts after MongoDB is ready
-    const { initQueues } = require('./queue');
-    initQueues();
+    try {
+      initQueues();
+      console.log('✅ Queues initialized in API');
+    } catch (error) {
+      console.error('❌ Failed to initialize queues:', error);
+      process.exit(1);
+    }
 
     // ✅ Start Express server
     app.listen(PORT, () => {

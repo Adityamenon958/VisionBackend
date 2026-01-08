@@ -4,6 +4,14 @@ require('dotenv').config({
   path: path.resolve(process.cwd(), '.env'),
 });
 
+// ✅ Log Redis environment at startup
+console.log('[WORKER-BOOT] Redis environment', {
+  host: process.env.REDIS_HOST,
+  port: process.env.REDIS_PORT,
+  hasPassword: !!process.env.REDIS_PASSWORD,
+  tlsEnabled: !!process.env.REDIS_HOST,
+});
+
 const mongoose = require('mongoose');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
@@ -99,6 +107,8 @@ const processPreprocessingJob = async (job) => {
     const labelManifest = new Map(); // originalName (base) → { storedName, storedPath, fileEntry }
 
     const datasetRoot = storageAdapter.buildDatasetPath(company, project, version);
+    const isAzure = storageAdapter.mode === 'azure';
+    const logicalDatasetRoot = `/datasets/${company}/${project}/${version}`;
 
     for (const fileEntry of dataset.files) {
       const originalBaseName = path.parse(fileEntry.originalName).name; // Remove extension
@@ -172,7 +182,9 @@ const processPreprocessingJob = async (job) => {
     for (const imageInfo of trainImages) {
       try {
         // ✅ Use storedPath to find file in its original folder location
-        const srcPath = path.join(datasetRoot, imageInfo.storedPath); // e.g., datasetRoot/images/good/storedName
+        const srcPath = isAzure
+          ? `${logicalDatasetRoot}/${imageInfo.storedPath}`
+          : path.join(datasetRoot, imageInfo.storedPath); // e.g., datasetRoot/images/good/storedName
         const destPath = path.join(trainImagesPath, imageInfo.storedName); // Flattened: train/images/storedName
         
         // Check if source file exists
@@ -187,7 +199,9 @@ const processPreprocessingJob = async (job) => {
           
           let hasLabels = false;
           if (labelInfo) {
-            const labelSrcPath = path.join(datasetRoot, labelInfo.storedPath); // e.g., datasetRoot/labels/good/storedName
+            const labelSrcPath = isAzure
+              ? `${logicalDatasetRoot}/${labelInfo.storedPath}`
+              : path.join(datasetRoot, labelInfo.storedPath); // e.g., datasetRoot/labels/good/storedName
             // Use image's storedName (without extension) + .txt for label filename
             const imageBaseName = path.parse(imageInfo.storedName).name; // Remove .jpg extension
             const labelDestPath = path.join(trainLabelsPath, `${imageBaseName}.txt`); // Match image filename
@@ -259,7 +273,9 @@ const processPreprocessingJob = async (job) => {
     for (const imageInfo of valImages) {
       try {
         // ✅ Use storedPath to find file in its original folder location
-        const srcPath = path.join(datasetRoot, imageInfo.storedPath); // e.g., datasetRoot/images/good/storedName
+        const srcPath = isAzure
+          ? `${logicalDatasetRoot}/${imageInfo.storedPath}`
+          : path.join(datasetRoot, imageInfo.storedPath); // e.g., datasetRoot/images/good/storedName
         const destPath = path.join(valImagesPath, imageInfo.storedName); // Flattened: val/images/storedName
         
         // Check if source file exists
@@ -274,7 +290,9 @@ const processPreprocessingJob = async (job) => {
           
           let hasLabels = false;
           if (labelInfo) {
-            const labelSrcPath = path.join(datasetRoot, labelInfo.storedPath); // e.g., datasetRoot/labels/good/storedName
+            const labelSrcPath = isAzure
+              ? `${logicalDatasetRoot}/${labelInfo.storedPath}`
+              : path.join(datasetRoot, labelInfo.storedPath); // e.g., datasetRoot/labels/good/storedName
             // Use image's storedName (without extension) + .txt for label filename
             const imageBaseName = path.parse(imageInfo.storedName).name; // Remove .jpg extension
             const labelDestPath = path.join(valLabelsPath, `${imageBaseName}.txt`); // Match image filename
@@ -346,7 +364,9 @@ const processPreprocessingJob = async (job) => {
     if (splitStrategy === 'labeled-only' && testImages.length > 0) {
       for (const imageInfo of testImages) {
         try {
-          const srcPath = path.join(datasetRoot, imageInfo.storedPath);
+          const srcPath = isAzure
+            ? `${logicalDatasetRoot}/${imageInfo.storedPath}`
+            : path.join(datasetRoot, imageInfo.storedPath);
           const destPath = path.join(testImagesPath, imageInfo.storedName);
           
           if (await storageAdapter.exists(srcPath)) {
@@ -410,7 +430,9 @@ const processPreprocessingJob = async (job) => {
     
     for (const imageInfo of testSampleImages) {
       try {
-        const srcPath = path.join(datasetRoot, imageInfo.storedPath);
+        const srcPath = isAzure
+          ? `${logicalDatasetRoot}/${imageInfo.storedPath}`
+          : path.join(datasetRoot, imageInfo.storedPath);
         const destPath = path.join(testImagesPath, imageInfo.storedName);
         
         if (await storageAdapter.exists(srcPath)) {
@@ -487,13 +509,26 @@ const processPreprocessingJob = async (job) => {
     for (const imageInfo of allImagesForThumbnails) {
       try {
         // ✅ Use storedPath to read from original folder location
-        const originalImagePath = path.join(datasetRoot, imageInfo.storedPath);
+        const originalImagePath = isAzure
+          ? `${logicalDatasetRoot}/${imageInfo.storedPath}`
+          : path.join(datasetRoot, imageInfo.storedPath);
 
         if (await storageAdapter.exists(originalImagePath)) {
-          const thumbnailPath = path.join(thumbnailsPath, `thumb_${imageInfo.storedName}`);
-          await sharp(originalImagePath)
-            .resize(200, 200, { fit: 'inside', withoutEnlargement: true })
-            .toFile(thumbnailPath);
+          if (isAzure) {
+            const buffer = await storageAdapter.readFile(originalImagePath);
+
+            const thumbBuffer = await sharp(buffer)
+              .resize(200, 200, { fit: 'inside', withoutEnlargement: true })
+              .toBuffer();
+
+            const blobThumbPath = `${logicalDatasetRoot}/thumbnails/thumb_${imageInfo.storedName}`;
+            await storageAdapter.saveBuffer(thumbBuffer, blobThumbPath);
+          } else {
+            const thumbnailPath = path.join(thumbnailsPath, `thumb_${imageInfo.storedName}`);
+            await sharp(originalImagePath)
+              .resize(200, 200, { fit: 'inside', withoutEnlargement: true })
+              .toFile(thumbnailPath);
+          }
           thumbnailsGenerated++;
         }
       } catch (error) {
@@ -515,58 +550,60 @@ const processPreprocessingJob = async (job) => {
     // ✅ Extract labels from label files (read from both train and val)
     const labelsSet_final = new Set();
     
-    // Read from train labels
-    try {
-      const trainLabelFiles = await fsPromises.readdir(trainLabelsPath);
-      for (const labelFile of trainLabelFiles) {
-        try {
-          const labelPath = path.join(trainLabelsPath, labelFile);
-          const content = await fsPromises.readFile(labelPath, 'utf-8');
-          const lines = content.trim().split('\n');
-          for (const line of lines) {
-            const parts = line.trim().split(' ');
-            if (parts.length > 0) {
-              const classId = parseInt(parts[0]);
-              if (!isNaN(classId)) {
-                // ✅ In YOLO format, class ID is first number
-                // For now, we'll store class IDs. You can map to class names later
-                labelsSet_final.add(`class_${classId}`);
+    if (!isAzure) {
+      // Read from train labels
+      try {
+        const trainLabelFiles = await fsPromises.readdir(trainLabelsPath);
+        for (const labelFile of trainLabelFiles) {
+          try {
+            const labelPath = path.join(trainLabelsPath, labelFile);
+            const content = await fsPromises.readFile(labelPath, 'utf-8');
+            const lines = content.trim().split('\n');
+            for (const line of lines) {
+              const parts = line.trim().split(' ');
+              if (parts.length > 0) {
+                const classId = parseInt(parts[0]);
+                if (!isNaN(classId)) {
+                  // ✅ In YOLO format, class ID is first number
+                  // For now, we'll store class IDs. You can map to class names later
+                  labelsSet_final.add(`class_${classId}`);
+                }
               }
             }
+          } catch (error) {
+            console.warn(`Failed to read label file ${labelFile}:`, error.message);
           }
-        } catch (error) {
-          console.warn(`Failed to read label file ${labelFile}:`, error.message);
         }
+      } catch (error) {
+        // Directory might be empty, that's ok
+        console.warn('Train labels directory read error (may be empty):', error.message);
       }
-    } catch (error) {
-      // Directory might be empty, that's ok
-      console.warn('Train labels directory read error (may be empty):', error.message);
-    }
 
-    // Read from val labels
-    try {
-      const valLabelFiles = await fsPromises.readdir(valLabelsPath);
-      for (const labelFile of valLabelFiles) {
-        try {
-          const labelPath = path.join(valLabelsPath, labelFile);
-          const content = await fsPromises.readFile(labelPath, 'utf-8');
-          const lines = content.trim().split('\n');
-          for (const line of lines) {
-            const parts = line.trim().split(' ');
-            if (parts.length > 0) {
-              const classId = parseInt(parts[0]);
-              if (!isNaN(classId)) {
-                labelsSet_final.add(`class_${classId}`);
+      // Read from val labels
+      try {
+        const valLabelFiles = await fsPromises.readdir(valLabelsPath);
+        for (const labelFile of valLabelFiles) {
+          try {
+            const labelPath = path.join(valLabelsPath, labelFile);
+            const content = await fsPromises.readFile(labelPath, 'utf-8');
+            const lines = content.trim().split('\n');
+            for (const line of lines) {
+              const parts = line.trim().split(' ');
+              if (parts.length > 0) {
+                const classId = parseInt(parts[0]);
+                if (!isNaN(classId)) {
+                  labelsSet_final.add(`class_${classId}`);
+                }
               }
             }
+          } catch (error) {
+            console.warn(`Failed to read label file ${labelFile}:`, error.message);
           }
-        } catch (error) {
-          console.warn(`Failed to read label file ${labelFile}:`, error.message);
         }
+      } catch (error) {
+        // Directory might be empty, that's ok
+        console.warn('Val labels directory read error (may be empty):', error.message);
       }
-    } catch (error) {
-      // Directory might be empty, that's ok
-      console.warn('Val labels directory read error (may be empty):', error.message);
     }
 
     // ✅ Create Image documents in batch (upsert to avoid duplicates)
@@ -601,12 +638,14 @@ const processPreprocessingJob = async (job) => {
     dataset.labels = Array.from(labelsSet_final);
     
     // ✅ Recompute final dataset sizeBytes after preprocessing
-    try {
-      const datasetRoot = storageAdapter.buildDatasetPath(company, project, version);
-      const computedSize = await computeFolderSize(datasetRoot);
-      dataset.sizeBytes = computedSize;
-    } catch (err) {
-      console.warn('Failed to compute final dataset size:', err.message);
+    if (!isAzure) {
+      try {
+        const datasetRoot = storageAdapter.buildDatasetPath(company, project, version);
+        const computedSize = await computeFolderSize(datasetRoot);
+        dataset.sizeBytes = computedSize;
+      } catch (err) {
+        console.warn('Failed to compute final dataset size:', err.message);
+      }
     }
     
     dataset.status = 'ready';
@@ -650,8 +689,32 @@ const startWorker = async () => {
   });
   console.log('✅ Worker connected to MongoDB');
 
+  // ✅ Ensure queue readiness
+  await preprocessingQueue.isReady();
+  console.log('[WORKER-QUEUE] preprocessingQueue is ready and listening');
+
+  // ✅ Add queue lifecycle event logs
+  preprocessingQueue.on('error', (err) => {
+    console.error('[WORKER-QUEUE] Redis/Queue error', err);
+  });
+
+  preprocessingQueue.on('waiting', (jobId) => {
+    console.log('[WORKER-QUEUE] Job waiting', jobId);
+  });
+
+  preprocessingQueue.on('active', (job) => {
+    console.log('[WORKER-QUEUE] Job active', {
+      jobId: job.id,
+      datasetId: job.data?.datasetId,
+    });
+  });
+
   // ✅ Process jobs from the queue
-  preprocessingQueue.process(async (job) => {
+  preprocessingQueue.process(1, async (job) => {
+    console.log('[WORKER-JOB] Received preprocessing job', {
+      jobId: job.id,
+      datasetId: job.data?.datasetId,
+    });
     return await processPreprocessingJob(job);
   });
 
@@ -683,4 +746,3 @@ if (require.main === module) {
 }
 
 module.exports = { startWorker, processPreprocessingJob };
-
