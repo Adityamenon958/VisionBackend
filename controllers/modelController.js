@@ -285,6 +285,93 @@ const getModelInsights = async (req, res) => {
 };
 
 /**
+ * GET /api/models/:modelId/download-url
+ * 
+ * Get signed download URL for model file
+ * Returns URL with expiration (for local storage, returns direct URL)
+ */
+const getModelDownloadUrl = async (req, res) => {
+  try {
+    const { modelId } = req.params;
+    const { format = 'pt' } = req.query;
+
+    if (!modelId) {
+      return res.status(400).json({
+        error: 'Missing required parameter: modelId'
+      });
+    }
+
+    // ✅ Find model
+    const model = await Model.findOne({ modelId }).lean();
+
+    if (!model) {
+      return res.status(404).json({
+        error: 'Model not found',
+        modelId: modelId
+      });
+    }
+
+    // ✅ Determine file path based on format
+    let filePath;
+    let filename;
+    
+    if (format === 'pt') {
+      filePath = model.bestCheckpointPath || path.join(model.storagePath, 'best.pt');
+      filename = `model_${model.modelVersion}.pt`;
+    } else if (format === 'onnx') {
+      // Check if ONNX export exists
+      filePath = path.join(model.storagePath, 'best.onnx');
+      filename = `model_${model.modelVersion}.onnx`;
+    } else if (format === 'zip') {
+      // Create zip path (if exists)
+      filePath = path.join(model.storagePath, 'model.zip');
+      filename = `model_${model.modelVersion}.zip`;
+    } else {
+      return res.status(400).json({
+        error: 'Invalid format',
+        message: `Format must be 'pt', 'onnx', or 'zip'`,
+        provided: format
+      });
+    }
+
+    // ✅ Check if file exists
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({
+        error: 'Model file not found',
+        modelId: modelId,
+        format: format,
+        path: filePath
+      });
+    }
+
+    // ✅ Get file size
+    const fileStats = fs.statSync(filePath);
+    const fileSize = fileStats.size;
+
+    // ✅ Generate download URL (for local storage, use direct API endpoint)
+    // In production with cloud storage, this would be a signed URL
+    const baseUrl = process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
+    const downloadUrl = `${baseUrl}/api/models/${modelId}/download?format=${format}`;
+
+    // ✅ Set expiration (1 hour from now)
+    const expiresAt = new Date(Date.now() + 3600000); // 1 hour
+
+    return res.status(200).json({
+      downloadUrl: downloadUrl,
+      expiresAt: expiresAt.toISOString(),
+      fileSize: fileSize
+    });
+
+  } catch (error) {
+    console.error('Error getting model download URL:', error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+};
+
+/**
  * GET /api/models/:modelId/download
  * 
  * Download the best checkpoint file
@@ -484,6 +571,7 @@ module.exports = {
   getModel,
   getModelMetrics,
   getModelInsights,
+  getModelDownloadUrl,
   downloadModel,
   listCheckpoints,
   deleteModel

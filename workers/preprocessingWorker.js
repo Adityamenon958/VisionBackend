@@ -10,6 +10,7 @@ const fsPromises = require('fs').promises;
 const sharp = require('sharp');
 const { preprocessingQueue } = require('../queue');
 const Dataset = require('../models/Dataset');
+const Image = require('../models/Image');
 const storageAdapter = require('../services/storageAdapter');
 
 /**
@@ -123,6 +124,7 @@ const processPreprocessingJob = async (job) => {
     // ✅ Separate labeled and unlabeled images using manifest
     const labeledImages = [];
     const unlabeledImages = [];
+    const imageDocuments = []; // Array to collect Image documents for batch upsert
 
     for (const [originalBaseName, imageInfo] of imageManifest.entries()) {
       if (labelManifest.has(originalBaseName)) {
@@ -183,6 +185,7 @@ const processPreprocessingJob = async (job) => {
           const originalBaseName = path.parse(imageInfo.fileEntry.originalName).name;
           const labelInfo = labelManifest.get(originalBaseName);
           
+          let hasLabels = false;
           if (labelInfo) {
             const labelSrcPath = path.join(datasetRoot, labelInfo.storedPath); // e.g., datasetRoot/labels/good/storedName
             // Use image's storedName (without extension) + .txt for label filename
@@ -190,7 +193,45 @@ const processPreprocessingJob = async (job) => {
             const labelDestPath = path.join(trainLabelsPath, `${imageBaseName}.txt`); // Match image filename
             if (await storageAdapter.exists(labelSrcPath)) {
               await storageAdapter.copyFile(labelSrcPath, labelDestPath); // Copy and rename to match image
+              hasLabels = true;
             }
+          }
+
+          // ✅ Extract image dimensions and create Image document
+          try {
+            const imageMetadata = await sharp(srcPath).metadata();
+            const fileStats = await fsPromises.stat(srcPath);
+            
+            // Check if label file exists in train folder (after copy)
+            const imageBaseName = path.parse(imageInfo.storedName).name;
+            const trainLabelPath = path.join(trainLabelsPath, `${imageBaseName}.txt`);
+            const labelExists = await storageAdapter.exists(trainLabelPath);
+            
+            imageDocuments.push({
+              datasetId: datasetId,
+              filename: imageInfo.storedName,
+              storedPath: `images/train/${imageInfo.storedName}`, // Relative path in split structure
+              folder: 'train',
+              size: fileStats.size,
+              width: imageMetadata.width || 0,
+              height: imageMetadata.height || 0,
+              hasLabels: hasLabels || labelExists, // Set true if label file exists
+              convertedAt: (hasLabels || labelExists) ? new Date() : undefined
+            });
+          } catch (dimError) {
+            console.warn(`Failed to extract dimensions for ${imageInfo.storedName}:`, dimError.message);
+            // Create Image document without dimensions (will need to be updated later)
+            imageDocuments.push({
+              datasetId: datasetId,
+              filename: imageInfo.storedName,
+              storedPath: `images/train/${imageInfo.storedName}`,
+              folder: 'train',
+              size: 0,
+              width: 0,
+              height: 0,
+              hasLabels: hasLabels,
+              convertedAt: hasLabels ? new Date() : undefined
+            });
           }
         } else {
           processingErrors.push({
@@ -231,6 +272,7 @@ const processPreprocessingJob = async (job) => {
           const originalBaseName = path.parse(imageInfo.fileEntry.originalName).name;
           const labelInfo = labelManifest.get(originalBaseName);
           
+          let hasLabels = false;
           if (labelInfo) {
             const labelSrcPath = path.join(datasetRoot, labelInfo.storedPath); // e.g., datasetRoot/labels/good/storedName
             // Use image's storedName (without extension) + .txt for label filename
@@ -238,7 +280,45 @@ const processPreprocessingJob = async (job) => {
             const labelDestPath = path.join(valLabelsPath, `${imageBaseName}.txt`); // Match image filename
             if (await storageAdapter.exists(labelSrcPath)) {
               await storageAdapter.copyFile(labelSrcPath, labelDestPath); // Copy and rename to match image
+              hasLabels = true;
             }
+          }
+
+          // ✅ Extract image dimensions and create Image document
+          try {
+            const imageMetadata = await sharp(srcPath).metadata();
+            const fileStats = await fsPromises.stat(srcPath);
+            
+            // Check if label file exists in val folder (after copy)
+            const imageBaseName = path.parse(imageInfo.storedName).name;
+            const valLabelPath = path.join(valLabelsPath, `${imageBaseName}.txt`);
+            const labelExists = await storageAdapter.exists(valLabelPath);
+            
+            imageDocuments.push({
+              datasetId: datasetId,
+              filename: imageInfo.storedName,
+              storedPath: `images/val/${imageInfo.storedName}`, // Relative path in split structure
+              folder: 'val',
+              size: fileStats.size,
+              width: imageMetadata.width || 0,
+              height: imageMetadata.height || 0,
+              hasLabels: hasLabels || labelExists, // Set true if label file exists
+              convertedAt: (hasLabels || labelExists) ? new Date() : undefined
+            });
+          } catch (dimError) {
+            console.warn(`Failed to extract dimensions for ${imageInfo.storedName}:`, dimError.message);
+            // Create Image document without dimensions (will need to be updated later)
+            imageDocuments.push({
+              datasetId: datasetId,
+              filename: imageInfo.storedName,
+              storedPath: `images/val/${imageInfo.storedName}`,
+              folder: 'val',
+              size: 0,
+              width: 0,
+              height: 0,
+              hasLabels: hasLabels,
+              convertedAt: hasLabels ? new Date() : undefined
+            });
           }
         } else {
           processingErrors.push({
@@ -272,6 +352,37 @@ const processPreprocessingJob = async (job) => {
           if (await storageAdapter.exists(srcPath)) {
             await storageAdapter.copyFile(srcPath, destPath);
             testCount++;
+
+            // ✅ Extract image dimensions and create Image document
+            try {
+              const imageMetadata = await sharp(srcPath).metadata();
+              const fileStats = await fsPromises.stat(srcPath);
+              
+              imageDocuments.push({
+                datasetId: datasetId,
+                filename: imageInfo.storedName,
+                storedPath: `images/test/${imageInfo.storedName}`, // Relative path in split structure
+                folder: 'test',
+                size: fileStats.size,
+                width: imageMetadata.width || 0,
+                height: imageMetadata.height || 0,
+                hasLabels: false, // Unlabeled images
+                convertedAt: undefined
+              });
+            } catch (dimError) {
+              console.warn(`Failed to extract dimensions for ${imageInfo.storedName}:`, dimError.message);
+              imageDocuments.push({
+                datasetId: datasetId,
+                filename: imageInfo.storedName,
+                storedPath: `images/test/${imageInfo.storedName}`,
+                folder: 'test',
+                size: 0,
+                width: 0,
+                height: 0,
+                hasLabels: false,
+                convertedAt: undefined
+              });
+            }
           }
         } catch (error) {
           console.error(`Failed to copy test image ${imageInfo.storedName}:`, error.message);
@@ -305,6 +416,42 @@ const processPreprocessingJob = async (job) => {
         if (await storageAdapter.exists(srcPath)) {
           await storageAdapter.copyFile(srcPath, destPath);
           testImagesCopied++;
+
+          // ✅ Extract image dimensions and create Image document
+          try {
+            const imageMetadata = await sharp(srcPath).metadata();
+            const fileStats = await fsPromises.stat(srcPath);
+            
+            // Check if label file exists (for test images that were labeled)
+            const originalBaseName = path.parse(imageInfo.fileEntry.originalName).name;
+            const labelInfo = labelManifest.get(originalBaseName);
+            const hasLabels = labelInfo ? await storageAdapter.exists(path.join(datasetRoot, labelInfo.storedPath)) : false;
+            
+            imageDocuments.push({
+              datasetId: datasetId,
+              filename: imageInfo.storedName,
+              storedPath: `images/test/${imageInfo.storedName}`, // Relative path in split structure
+              folder: 'test',
+              size: fileStats.size,
+              width: imageMetadata.width || 0,
+              height: imageMetadata.height || 0,
+              hasLabels: hasLabels,
+              convertedAt: hasLabels ? new Date() : undefined
+            });
+          } catch (dimError) {
+            console.warn(`Failed to extract dimensions for ${imageInfo.storedName}:`, dimError.message);
+            imageDocuments.push({
+              datasetId: datasetId,
+              filename: imageInfo.storedName,
+              storedPath: `images/test/${imageInfo.storedName}`,
+              folder: 'test',
+              size: 0,
+              width: 0,
+              height: 0,
+              hasLabels: false,
+              convertedAt: undefined
+            });
+          }
         } else {
           processingErrors.push({
             filename: imageInfo.storedName,
@@ -422,9 +569,32 @@ const processPreprocessingJob = async (job) => {
       console.warn('Val labels directory read error (may be empty):', error.message);
     }
 
+    // ✅ Create Image documents in batch (upsert to avoid duplicates)
+    if (imageDocuments.length > 0) {
+      try {
+        console.log(`   - Creating ${imageDocuments.length} Image documents...`);
+        for (const imgDoc of imageDocuments) {
+          // Use upsert to avoid duplicates (based on datasetId + storedPath unique index)
+          await Image.findOneAndUpdate(
+            { datasetId: imgDoc.datasetId, storedPath: imgDoc.storedPath },
+            imgDoc,
+            { upsert: true, new: true }
+          );
+        }
+        console.log(`   - ✅ Created/updated ${imageDocuments.length} Image documents`);
+      } catch (imgError) {
+        console.error('Failed to create Image documents:', imgError.message);
+        // Don't fail the entire job if Image creation fails
+      }
+    }
+
+    // ✅ Recalculate labeled/unlabeled counts from Image collection
+    const labeledCount = await Image.countDocuments({ datasetId, hasLabels: true });
+    const unlabeledCount = await Image.countDocuments({ datasetId, hasLabels: false });
+
     // ✅ Update final dataset metadata
-    dataset.labeledImages = labeledImages.length;
-    dataset.unlabeledImages = unlabeledImages.length;
+    dataset.labeledImages = labeledCount; // Use count from Image collection
+    dataset.unlabeledImages = unlabeledCount; // Use count from Image collection
     dataset.trainCount = trainCount;
     dataset.valCount = valCount;
     // testCount already updated during test folder copy

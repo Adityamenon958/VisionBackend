@@ -492,6 +492,93 @@ class StorageAdapter {
       await fs.rmdir(dirPath);
     }
   }
+
+  /**
+   * Generate a signed URL for a file
+   * 
+   * For local storage: Returns an API endpoint with token and expiration
+   * For Azure: Returns a SAS URL (not yet fully implemented)
+   * 
+   * @param {string} filePath - File path (relative to dataset root or absolute)
+   * @param {number} expiresInSeconds - URL expiration time in seconds (default: 3600 = 1 hour)
+   * @param {Object} options - Additional options (datasetId for image serving route)
+   * @returns {Promise<string>} Signed URL
+   */
+  async generateSignedUrl(filePath, expiresInSeconds = 3600, options = {}) {
+    if (this.mode === 'local') {
+      // ✅ For local storage, generate a token-based signed URL
+      // The token includes file path, expiration, and a simple hash for security
+      const crypto = require('crypto');
+      const baseUrl = process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
+      
+      // Create expiration timestamp
+      const expiresAt = Date.now() + (expiresInSeconds * 1000);
+      
+      // Create a simple signature (HMAC) for security
+      // In production, use a secret key from environment variable
+      const secret = process.env.SIGNED_URL_SECRET || 'default-secret-change-in-production';
+      const signature = crypto
+        .createHmac('sha256', secret)
+        .update(`${filePath}:${expiresAt}`)
+        .digest('hex')
+        .substring(0, 16); // Use first 16 chars for shorter URL
+      
+      // Encode file path for URL
+      const encodedPath = encodeURIComponent(filePath);
+      
+      // If datasetId is provided, use image serving route (for annotation images)
+      if (options.datasetId) {
+        return `${baseUrl}/api/dataset/${options.datasetId}/image-signed?path=${encodedPath}&expires=${expiresAt}&signature=${signature}`;
+      }
+      
+      // Generic signed URL endpoint (if needed for other use cases)
+      return `${baseUrl}/api/storage/signed?path=${encodedPath}&expires=${expiresAt}&signature=${signature}`;
+      
+    } else if (this.mode === 'azure') {
+      // ✅ For Azure Blob Storage, generate SAS URL
+      const { containerName, blobName } = this._parseAzurePath(filePath);
+      const containerClient = this.blobServiceClient.getContainerClient(containerName);
+      const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+      
+      // Generate SAS token
+      const sasOptions = {
+        permissions: 'r', // Read only
+        expiresOn: new Date(Date.now() + expiresInSeconds * 1000)
+      };
+      
+      // Generate SAS URL
+      const sasUrl = await blockBlobClient.generateSasUrl(sasOptions);
+      return sasUrl;
+    }
+    
+    throw new Error(`Unsupported storage mode: ${this.mode}`);
+  }
+
+  /**
+   * Verify and decode signed URL parameters
+   * 
+   * @param {string} filePath - File path from URL
+   * @param {number} expiresAt - Expiration timestamp
+   * @param {string} signature - Signature hash
+   * @returns {boolean} True if signature is valid and not expired
+   */
+  verifySignedUrl(filePath, expiresAt, signature) {
+    // Check expiration
+    if (Date.now() > expiresAt) {
+      return false;
+    }
+    
+    // Verify signature
+    const crypto = require('crypto');
+    const secret = process.env.SIGNED_URL_SECRET || 'default-secret-change-in-production';
+    const expectedSignature = crypto
+      .createHmac('sha256', secret)
+      .update(`${filePath}:${expiresAt}`)
+      .digest('hex')
+      .substring(0, 16);
+    
+    return signature === expectedSignature;
+  }
 }
 
 // ✅ Export singleton instance

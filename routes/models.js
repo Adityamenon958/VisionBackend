@@ -5,6 +5,7 @@ const {
   getModel,
   getModelMetrics,
   getModelInsights,
+  getModelDownloadUrl,
   downloadModel,
   listCheckpoints,
   deleteModel
@@ -34,6 +35,9 @@ router.get('/:modelId/metrics', getModelMetrics);
 
 // GET /api/models/:modelId/insights - Get insights and recommendations
 router.get('/:modelId/insights', getModelInsights);
+
+// GET /api/models/:modelId/download-url - Get signed download URL
+router.get('/:modelId/download-url', getModelDownloadUrl);
 
 // GET /api/models/:modelId/download - Download model file
 router.get('/:modelId/download', downloadModel);

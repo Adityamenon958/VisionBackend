@@ -74,6 +74,11 @@ app.use('/api/models', modelRoutes);
 // All routes in routes/inference.js will be prefixed with /api/inference
 app.use('/api/inference', inferenceRoutes);
 
+// ✅ Register annotation routes
+// All routes in routes/annotations.js will be prefixed with /api/dataset
+const annotationRoutes = require('./routes/annotations');
+app.use('/api/dataset', annotationRoutes);
+
 // ✅ Register list datasets endpoint (plural) - separate route for clarity
 // GET /api/datasets - List all datasets
 const { listDatasets } = require('./controllers/datasetController');

@@ -130,6 +130,20 @@ const datasetSchema = new mongoose.Schema({
     type: Date,
     default: null,
     index: true // Indexed for faster queries to filter deleted datasets
+  },
+
+  // YOLO conversion metadata (for annotation feature)
+  conversionMetadata: {
+    convertedAt: {
+      type: Date // Timestamp of last YOLO conversion
+    },
+    categoryOrder: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Category' // Snapshot of category IDs in order at conversion time
+    }],
+    categoryNames: [{
+      type: String // Snapshot of category names at conversion time
+    }]
   }
 }, {
   timestamps: true // ✅ Automatically adds createdAt and updatedAt
