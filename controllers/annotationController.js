@@ -77,7 +77,9 @@ const getUnlabeledImages = async (req, res) => {
           url: imageUrl,
           thumbnailUrl: thumbnailUrl,
           folder: img.folder,
-          size: img.size
+          size: img.size,
+          width: img.width,
+          height: img.height
         };
       })
     );
@@ -123,6 +125,18 @@ const getAnnotations = async (req, res) => {
       imageId ? new mongoose.Types.ObjectId(imageId) : null
     );
 
+    // Get image dimensions if querying by imageId (for frontend coordinate normalization)
+    let imageDimensions = null;
+    if (imageId) {
+      const image = await Image.findById(imageId);
+      if (image) {
+        imageDimensions = {
+          width: image.width,
+          height: image.height
+        };
+      }
+    }
+
     // Format response
     const formattedAnnotations = annotations.map(ann => ({
       id: ann._id,
@@ -141,10 +155,17 @@ const getAnnotations = async (req, res) => {
       approvedAt: ann.approvedAt
     }));
 
-    return res.status(200).json({
+    const response = {
       annotations: formattedAnnotations,
       total: formattedAnnotations.length
-    });
+    };
+
+    // Include image dimensions if available (when querying by imageId)
+    if (imageDimensions) {
+      response.imageDimensions = imageDimensions;
+    }
+
+    return res.status(200).json(response);
 
   } catch (error) {
     console.error('Error getting annotations:', error);
