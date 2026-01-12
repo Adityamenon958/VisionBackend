@@ -296,8 +296,20 @@ const getDataset = async (req, res) => {
       });
     }
 
+    // ✅ Recalculate unlabeled images count dynamically (ensures frontend always shows annotation option if any image is unlabeled)
+    // This ensures the count is always current and not stale
+    // Training process is unaffected as it uses YOLO .txt files in labels/train folder, not hasLabels flag
+    const Image = require('../models/Image');
+    const currentUnlabeledCount = await Image.countDocuments({ datasetId, hasLabels: false });
+    const currentLabeledCount = await Image.countDocuments({ datasetId, hasLabels: true });
+    
+    // Create response object with updated counts
+    const datasetObject = dataset.toObject();
+    datasetObject.unlabeledImages = currentUnlabeledCount;
+    datasetObject.labeledImages = currentLabeledCount;
+
     // ✅ Include folders summary in response
-    res.json({ ...dataset.toObject(), folders });
+    res.json({ ...datasetObject, folders });
 
   } catch (error) {
     console.error('Get dataset error:', error);

@@ -81,16 +81,21 @@ async function visualizeAnnotationsFromDB(datasetId, imageId = null) {
         continue;
       }
 
+      // Get actual image dimensions from file (more reliable than DB)
+      const imageMetadata = await sharp(imagePath).metadata();
+      const actualWidth = imageMetadata.width || image.width;
+      const actualHeight = imageMetadata.height || image.height;
+
       // Parse annotations and convert to pixel coordinates
       const boxes = [];
       annotations.forEach((ann, i) => {
         const [normX, normY, normW, normH] = ann.bbox;
         
-        // Convert normalized [x, y, width, height] to pixel coordinates
-        const pixelX = Math.round(normX * image.width);
-        const pixelY = Math.round(normY * image.height);
-        const pixelW = Math.round(normW * image.width);
-        const pixelH = Math.round(normH * image.height);
+        // Convert normalized [x, y, width, height] to pixel coordinates using actual dimensions
+        const pixelX = Math.round(normX * actualWidth);
+        const pixelY = Math.round(normY * actualHeight);
+        const pixelW = Math.round(normW * actualWidth);
+        const pixelH = Math.round(normH * actualHeight);
 
         boxes.push({
           x: pixelX,
@@ -121,7 +126,7 @@ async function visualizeAnnotationsFromDB(datasetId, imageId = null) {
         />
         <text 
           x="${box.x + 5}" 
-          y="${box.y - 5}" 
+          y="${Math.max(box.y - 5, 20)}" 
           fill="${box.color}" 
           font-size="20" 
           font-weight="bold"
@@ -132,7 +137,7 @@ async function visualizeAnnotationsFromDB(datasetId, imageId = null) {
       }).join('');
 
       const svg = `
-        <svg width="${image.width}" height="${image.height}">
+        <svg width="${actualWidth}" height="${actualHeight}" xmlns="http://www.w3.org/2000/svg">
           ${svgOverlays}
         </svg>
       `;
@@ -143,7 +148,10 @@ async function visualizeAnnotationsFromDB(datasetId, imageId = null) {
         fs.mkdirSync(outputDir, { recursive: true });
       }
 
-      const outputFilename = path.basename(image.filename, path.extname(image.filename)) + '_annotated.jpg';
+      // Use image ID in filename to avoid overwrites when same filename exists in different folders
+      const imageIdShort = image._id.toString().substring(18, 24); // Last 6 chars of ID for uniqueness
+      const baseFilename = path.basename(image.filename, path.extname(image.filename));
+      const outputFilename = `${baseFilename}_${imageIdShort}_annotated.jpg`;
       const outputPath = path.join(outputDir, outputFilename);
 
       // Composite image with annotations
