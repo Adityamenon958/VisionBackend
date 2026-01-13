@@ -38,61 +38,208 @@ def load_config(config_path):
 
 
 def update_data_yaml(data_yaml_path, dataset_path):
-    """Update data.yaml with actual class count and names from dataset."""
+    """
+    Update data.yaml with actual class count and names from dataset.
+    
+    This function:
+    - Scans labels/train/*.txt files to detect all class IDs
+    - Validates YOLO format (5 values per line: class_id x y w h)
+    - Fails loudly if labels are unreadable or invalid
+    - Never defaults to 1 class unless labels are truly single-class
+    
+    Args:
+        data_yaml_path: Full path to data.yaml file
+        dataset_path: Full path to dataset directory
+        
+    Returns:
+        tuple: (num_classes, class_names_list)
+        
+    Raises:
+        SystemExit: If labels directory doesn't exist, is unreadable, or contains invalid data
+    """
+    # ✅ Use absolute paths to handle Windows paths with spaces correctly
+    dataset_path = os.path.abspath(dataset_path)
+    labels_train_path = os.path.join(dataset_path, 'labels', 'train')
+    
+    print(f"🔍 Scanning labels directory: {labels_train_path}")
+    sys.stdout.flush()
+    
+    # ✅ Validate labels directory exists and is accessible
+    if not os.path.exists(labels_train_path):
+        print(f"ERROR: Labels directory does not exist: {labels_train_path}", file=sys.stderr)
+        print(f"ERROR: Dataset path: {dataset_path}", file=sys.stderr)
+        sys.exit(1)
+    
+    if not os.path.isdir(labels_train_path):
+        print(f"ERROR: Labels path is not a directory: {labels_train_path}", file=sys.stderr)
+        sys.exit(1)
+    
+    # ✅ Collect class IDs with explicit validation
+    class_ids = set()
+    files_scanned = 0
+    files_with_labels = 0
+    files_failed = []
+    total_annotations = 0
+    
+    # ✅ Use listdir + filter instead of glob for better error handling on large directories
     try:
-        # Read labels to determine number of classes
-        labels_path = Path(dataset_path) / 'labels' / 'train'
-        class_names = set()
+        all_files = os.listdir(labels_train_path)
+        label_files = [f for f in all_files if f.lower().endswith('.txt')]
+    except OSError as e:
+        print(f"ERROR: Cannot read labels directory: {labels_train_path}", file=sys.stderr)
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    if not label_files:
+        print(f"ERROR: No label files (.txt) found in: {labels_train_path}", file=sys.stderr)
+        sys.exit(1)
+    
+    print(f"📊 Found {len(label_files)} label files to scan...")
+    sys.stdout.flush()
+    
+    # ✅ Process each label file with explicit error handling
+    for label_filename in label_files:
+        files_scanned += 1
+        label_file_path = os.path.join(labels_train_path, label_filename)
         
-        if labels_path.exists():
-            for label_file in labels_path.glob('*.txt'):
-                try:
-                    with open(label_file, 'r') as f:
-                        for line in f:
-                            parts = line.strip().split()
-                            if parts:
-                                class_id = int(parts[0])
-                                class_names.add(f'class_{class_id}')
-                except Exception:
-                    continue
-        
-        # Sort class names to ensure consistent ordering
-        class_names = sorted(list(class_names))
-        num_classes = len(class_names) if class_names else 0
-        
-        # If no classes found, default to 1
-        if num_classes == 0:
-            num_classes = 1
-            class_names = ['class_0']
-        
-        # Read existing data.yaml
-        with open(data_yaml_path, 'r') as f:
+        try:
+            # ✅ Read file with explicit encoding (UTF-8)
+            with open(label_file_path, 'r', encoding='utf-8') as f:
+                file_has_labels = False
+                line_num = 0
+                
+                for line in f:
+                    line_num += 1
+                    line = line.strip()
+                    
+                    # Skip empty lines
+                    if not line:
+                        continue
+                    
+                    # ✅ Validate YOLO format: must have exactly 5 values
+                    parts = line.split()
+                    if len(parts) != 5:
+                        print(f"ERROR: Invalid YOLO format in {label_filename}:{line_num}", file=sys.stderr)
+                        print(f"ERROR: Expected 5 values, got {len(parts)}: {line}", file=sys.stderr)
+                        print(f"ERROR: Format should be: class_id center_x center_y width height", file=sys.stderr)
+                        sys.exit(1)
+                    
+                    # ✅ Validate and extract class ID
+                    try:
+                        class_id = int(parts[0])
+                    except ValueError:
+                        print(f"ERROR: Invalid class ID in {label_filename}:{line_num}", file=sys.stderr)
+                        print(f"ERROR: Class ID must be integer, got: {parts[0]}", file=sys.stderr)
+                        sys.exit(1)
+                    
+                    # ✅ Validate class ID is non-negative
+                    if class_id < 0:
+                        print(f"ERROR: Negative class ID in {label_filename}:{line_num}: {class_id}", file=sys.stderr)
+                        sys.exit(1)
+                    
+                    # ✅ Validate coordinates are numeric and in valid range [0, 1]
+                    try:
+                        center_x = float(parts[1])
+                        center_y = float(parts[2])
+                        width = float(parts[3])
+                        height = float(parts[4])
+                    except ValueError as e:
+                        print(f"ERROR: Invalid coordinates in {label_filename}:{line_num}", file=sys.stderr)
+                        print(f"ERROR: {e}", file=sys.stderr)
+                        sys.exit(1)
+                    
+                    # ✅ Validate normalized coordinates (YOLO format uses 0-1 range)
+                    if not (0.0 <= center_x <= 1.0 and 0.0 <= center_y <= 1.0 and 
+                            0.0 <= width <= 1.0 and 0.0 <= height <= 1.0):
+                        print(f"WARNING: Coordinates out of [0,1] range in {label_filename}:{line_num}", file=sys.stderr)
+                        print(f"WARNING: center_x={center_x}, center_y={center_y}, width={width}, height={height}", file=sys.stderr)
+                        # Don't exit - YOLO might handle this, but log the warning
+                    
+                    # ✅ Collect class ID
+                    class_ids.add(class_id)
+                    file_has_labels = True
+                    total_annotations += 1
+                
+                if file_has_labels:
+                    files_with_labels += 1
+                    
+        except UnicodeDecodeError as e:
+            print(f"ERROR: Encoding error reading {label_filename}: {e}", file=sys.stderr)
+            print(f"ERROR: File may be corrupted or not UTF-8 encoded", file=sys.stderr)
+            files_failed.append(label_filename)
+            sys.exit(1)
+        except PermissionError as e:
+            print(f"ERROR: Permission denied reading {label_filename}: {e}", file=sys.stderr)
+            files_failed.append(label_filename)
+            sys.exit(1)
+        except OSError as e:
+            print(f"ERROR: OS error reading {label_filename}: {e}", file=sys.stderr)
+            files_failed.append(label_filename)
+            sys.exit(1)
+        except Exception as e:
+            print(f"ERROR: Unexpected error reading {label_filename}: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+            files_failed.append(label_filename)
+            sys.exit(1)
+    
+    # ✅ Validate that we found at least some labels
+    if files_failed:
+        print(f"ERROR: Failed to read {len(files_failed)} label file(s)", file=sys.stderr)
+        print(f"ERROR: Failed files: {files_failed[:5]}...", file=sys.stderr)  # Show first 5
+        sys.exit(1)
+    
+    if not class_ids:
+        print(f"ERROR: No valid class IDs found in any label files!", file=sys.stderr)
+        print(f"ERROR: Scanned {files_scanned} files, found {files_with_labels} files with labels", file=sys.stderr)
+        print(f"ERROR: All label files appear to be empty or contain invalid data", file=sys.stderr)
+        sys.exit(1)
+    
+    # ✅ Sort class IDs deterministically and create class names
+    sorted_class_ids = sorted(class_ids)
+    class_names = [f'class_{class_id}' for class_id in sorted_class_ids]
+    num_classes = len(class_names)
+    
+    # ✅ Log summary
+    print(f"✅ Successfully scanned {files_scanned} label files")
+    print(f"✅ Found {files_with_labels} files with labels ({total_annotations} total annotations)")
+    print(f"✅ Detected {num_classes} classes: {sorted_class_ids}")
+    sys.stdout.flush()
+    
+    # ✅ Read existing data.yaml
+    try:
+        with open(data_yaml_path, 'r', encoding='utf-8') as f:
             content = f.read()
-        
-        # Update nc and names
-        lines = content.split('\n')
-        updated_lines = []
-        for line in lines:
-            if line.startswith('nc:'):
-                updated_lines.append(f'nc: {num_classes}')
-            elif line.startswith('names:'):
-                updated_lines.append('names:')
-                for name in class_names:
-                    updated_lines.append(f'  - {name}')
-            else:
-                updated_lines.append(line)
-        
-        # Write updated data.yaml
-        with open(data_yaml_path, 'w') as f:
-            f.write('\n'.join(updated_lines))
-        
-        print(f"Updated data.yaml: {num_classes} classes")
-        sys.stdout.flush()  # Ensure message appears immediately
-        return num_classes, class_names
-        
     except Exception as e:
-        print(f"WARNING: Could not update data.yaml: {e}", file=sys.stderr)
-        return 0, []
+        print(f"ERROR: Cannot read data.yaml: {data_yaml_path}", file=sys.stderr)
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    # ✅ Update nc and names
+    lines = content.split('\n')
+    updated_lines = []
+    for line in lines:
+        if line.startswith('nc:'):
+            updated_lines.append(f'nc: {num_classes}')
+        elif line.startswith('names:'):
+            updated_lines.append('names:')
+            for name in class_names:
+                updated_lines.append(f'  - {name}')
+        else:
+            updated_lines.append(line)
+    
+    # ✅ Write updated data.yaml
+    try:
+        with open(data_yaml_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(updated_lines))
+    except Exception as e:
+        print(f"ERROR: Cannot write data.yaml: {data_yaml_path}", file=sys.stderr)
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    print(f"✅ Updated data.yaml: {num_classes} classes")
+    sys.stdout.flush()
+    return num_classes, class_names
 
 
 def train_yolo(config):
@@ -120,8 +267,17 @@ def train_yolo(config):
             sys.exit(1)
         
         # Update data.yaml with actual class information
+        # ✅ This will exit with error code 1 if labels are invalid or unreadable
         dataset_path = os.path.dirname(data_yaml)
-        update_data_yaml(data_yaml, dataset_path)
+        num_classes, class_names = update_data_yaml(data_yaml, dataset_path)
+        
+        # ✅ Validate that data.yaml was updated correctly
+        if num_classes == 0:
+            print("ERROR: data.yaml update returned 0 classes - this should never happen!", file=sys.stderr)
+            sys.exit(1)
+        
+        print(f"✅ Verified data.yaml contains {num_classes} classes: {class_names}")
+        sys.stdout.flush()
         
         # Load model
         if model_path and os.path.exists(model_path):
