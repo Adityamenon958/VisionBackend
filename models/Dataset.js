@@ -87,9 +87,10 @@ const datasetSchema = new mongoose.Schema({
 
   // Processing status
   // States: 'uploaded' → 'queued' → 'processing' → 'ready' → 'failed'
+  // Annotation states: 'unlabeled' → 'ready_to_train'
   status: {
     type: String,
-    enum: ['uploaded', 'queued', 'processing', 'ready', 'failed'],
+    enum: ['uploaded', 'queued', 'processing', 'ready', 'failed', 'unlabeled', 'ready_to_train'],
     default: 'uploaded',
     index: true
   },

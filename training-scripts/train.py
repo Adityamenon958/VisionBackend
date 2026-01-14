@@ -195,10 +195,9 @@ def update_data_yaml(data_yaml_path, dataset_path):
         print(f"ERROR: All label files appear to be empty or contain invalid data", file=sys.stderr)
         sys.exit(1)
     
-    # ✅ Sort class IDs deterministically and create class names
+    # ✅ Sort class IDs deterministically
     sorted_class_ids = sorted(class_ids)
-    class_names = [f'class_{class_id}' for class_id in sorted_class_ids]
-    num_classes = len(class_names)
+    num_classes = len(sorted_class_ids)
     
     # ✅ Log summary
     print(f"✅ Successfully scanned {files_scanned} label files")
@@ -206,7 +205,7 @@ def update_data_yaml(data_yaml_path, dataset_path):
     print(f"✅ Detected {num_classes} classes: {sorted_class_ids}")
     sys.stdout.flush()
     
-    # ✅ Read existing data.yaml
+    # ✅ Read existing data.yaml to preserve original category names
     try:
         with open(data_yaml_path, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -215,16 +214,67 @@ def update_data_yaml(data_yaml_path, dataset_path):
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
     
-    # ✅ Update nc and names
+    # ✅ Extract existing category names from data.yaml
+    existing_names = []
+    in_names_section = False
+    for line in content.split('\n'):
+        if line.strip().startswith('names:'):
+            in_names_section = True
+            continue
+        elif in_names_section:
+            if line.strip().startswith('-'):
+                # Extract name: "  - Right screw missing" -> "Right screw missing"
+                name = line.strip()[1:].strip()
+                if name:
+                    existing_names.append(name)
+            elif line.strip() and not line.strip().startswith('#'):
+                # End of names section (next non-comment line)
+                in_names_section = False
+    
+    # ✅ Validate: Check if we have enough names for detected classes
+    if len(existing_names) < num_classes:
+        print(f"WARNING: data.yaml has {len(existing_names)} names but {num_classes} classes detected", file=sys.stderr)
+        print(f"WARNING: Using existing names and padding with generic names if needed", file=sys.stderr)
+        # Pad with generic names if needed
+        while len(existing_names) < num_classes:
+            existing_names.append(f'class_{len(existing_names)}')
+    
+    # ✅ Map class IDs to names: class_id 0 -> existing_names[0], class_id 1 -> existing_names[1], etc.
+    preserved_names = []
+    for class_id in sorted_class_ids:
+        if class_id < len(existing_names):
+            preserved_names.append(existing_names[class_id])
+        else:
+            # Fallback if class_id is out of range
+            preserved_names.append(f'class_{class_id}')
+    
+    # ✅ Log preserved names
+    if existing_names:
+        print(f"✅ Preserving original category names: {preserved_names}")
+    else:
+        print(f"⚠️ No existing names found in data.yaml, using generic names: {preserved_names}")
+    sys.stdout.flush()
+    
+    # ✅ Update nc and names (preserve original names)
     lines = content.split('\n')
     updated_lines = []
+    in_names_section_to_skip = False
     for line in lines:
         if line.startswith('nc:'):
             updated_lines.append(f'nc: {num_classes}')
         elif line.startswith('names:'):
             updated_lines.append('names:')
-            for name in class_names:
+            for name in preserved_names:  # ✅ FIX: Use preserved original names
                 updated_lines.append(f'  - {name}')
+            in_names_section_to_skip = True  # ✅ Skip old name lines
+        elif in_names_section_to_skip:
+            # ✅ Skip old name lines (lines starting with '-' or empty lines after names:)
+            if line.strip().startswith('-') or (line.strip() == ''):
+                continue  # Skip this old name line
+            else:
+                # ✅ End of names section, process this line normally
+                in_names_section_to_skip = False
+                updated_lines.append(line)
         else:
             updated_lines.append(line)
     
@@ -239,7 +289,7 @@ def update_data_yaml(data_yaml_path, dataset_path):
     
     print(f"✅ Updated data.yaml: {num_classes} classes")
     sys.stdout.flush()
-    return num_classes, class_names
+    return num_classes, preserved_names
 
 
 def train_yolo(config):

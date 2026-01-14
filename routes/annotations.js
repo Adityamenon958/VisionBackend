@@ -3,6 +3,7 @@ const router = express.Router();
 
 const {
   getUnlabeledImages,
+  getUnannotatedImages,
   getAnnotations,
   createAnnotation,
   updateAnnotation,
@@ -30,6 +31,9 @@ const {
 // Image Management
 // GET /api/dataset/:datasetId/unlabeled-images
 router.get('/:datasetId/unlabeled-images', getUnlabeledImages);
+
+// GET /api/dataset/:datasetId/images/unannotated
+router.get('/:datasetId/images/unannotated', getUnannotatedImages);
 
 // GET /api/dataset/:datasetId/image-signed - Serve image with signed URL verification
 router.get('/:datasetId/image-signed', serveSignedImage);

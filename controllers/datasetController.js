@@ -2,9 +2,12 @@ const fs = require('fs');
 const fsPromises = require('fs').promises;
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const mongoose = require('mongoose');
 const Dataset = require('../models/Dataset');
+const Category = require('../models/Category');
 const storageAdapter = require('../services/storageAdapter');
 const { preprocessingQueue } = require('../queue');
+const { generateDataYaml } = require('../utils/yoloConverter');
 
 /**
  * Dataset Controller - Handles dataset upload and retrieval
@@ -815,6 +818,242 @@ const deleteDataset = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/dataset/:datasetId/detected-classes
+ * 
+ * Returns detected class IDs and default class names for labeled datasets.
+ * Used by frontend to prompt user to map class IDs to meaningful names.
+ */
+const getDetectedClasses = async (req, res) => {
+  try {
+    const { datasetId } = req.params;
+
+    // Validate datasetId
+    if (!mongoose.Types.ObjectId.isValid(datasetId)) {
+      return res.status(404).json({
+        error: 'Dataset not found',
+        datasetId: datasetId
+      });
+    }
+
+    // Find dataset
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return res.status(404).json({
+        error: 'Dataset not found',
+        datasetId: datasetId
+      });
+    }
+
+    // Extract class IDs from dataset.labels array
+    // Labels are stored as ["class_0", "class_1", "class_2", ...]
+    const classIds = [];
+    const classNames = [];
+
+    if (dataset.labels && Array.isArray(dataset.labels)) {
+      for (const label of dataset.labels) {
+        // Extract class ID from "class_0" format
+        const match = label.match(/^class_(\d+)$/);
+        if (match) {
+          const classId = parseInt(match[1], 10);
+          if (!isNaN(classId)) {
+            classIds.push(classId);
+            classNames.push(label);
+          }
+        }
+      }
+    }
+
+    // Sort class IDs to ensure consistent order
+    const sortedPairs = classIds.map((id, idx) => ({ id, name: classNames[idx] }))
+      .sort((a, b) => a.id - b.id);
+    
+    const sortedClassIds = sortedPairs.map(p => p.id);
+    const sortedClassNames = sortedPairs.map(p => p.name);
+
+    // Check if categories already exist
+    const existingCategories = await Category.countDocuments({ datasetId });
+
+    return res.status(200).json({
+      datasetId: dataset._id.toString(),
+      classIds: sortedClassIds,
+      classNames: sortedClassNames,
+      totalClasses: sortedClassIds.length,
+      hasCategories: existingCategories > 0
+    });
+
+  } catch (error) {
+    console.error('Error getting detected classes:', error);
+    return res.status(500).json({
+      error: 'Internal Server Error',
+      message: error.message
+    });
+  }
+};
+
+/**
+ * POST /api/dataset/:datasetId/create-categories-from-classes
+ * 
+ * Creates Category documents from detected class IDs using user-provided names.
+ * Also updates data.yaml and creates class-mapping.json.
+ */
+const createCategoriesFromClasses = async (req, res) => {
+  try {
+    const { datasetId } = req.params;
+    const { classMappings } = req.body;
+
+    // Validate datasetId
+    if (!mongoose.Types.ObjectId.isValid(datasetId)) {
+      return res.status(404).json({
+        error: 'Dataset not found',
+        datasetId: datasetId
+      });
+    }
+
+    // Validate request body
+    if (!classMappings || typeof classMappings !== 'object') {
+      return res.status(400).json({
+        error: 'Validation Error',
+        message: 'classMappings is required and must be an object'
+      });
+    }
+
+    // Find dataset
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return res.status(404).json({
+        error: 'Dataset not found',
+        datasetId: datasetId
+      });
+    }
+
+    // Check if categories already exist
+    const existingCategories = await Category.countDocuments({ datasetId });
+    if (existingCategories > 0) {
+      return res.status(400).json({
+        error: 'Categories already exist for this dataset',
+        message: 'Cannot create categories - they already exist'
+      });
+    }
+
+    // Extract class IDs from dataset.labels to validate
+    const detectedClassIds = [];
+    if (dataset.labels && Array.isArray(dataset.labels)) {
+      for (const label of dataset.labels) {
+        const match = label.match(/^class_(\d+)$/);
+        if (match) {
+          const classId = parseInt(match[1], 10);
+          if (!isNaN(classId)) {
+            detectedClassIds.push(classId);
+          }
+        }
+      }
+    }
+
+    // Validate that all provided class IDs exist in detected classes
+    const providedClassIds = Object.keys(classMappings).map(id => parseInt(id, 10));
+    const invalidClassIds = providedClassIds.filter(id => !detectedClassIds.includes(id));
+    
+    if (invalidClassIds.length > 0) {
+      return res.status(400).json({
+        error: 'Validation Error',
+        message: `Invalid class IDs: ${invalidClassIds.join(', ')}. Expected class IDs: [${detectedClassIds.sort((a, b) => a - b).join(', ')}]`
+      });
+    }
+
+    // Color palette for categories
+    const colorPalette = [
+      '#ef4444', // Red
+      '#10b981', // Green
+      '#3b82f6', // Blue
+      '#f59e0b', // Orange
+      '#8b5cf6', // Purple
+      '#ec4899', // Pink
+      '#06b6d4', // Cyan
+      '#84cc16', // Lime
+      '#f97316', // Orange
+      '#6366f1'  // Indigo
+    ];
+
+    // System user ID (same as used in categoryController)
+    const SYSTEM_USER_ID = new mongoose.Types.ObjectId('000000000000000000000000');
+
+    // Create categories in order (sorted by class ID)
+    const sortedClassIds = detectedClassIds.sort((a, b) => a - b);
+    const createdCategories = [];
+
+    for (let i = 0; i < sortedClassIds.length; i++) {
+      const classId = sortedClassIds[i];
+      const providedName = classMappings[classId.toString()];
+      
+      // Use provided name if available, otherwise use class_X
+      const categoryName = providedName && providedName.trim() 
+        ? providedName.trim() 
+        : `class_${classId}`;
+
+      // Check for duplicate names within this batch
+      const isDuplicate = createdCategories.some(cat => cat.name === categoryName);
+      if (isDuplicate) {
+        return res.status(400).json({
+          error: 'Validation Error',
+          message: `Duplicate category name: "${categoryName}". Each class must have a unique name.`
+        });
+      }
+
+      const category = new Category({
+        datasetId: dataset._id,
+        name: categoryName,
+        color: colorPalette[i % colorPalette.length],
+        description: `Imported from class ID ${classId}`,
+        order: i,
+        createdBy: SYSTEM_USER_ID
+      });
+
+      await category.save();
+      createdCategories.push({
+        id: category._id,
+        name: category.name,
+        color: category.color,
+        order: category.order
+      });
+    }
+
+    // Get all categories (ordered) to update data.yaml
+    const allCategories = await Category.getOrderedCategories(datasetId);
+
+    // Build dataset path
+    const datasetPath = storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version);
+
+    // Update data.yaml with actual category names
+    const dataYamlPath = path.join(datasetPath, 'data.yaml');
+    const dataYamlContent = generateDataYaml(allCategories, datasetPath);
+    await fsPromises.writeFile(dataYamlPath, dataYamlContent, 'utf8');
+
+    // Create class-mapping.json file
+    const classMappingPath = path.join(datasetPath, 'class-mapping.json');
+    const classMapping = {};
+    sortedClassIds.forEach((classId, index) => {
+      const category = allCategories[index];
+      classMapping[classId.toString()] = category.name;
+    });
+    await fsPromises.writeFile(classMappingPath, JSON.stringify(classMapping, null, 2), 'utf8');
+
+    return res.status(200).json({
+      message: 'Categories created from class IDs successfully',
+      createdCount: createdCategories.length,
+      classes: sortedClassIds,
+      categories: createdCategories
+    });
+
+  } catch (error) {
+    console.error('Error creating categories from classes:', error);
+    return res.status(500).json({
+      error: 'Internal Server Error',
+      message: error.message
+    });
+  }
+};
+
 module.exports = {
   uploadDataset,
   listDatasets,
@@ -825,5 +1064,7 @@ module.exports = {
   getFileThumbnail,
   getDatasetDependencies,
   updateDataset,
-  deleteDataset
+  deleteDataset,
+  getDetectedClasses,
+  createCategoriesFromClasses
 };

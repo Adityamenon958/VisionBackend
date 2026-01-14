@@ -19,7 +19,7 @@ const SYSTEM_USER_ID = new mongoose.Types.ObjectId('000000000000000000000000');
  * GET /api/dataset/:datasetId/categories
  * 
  * Get categories for a dataset (ordered by order field)
- * Auto-creates default categories if none exist
+ * Returns empty array if no categories exist (user must create categories explicitly)
  */
 const getCategories = async (req, res) => {
   try {
@@ -37,12 +37,7 @@ const getCategories = async (req, res) => {
     }
 
     // Get categories (ordered by order field)
-    let categories = await Category.getOrderedCategories(datasetId);
-
-    // Auto-create default categories if none exist
-    if (categories.length === 0) {
-      categories = await Category.createDefaults(datasetId, SYSTEM_USER_ID);
-    }
+    const categories = await Category.getOrderedCategories(datasetId);
 
     // Get annotation count for each category
     const categoriesWithCounts = await Promise.all(

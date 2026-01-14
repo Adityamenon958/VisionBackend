@@ -205,8 +205,28 @@ async function downloadBaseModelForJob({ jobId, modelSize, logger = console }) {
  * @returns {Promise<string>} Path to generated config file
  */
 async function generateTrainingConfig(hyperparameters, datasetPath, outputPath, modelType, modelSize = 'n', modelPath = null) {
-  // Create data.yaml for YOLO
-  const dataYaml = `# YOLO Dataset Configuration
+  const dataYamlPath = path.join(datasetPath, 'data.yaml');
+  
+  // ✅ Check if data.yaml already exists with category names (from convertAnnotationsToYOLO)
+  let dataYaml = null;
+  let hasExistingNames = false;
+  
+  try {
+    const existingContent = await fsPromises.readFile(dataYamlPath, 'utf8');
+    // Check if it has names section with actual names (not empty)
+    if (existingContent.includes('names:') && !existingContent.includes('names: []')) {
+      hasExistingNames = true;
+      console.log('✅ Found existing data.yaml with category names, preserving them');
+      // Keep the existing content - Python script will update nc and preserve names
+      dataYaml = existingContent;
+    }
+  } catch (error) {
+    // File doesn't exist or can't be read, will create new one
+  }
+  
+  // ✅ Create new data.yaml only if it doesn't exist or has no names
+  if (!dataYaml) {
+    dataYaml = `# YOLO Dataset Configuration
 path: ${datasetPath}
 train: images/train
 val: images/val
@@ -218,8 +238,8 @@ nc: 0
 # Class names (will be updated by Python script)
 names: []
 `;
+  }
 
-  const dataYamlPath = path.join(datasetPath, 'data.yaml');
   await fsPromises.writeFile(dataYamlPath, dataYaml, 'utf8');
 
   // ✅ Use provided modelPath (trained model checkpoint) or get base model path

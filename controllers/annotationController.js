@@ -21,6 +21,74 @@ const { generateLabelFileContent, generateDataYaml, getLabelFilePath } = require
 const SYSTEM_USER_ID = new mongoose.Types.ObjectId('000000000000000000000000');
 
 /**
+ * GET /api/dataset/:datasetId/images/unannotated
+ * 
+ * Get images with zero annotations (for good images confirmation)
+ */
+const getUnannotatedImages = async (req, res) => {
+  try {
+    const { datasetId } = req.params;
+
+    // Validate datasetId
+    if (!mongoose.Types.ObjectId.isValid(datasetId)) {
+      return sendNotFoundError(res, 'Dataset', datasetId);
+    }
+
+    // Check dataset exists
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return sendNotFoundError(res, 'Dataset', datasetId);
+    }
+
+    // Get all images in dataset
+    const images = await Image.find({ datasetId });
+
+    // Filter images with zero annotations
+    const unannotatedImages = [];
+    for (const image of images) {
+      const annotationCount = await Annotation.countDocuments({
+        imageId: image._id,
+        deletedAt: null
+      });
+
+      if (annotationCount === 0) {
+        // Generate signed URLs for image
+        const imageUrl = await storageAdapter.generateSignedUrl(image.storedPath, 3600, {
+          datasetId: datasetId.toString()
+        });
+        const thumbnailPath = image.storedPath.replace(/^images\//, 'thumbnails/');
+        const datasetPath = storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version);
+        const fullThumbnailPath = path.join(datasetPath, thumbnailPath);
+        const thumbnailExists = await storageAdapter.exists(fullThumbnailPath);
+        const thumbnailUrl = await storageAdapter.generateSignedUrl(
+          thumbnailExists ? thumbnailPath : image.storedPath,
+          3600,
+          { datasetId: datasetId.toString() }
+        );
+
+        unannotatedImages.push({
+          id: image._id,
+          filename: image.filename,
+          url: imageUrl,
+          thumbnailUrl: thumbnailUrl,
+          folder: image.folder,
+          size: image.size
+        });
+      }
+    }
+
+    return res.status(200).json({
+      unannotatedImages: unannotatedImages,
+      count: unannotatedImages.length
+    });
+
+  } catch (error) {
+    console.error('Error getting unannotated images:', error);
+    return sendError(res, 500, 'Internal Server Error', error.message);
+  }
+};
+
+/**
  * GET /api/dataset/:datasetId/unlabeled-images
  * 
  * Get unlabeled images for a dataset (paginated)
@@ -541,7 +609,7 @@ const batchSaveAnnotations = async (req, res) => {
 const convertAnnotationsToYOLO = async (req, res) => {
   try {
     const { datasetId } = req.params;
-    const { imageIds } = req.body; // Optional: if provided, convert only those images
+    const { imageIds, createEmptyLabels = false } = req.body; // Optional: if provided, convert only those images. createEmptyLabels: create empty .txt for unannotated images
 
     // Validate datasetId
     if (!mongoose.Types.ObjectId.isValid(datasetId)) {
@@ -594,17 +662,13 @@ const convertAnnotationsToYOLO = async (req, res) => {
 
     let converted = 0;
     let labelFilesCreated = 0;
+    let emptyLabelsCreated = 0;
+    const unannotatedImageList = [];
 
     // Process each image
     for (const image of images) {
       // Get annotations for this image
       const annotations = await Annotation.findByImageId(image._id);
-
-      // ✅ Only process images that have annotations (skip images with no annotations)
-      if (!annotations || annotations.length === 0) {
-        // Skip this image - no annotations to convert
-        continue;
-      }
 
       // Get label file path (parallel structure)
       const labelFilePath = getLabelFilePath(image.storedPath);
@@ -613,6 +677,23 @@ const convertAnnotationsToYOLO = async (req, res) => {
       // Ensure label directory exists
       const labelDir = path.dirname(fullLabelPath);
       await storageAdapter.ensureDir(labelDir);
+
+      // ✅ Handle images with no annotations
+      if (!annotations || annotations.length === 0) {
+        if (createEmptyLabels) {
+          // ✅ Create empty label file (good image)
+          await fs.writeFile(fullLabelPath, '', 'utf8'); // Empty file
+          emptyLabelsCreated++;
+          labelFilesCreated++;
+        } else {
+          // Track unannotated images for response
+          unannotatedImageList.push({
+            id: image._id,
+            filename: image.filename
+          });
+        }
+        continue;
+      }
 
       // Generate label file content
       const labelContent = generateLabelFileContent(annotations, categoryOrder);
@@ -634,6 +715,14 @@ const convertAnnotationsToYOLO = async (req, res) => {
     const dataYamlContent = generateDataYaml(categories, datasetPath);
     await fs.writeFile(dataYamlPath, dataYamlContent, 'utf8');
 
+    // ✅ Create class-mapping.json file (Option 1: separate mapping file for reference)
+    const classMappingPath = path.join(datasetPath, 'class-mapping.json');
+    const classMapping = {};
+    categories.forEach((category, index) => {
+      classMapping[index.toString()] = category.name;
+    });
+    await fs.writeFile(classMappingPath, JSON.stringify(classMapping, null, 2), 'utf8');
+
     // Update Dataset conversion metadata
     dataset.conversionMetadata = {
       convertedAt: new Date(),
@@ -647,13 +736,19 @@ const convertAnnotationsToYOLO = async (req, res) => {
     
     dataset.labeledImages = labeledCount;
     dataset.unlabeledImages = unlabeledCount;
-
+    
+    // ✅ Update dataset status to ready_to_train
+    dataset.status = 'ready_to_train';
+    
     await dataset.save();
 
     return res.status(200).json({
       converted: converted,
       labelFilesCreated: labelFilesCreated,
-      message: 'Annotations converted to YOLO label format'
+      emptyLabelsCreated: emptyLabelsCreated,
+      status: 'ready_to_train',
+      unannotatedImages: unannotatedImageList.length > 0 ? unannotatedImageList : undefined,
+      message: 'Annotations converted to YOLO format. Dataset ready for training.'
     });
 
   } catch (error) {
@@ -752,6 +847,7 @@ const serveSignedImage = async (req, res) => {
 
 module.exports = {
   getUnlabeledImages,
+  getUnannotatedImages,
   getAnnotations,
   createAnnotation,
   updateAnnotation,

@@ -28,8 +28,10 @@ async function validateDatasetForTraining(datasetId) {
       };
     }
 
-    // Check if dataset status is 'ready'
-    if (dataset.status !== 'ready') {
+    // Check if dataset status is 'ready' or 'ready_to_train'
+    // 'ready' = dataset from preprocessing (labeled data upload)
+    // 'ready_to_train' = dataset from annotation workflow (unlabeled data → annotated → converted)
+    if (dataset.status !== 'ready' && dataset.status !== 'ready_to_train') {
       return {
         valid: false,
         error: `Dataset is not ready for training. Current status: ${dataset.status}`,

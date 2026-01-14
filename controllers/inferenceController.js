@@ -149,11 +149,13 @@ const startBatchInference = async (req, res) => {
     }
 
     // ✅ Validate dataset is ready
-    if (dataset.status !== 'ready') {
+    // 'ready' = dataset from preprocessing (labeled data upload)
+    // 'ready_to_train' = dataset from annotation workflow (unlabeled data → annotated → converted)
+    if (dataset.status !== 'ready' && dataset.status !== 'ready_to_train') {
       return res.status(400).json({
         error: 'Dataset is not ready for inference',
         status: dataset.status,
-        message: 'Dataset must be in "ready" status'
+        message: 'Dataset must be in "ready" or "ready_to_train" status'
       });
     }
 
@@ -1549,11 +1551,11 @@ const listDatasetsWithTestFolders = async (req, res) => {
       });
     }
 
-    // ✅ Find datasets with status 'ready' and testCount > 0
+    // ✅ Find datasets with status 'ready' or 'ready_to_train' and testCount > 0
     const datasets = await Dataset.find({
       company,
       project,
-      status: 'ready',
+      status: { $in: ['ready', 'ready_to_train'] },
       testCount: { $gt: 0 }
     })
       .sort({ createdAt: -1 }) // Newest first

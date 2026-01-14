@@ -13,7 +13,9 @@ const {
   getFileThumbnail,
   updateDataset,
   getDatasetDependencies,
-  deleteDataset
+  deleteDataset,
+  getDetectedClasses,
+  createCategoriesFromClasses
 } = require('../controllers/datasetController');
 
 /**
@@ -118,6 +120,21 @@ router.post('/upload',
  * Returns minimal status for polling
  */
 router.get('/:datasetId/status', getDatasetStatus);
+
+/**
+ * GET /api/dataset/:datasetId/detected-classes
+ * 
+ * Returns detected class IDs and default class names for labeled datasets.
+ * Used by frontend to prompt user to map class IDs to meaningful names.
+ */
+router.get('/:datasetId/detected-classes', getDetectedClasses);
+
+/**
+ * POST /api/dataset/:datasetId/create-categories-from-classes
+ * 
+ * Creates Category documents from detected class IDs using user-provided names.
+ */
+router.post('/:datasetId/create-categories-from-classes', createCategoriesFromClasses);
 
 /**
  * GET /api/dataset/:datasetId/folders
