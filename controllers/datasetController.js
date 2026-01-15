@@ -566,12 +566,81 @@ const getFileThumbnail = async (req, res) => {
       });
     }
 
+    // ✅ Decode fileId (Express should decode, but be safe)
+    // Handle URL encoding issues (e.g., spaces as %20, special characters)
+    const decodedFileId = decodeURIComponent(fileId);
+    
     // ✅ Find file by storedName or _id
-    const file = dataset.files.find(f => 
-      f.storedName === fileId || f._id.toString() === fileId
+    // Try exact match first, then try decoded version
+    let file = dataset.files.find(f => 
+      f.storedName === fileId || f.storedName === decodedFileId || f._id.toString() === fileId
     );
+    
+    // If still not found, try case-insensitive match (fallback)
+    if (!file) {
+      const lowerFileId = fileId.toLowerCase();
+      const lowerDecodedFileId = decodedFileId.toLowerCase();
+      file = dataset.files.find(f => 
+        (f.type === 'image' && (
+          f.storedName.toLowerCase() === lowerFileId ||
+          f.storedName.toLowerCase() === lowerDecodedFileId
+        ))
+      );
+    }
+
+    // ✅ If still not found, try matching by Image document _id
+    // This handles cases where frontend passes Image._id instead of dataset.files[i]._id
+    if (!file && mongoose.Types.ObjectId.isValid(fileId)) {
+      try {
+        const Image = require('../models/Image');
+        const imageDoc = await Image.findOne({
+          _id: fileId,
+          datasetId: dataset._id
+        }).lean();
+
+        if (imageDoc) {
+          // Try to find matching file entry using Image.filename or extracted filename from storedPath
+          // Strategy 1: Match by Image.filename
+          file = dataset.files.find(f => 
+            f.type === 'image' && f.storedName === imageDoc.filename
+          );
+
+          // Strategy 2: Extract filename from Image.storedPath
+          if (!file && imageDoc.storedPath) {
+            const pathParts = imageDoc.storedPath.split('/');
+            const imageFilename = pathParts[pathParts.length - 1];
+            file = dataset.files.find(f => 
+              f.type === 'image' && f.storedName === imageFilename
+            );
+          }
+
+          // Strategy 3: Try partial match (filename without extension)
+          if (!file && imageDoc.filename) {
+            const filenameWithoutExt = path.parse(imageDoc.filename).name;
+            file = dataset.files.find(f => {
+              if (f.type !== 'image') return false;
+              const fileBaseName = path.parse(f.storedName).name;
+              return fileBaseName === filenameWithoutExt;
+            });
+          }
+        }
+      } catch (imageLookupError) {
+        // If Image lookup fails, continue to return 404 below
+        console.warn(`[getFileThumbnail] Failed to lookup Image document for fileId ${fileId}:`, imageLookupError.message);
+      }
+    }
 
     if (!file || file.type !== 'image') {
+      // Enhanced error logging for debugging
+      console.warn(`[getFileThumbnail] File not found:`, {
+        datasetId,
+        fileId,
+        decodedFileId,
+        totalFiles: dataset.files.length,
+        imageFiles: dataset.files.filter(f => f.type === 'image').length,
+        sampleStoredNames: dataset.files.filter(f => f.type === 'image').slice(0, 3).map(f => f.storedName)
+      });
+      
       return res.status(404).json({
         error: 'Image file not found'
       });
@@ -619,6 +688,126 @@ const getFileThumbnail = async (req, res) => {
 };
 
 /**
+ * GET /api/dataset/:datasetId/file/:fileId
+ * 
+ * Serves original full-size image (never thumbnail)
+ * fileId can be storedName, file _id, or Image document _id
+ */
+const getFile = async (req, res) => {
+  try {
+    const { datasetId, fileId } = req.params;
+
+    // ✅ Find dataset by ID
+    const dataset = await Dataset.findById(datasetId);
+
+    if (!dataset) {
+      return res.status(404).json({
+        error: 'Dataset not found'
+      });
+    }
+
+    // ✅ Decode fileId (Express should decode, but be safe)
+    // Handle URL encoding issues (e.g., spaces as %20, special characters)
+    const decodedFileId = decodeURIComponent(fileId);
+    
+    // ✅ Find file by storedName or _id
+    // Try exact match first, then try decoded version
+    let file = dataset.files.find(f => 
+      f.storedName === fileId || f.storedName === decodedFileId || f._id.toString() === fileId
+    );
+    
+    // If still not found, try case-insensitive match (fallback)
+    if (!file) {
+      const lowerFileId = fileId.toLowerCase();
+      const lowerDecodedFileId = decodedFileId.toLowerCase();
+      file = dataset.files.find(f => 
+        (f.type === 'image' && (
+          f.storedName.toLowerCase() === lowerFileId ||
+          f.storedName.toLowerCase() === lowerDecodedFileId
+        ))
+      );
+    }
+
+    // ✅ If still not found, try matching by Image document _id
+    // This handles cases where frontend passes Image._id instead of dataset.files[i]._id
+    if (!file && mongoose.Types.ObjectId.isValid(fileId)) {
+      try {
+        const Image = require('../models/Image');
+        const imageDoc = await Image.findOne({
+          _id: fileId,
+          datasetId: dataset._id
+        }).lean();
+
+        if (imageDoc) {
+          // Try to find matching file entry using Image.filename or extracted filename from storedPath
+          // Strategy 1: Match by Image.filename
+          file = dataset.files.find(f => 
+            f.type === 'image' && f.storedName === imageDoc.filename
+          );
+
+          // Strategy 2: Extract filename from Image.storedPath
+          if (!file && imageDoc.storedPath) {
+            const pathParts = imageDoc.storedPath.split('/');
+            const imageFilename = pathParts[pathParts.length - 1];
+            file = dataset.files.find(f => 
+              f.type === 'image' && f.storedName === imageFilename
+            );
+          }
+
+          // Strategy 3: Try partial match (filename without extension)
+          if (!file && imageDoc.filename) {
+            const filenameWithoutExt = path.parse(imageDoc.filename).name;
+            file = dataset.files.find(f => {
+              if (f.type !== 'image') return false;
+              const fileBaseName = path.parse(f.storedName).name;
+              return fileBaseName === filenameWithoutExt;
+            });
+          }
+        }
+      } catch (imageLookupError) {
+        // If Image lookup fails, continue to return 404 below
+        console.warn(`[getFile] Failed to lookup Image document for fileId ${fileId}:`, imageLookupError.message);
+      }
+    }
+
+    if (!file || file.type !== 'image') {
+      return res.status(404).json({
+        error: 'Image file not found'
+      });
+    }
+
+    // ✅ Always serve the original file (never thumbnail)
+    const originalFilePath = path.join(dataset.storagePath, file.storedPath);
+
+    // ✅ Verify file exists before serving
+    if (!(await storageAdapter.exists(originalFilePath))) {
+      return res.status(404).json({
+        error: 'Image file not found'
+      });
+    }
+
+    // ✅ Read file content using storageAdapter
+    const fileBuffer = await storageAdapter.readFile(originalFilePath);
+
+    // ✅ Set appropriate content type for image
+    const ext = path.extname(file.storedName).toLowerCase();
+    const contentType = ext === '.png' ? 'image/png' : 
+                       ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 
+                       'image/jpeg';
+
+    res.set('Content-Type', contentType);
+    res.send(fileBuffer);
+
+  } catch (error) {
+    console.error('Get file error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+};
+
+/**
  * GET /api/dataset/:datasetId/dependencies
  * 
  * Get dependencies (training jobs, models, inference jobs) that use this dataset
@@ -654,9 +843,17 @@ const getDatasetDependencies = async (req, res) => {
       sourceType: 'test_folder'
     });
 
+    // ✅ Calculate counts for frontend compatibility
+    const counts = {
+      trainingJobs: trainingJobs.length,
+      models: models.length,
+      inferenceJobs: inferenceJobs.length
+    };
+
     // ✅ Return dependencies
     res.json({
       datasetId,
+      counts,
       dependencies: {
         trainingJobs: trainingJobs.map(job => ({
           jobId: job.jobId,
@@ -763,26 +960,53 @@ const deleteDataset = async (req, res) => {
   try {
     const { datasetId } = req.params;
 
+    // ✅ Validate datasetId format (MongoDB ObjectId)
+    if (!mongoose.Types.ObjectId.isValid(datasetId)) {
+      console.warn(`[DELETE] Invalid dataset ID format: ${datasetId}`);
+      return res.status(400).json({
+        error: 'Invalid dataset ID format',
+        message: 'Dataset ID must be a valid MongoDB ObjectId'
+      });
+    }
+
     // ✅ Find dataset by ID
     const dataset = await Dataset.findById(datasetId);
 
     if (!dataset) {
+      console.warn(`[DELETE] Dataset not found: ${datasetId}`);
       return res.status(404).json({
-        error: 'Dataset not found'
+        error: 'Dataset not found',
+        datasetId: datasetId
       });
     }
 
+    // ✅ Log deletion attempt
+    console.log(`[DELETE] Attempting to delete dataset:`, {
+      datasetId: dataset._id.toString(),
+      company: dataset.company,
+      project: dataset.project,
+      version: dataset.version,
+      status: dataset.status,
+      deletedAt: dataset.deletedAt
+    });
+
     // ✅ Check if dataset is already deleted
     if (dataset.deletedAt) {
+      console.warn(`[DELETE] Dataset already deleted: ${dataset._id.toString()}`);
       return res.status(400).json({
-        error: 'Dataset is already deleted'
+        error: 'Dataset is already deleted',
+        datasetId: dataset._id.toString(),
+        deletedAt: dataset.deletedAt
       });
     }
 
     // ✅ Check if dataset is processing or queued (cannot delete)
     if (dataset.status === 'processing' || dataset.status === 'queued') {
+      console.warn(`[DELETE] Cannot delete dataset in ${dataset.status} status: ${dataset._id.toString()}`);
       return res.status(400).json({
-        error: 'Cannot delete dataset while it is processing or queued'
+        error: 'Cannot delete dataset while it is processing or queued',
+        currentStatus: dataset.status,
+        message: `Please wait for the dataset to finish processing (current status: ${dataset.status}) before deleting`
       });
     }
 
@@ -790,17 +1014,30 @@ const deleteDataset = async (req, res) => {
     if (dataset.storagePath && fs.existsSync(dataset.storagePath)) {
       try {
         fs.rmSync(dataset.storagePath, { recursive: true, force: true });
-        console.log(`🗑️ Deleted dataset files: ${dataset.storagePath}`);
+        console.log(`🗑️ [DELETE] Deleted dataset files: ${dataset.storagePath}`);
       } catch (deleteError) {
-        console.error(`⚠️ Failed to delete dataset files: ${deleteError.message}`);
+        console.error(`⚠️ [DELETE] Failed to delete dataset files: ${deleteError.message}`, {
+          storagePath: dataset.storagePath,
+          error: deleteError
+        });
         // Continue with soft delete even if file deletion fails
       }
+    } else {
+      console.warn(`[DELETE] Storage path does not exist or is missing: ${dataset.storagePath}`);
     }
 
     // ✅ Soft delete: Mark as deleted but keep document
     dataset.deletedAt = new Date();
     dataset.status = 'failed'; // Mark status as failed to indicate deletion
     await dataset.save();
+
+    console.log(`✅ [DELETE] Dataset soft deleted successfully:`, {
+      datasetId: dataset._id.toString(),
+      company: dataset.company,
+      project: dataset.project,
+      version: dataset.version,
+      deletedAt: dataset.deletedAt
+    });
 
     // ✅ Return success response
     res.json({
@@ -810,7 +1047,153 @@ const deleteDataset = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Delete dataset error:', error);
+    console.error('[DELETE] Delete dataset error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+};
+
+/**
+ * DELETE /api/dataset/:company/:project/:version
+ * 
+ * Soft delete dataset by company/project/version identifier
+ * Delete files but keep MongoDB document
+ * References in models/inference jobs will remain but show "Dataset deleted" status
+ * 
+ * ⚠️ CAUTION: Cannot delete if:
+ * - Dataset is processing or queued
+ * - Dataset is already deleted
+ */
+const deleteDatasetByVersion = async (req, res) => {
+  try {
+    const { company, project, version } = req.params;
+
+    // ✅ Validate required parameters
+    if (!company || !project || !version) {
+      console.warn(`[DELETE] Missing required parameters:`, { company, project, version });
+      return res.status(400).json({
+        error: 'Missing required parameters',
+        message: 'Company, project, and version are required'
+      });
+    }
+
+    // ✅ Log deletion attempt
+    console.log(`[DELETE] Attempting to delete dataset by version:`, {
+      company,
+      project,
+      version
+    });
+
+    // ✅ Find dataset by company/project/version
+    const dataset = await Dataset.findOne({ 
+      company, 
+      project, 
+      version,
+      deletedAt: null // Only find non-deleted datasets
+    });
+
+    if (!dataset) {
+      console.warn(`[DELETE] Dataset version not found:`, { company, project, version });
+      return res.status(404).json({
+        error: 'Dataset version not found',
+        company,
+        project,
+        version
+      });
+    }
+
+    // ✅ Log found dataset details
+    console.log(`[DELETE] Found dataset for deletion:`, {
+      datasetId: dataset._id.toString(),
+      company: dataset.company,
+      project: dataset.project,
+      version: dataset.version,
+      status: dataset.status
+    });
+
+    // ✅ Check if dataset is already deleted (shouldn't happen due to query filter, but double-check)
+    if (dataset.deletedAt) {
+      console.warn(`[DELETE] Dataset already deleted: ${dataset._id.toString()}`);
+      return res.status(400).json({
+        error: 'Dataset is already deleted',
+        datasetId: dataset._id.toString(),
+        company,
+        project,
+        version,
+        deletedAt: dataset.deletedAt
+      });
+    }
+
+    // ✅ Check if dataset is processing or queued (cannot delete)
+    if (dataset.status === 'processing' || dataset.status === 'queued') {
+      console.warn(`[DELETE] Cannot delete dataset in ${dataset.status} status:`, {
+        datasetId: dataset._id.toString(),
+        company,
+        project,
+        version,
+        status: dataset.status
+      });
+      return res.status(400).json({
+        error: 'Cannot delete dataset while it is processing or queued',
+        currentStatus: dataset.status,
+        message: `Please wait for the dataset to finish processing (current status: ${dataset.status}) before deleting`,
+        company,
+        project,
+        version
+      });
+    }
+
+    // ✅ Delete files from storage
+    if (dataset.storagePath && fs.existsSync(dataset.storagePath)) {
+      try {
+        fs.rmSync(dataset.storagePath, { recursive: true, force: true });
+        console.log(`🗑️ [DELETE] Deleted dataset files: ${dataset.storagePath}`);
+      } catch (deleteError) {
+        console.error(`⚠️ [DELETE] Failed to delete dataset files: ${deleteError.message}`, {
+          storagePath: dataset.storagePath,
+          company,
+          project,
+          version,
+          error: deleteError
+        });
+        // Continue with soft delete even if file deletion fails
+      }
+    } else {
+      console.warn(`[DELETE] Storage path does not exist or is missing:`, {
+        storagePath: dataset.storagePath,
+        company,
+        project,
+        version
+      });
+    }
+
+    // ✅ Soft delete: Mark as deleted but keep document
+    dataset.deletedAt = new Date();
+    dataset.status = 'failed'; // Mark status as failed to indicate deletion
+    await dataset.save();
+
+    console.log(`✅ [DELETE] Dataset version soft deleted successfully:`, {
+      datasetId: dataset._id.toString(),
+      company: dataset.company,
+      project: dataset.project,
+      version: dataset.version,
+      deletedAt: dataset.deletedAt
+    });
+
+    // ✅ Return success response
+    res.json({
+      message: 'Dataset version deleted successfully',
+      datasetId: dataset._id,
+      company: dataset.company,
+      project: dataset.project,
+      version: dataset.version,
+      deletedAt: dataset.deletedAt
+    });
+
+  } catch (error) {
+    console.error('[DELETE] Delete dataset by version error:', error);
     res.status(500).json({
       error: 'Internal server error',
       message: error.message
@@ -874,13 +1257,113 @@ const getDetectedClasses = async (req, res) => {
     // Check if categories already exist
     const existingCategories = await Category.countDocuments({ datasetId });
 
-    return res.status(200).json({
+    // ✅ Build samples array: find one representative image per class ID
+    const Image = require('../models/Image');
+    const samples = [];
+    
+    for (const classId of sortedClassIds) {
+      try {
+        // Find one image that contains this class ID
+        // Sort by filename for deterministic selection
+        const sampleImage = await Image.findOne({
+          datasetId: dataset._id,
+          classes: classId // MongoDB query: classId is in the classes array
+        }).sort({ filename: 1 }).lean(); // Sort by filename for consistent selection
+        
+        if (sampleImage) {
+          // ✅ Find matching file entry in dataset.files
+          // The thumbnail endpoint requires a file entry from dataset.files array
+          // We need to match Image document to dataset.files entry
+          
+          let matchingFile = null;
+          
+          // Strategy 1: Match by storedName (Image.filename should match dataset.files[i].storedName)
+          matchingFile = dataset.files.find(f => 
+            f.type === 'image' && f.storedName === sampleImage.filename
+          );
+          
+          // Strategy 2: If not found, extract filename from Image.storedPath and match
+          // Image.storedPath format: "images/train/xxx.jpg" or "images/val/xxx.jpg"
+          if (!matchingFile && sampleImage.storedPath) {
+            const pathParts = sampleImage.storedPath.split('/');
+            const imageFilename = pathParts[pathParts.length - 1]; // Get last part (filename)
+            matchingFile = dataset.files.find(f => 
+              f.type === 'image' && f.storedName === imageFilename
+            );
+          }
+          
+          // Strategy 3: Try matching by originalName if available (less reliable but worth trying)
+          // This handles cases where storedName might have been transformed
+          if (!matchingFile && sampleImage.filename) {
+            // Try to find by partial match (filename without extension)
+            const filenameWithoutExt = path.parse(sampleImage.filename).name;
+            matchingFile = dataset.files.find(f => {
+              if (f.type !== 'image') return false;
+              const fileBaseName = path.parse(f.storedName).name;
+              return fileBaseName === filenameWithoutExt;
+            });
+          }
+          
+          // ✅ Only add sample if we found a matching file entry in dataset.files
+          // This ensures the thumbnail URL will work with getFileThumbnail
+          if (matchingFile) {
+            // Use storedName for thumbnail URL (more reliable than _id for subdocuments)
+            // getFileThumbnail accepts both f.storedName and f._id.toString()
+            // Using storedName is safer because it's always a string and explicitly defined
+            const fileId = matchingFile.storedName;
+            
+            if (!fileId) {
+              console.warn(`[getDetectedClasses] Matching file found but has no storedName for Image ${sampleImage._id} (filename: ${sampleImage.filename})`);
+            } else {
+              samples.push({
+                classId: classId,
+                imageId: sampleImage._id.toString(),
+                filename: sampleImage.filename,
+                thumbnailUrl: `/api/dataset/${datasetId}/file/${fileId}/thumbnail`
+              });
+              
+              // Debug logging to verify matching
+              console.log(`[getDetectedClasses] Found sample for class ${classId}: Image=${sampleImage.filename}, FileStoredName=${matchingFile.storedName}, ThumbnailUrl=/api/dataset/${datasetId}/file/${fileId}/thumbnail`);
+            }
+          } else {
+            // Log detailed warning to help diagnose matching issues
+            console.warn(`[getDetectedClasses] Could not find matching dataset.files entry for Image ${sampleImage._id}`);
+            console.warn(`  - Image filename: ${sampleImage.filename}`);
+            console.warn(`  - Image storedPath: ${sampleImage.storedPath || 'N/A'}`);
+            console.warn(`  - Total files in dataset: ${dataset.files.length}`);
+            console.warn(`  - Image files in dataset: ${dataset.files.filter(f => f.type === 'image').length}`);
+            
+            // Try to find any similar filenames for debugging
+            const similarFiles = dataset.files.filter(f => 
+              f.type === 'image' && 
+              (f.storedName.includes(sampleImage.filename) || sampleImage.filename.includes(f.storedName))
+            );
+            if (similarFiles.length > 0) {
+              console.warn(`  - Similar files found: ${similarFiles.map(f => f.storedName).join(', ')}`);
+            }
+          }
+        }
+      } catch (sampleError) {
+        // If query fails for a class, skip it (don't break the entire response)
+        console.warn(`Failed to find sample image for class ${classId}:`, sampleError.message);
+      }
+    }
+
+    // Build response (keep existing fields for backward compatibility)
+    const response = {
       datasetId: dataset._id.toString(),
       classIds: sortedClassIds,
       classNames: sortedClassNames,
       totalClasses: sortedClassIds.length,
       hasCategories: existingCategories > 0
-    });
+    };
+
+    // Only include samples if we found any (optional field for backward compatibility)
+    if (samples.length > 0) {
+      response.samples = samples;
+    }
+
+    return res.status(200).json(response);
 
   } catch (error) {
     console.error('Error getting detected classes:', error);
@@ -1062,9 +1545,11 @@ module.exports = {
   getDatasetFolders,
   getDatasetFiles,
   getFileThumbnail,
+  getFile,
   getDatasetDependencies,
   updateDataset,
   deleteDataset,
+  deleteDatasetByVersion,
   getDetectedClasses,
   createCategoriesFromClasses
 };

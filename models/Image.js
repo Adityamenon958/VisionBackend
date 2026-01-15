@@ -55,6 +55,14 @@ const imageSchema = new mongoose.Schema({
     default: false
   },
 
+  // Class IDs present in this image (for labeled datasets)
+  // Array of numeric class IDs (e.g., [0, 1, 2]) extracted from label .txt files
+  // Used to find representative images for each class during class name mapping
+  classes: {
+    type: [Number],
+    default: undefined // Optional field - only set for labeled images
+  },
+
   // Conversion metadata
   convertedAt: {
     type: Date // Timestamp of last YOLO conversion
@@ -72,6 +80,9 @@ imageSchema.index({ datasetId: 1, hasLabels: 1 });
 
 // Composite index for folder filtering
 imageSchema.index({ datasetId: 1, folder: 1 });
+
+// Index for querying images by class ID (for sample image lookup)
+imageSchema.index({ datasetId: 1, classes: 1 });
 
 // Composite unique index for storedPath per dataset
 imageSchema.index({ datasetId: 1, storedPath: 1 }, { unique: true });

@@ -299,6 +299,209 @@ VisionBackend/
 }
 ```
 
+### Test 4: Get Dataset Dependencies
+
+**Purpose:** Check what training jobs, models, and inference jobs depend on this dataset before deletion.
+
+1. **New Request:** `GET`
+2. **URL:** `http://localhost:3000/api/dataset/{datasetId}/dependencies`
+3. **Click "Send"**
+
+**Expected Response (with dependencies):**
+```json
+{
+  "datasetId": "507f1f77bcf86cd799439011",
+  "counts": {
+    "trainingJobs": 2,
+    "models": 1,
+    "inferenceJobs": 3
+  },
+  "dependencies": {
+    "trainingJobs": [
+      {
+        "jobId": "job_12345",
+        "status": "completed",
+        "createdAt": "2024-01-15T10:30:00.000Z"
+      },
+      {
+        "jobId": "job_67890",
+        "status": "running",
+        "createdAt": "2024-01-15T11:00:00.000Z"
+      }
+    ],
+    "models": [
+      {
+        "modelId": "model_abc123",
+        "modelVersion": "v1.0",
+        "createdAt": "2024-01-15T12:00:00.000Z"
+      }
+    ],
+    "inferenceJobs": [
+      {
+        "inferenceId": "inf_xyz789",
+        "status": "completed",
+        "createdAt": "2024-01-15T13:00:00.000Z"
+      }
+    ]
+  },
+  "hasDependencies": true
+}
+```
+
+**Expected Response (no dependencies):**
+```json
+{
+  "datasetId": "507f1f77bcf86cd799439011",
+  "counts": {
+    "trainingJobs": 0,
+    "models": 0,
+    "inferenceJobs": 0
+  },
+  "dependencies": {
+    "trainingJobs": [],
+    "models": [],
+    "inferenceJobs": []
+  },
+  "hasDependencies": false
+}
+```
+
+**Response Fields:**
+- `counts`: Object with numeric counts for each dependency type (used by frontend for quick checks)
+- `dependencies`: Object with arrays of dependency details
+- `hasDependencies`: Boolean indicating if any dependencies exist
+
+### Test 5: Delete Dataset by ID
+
+**Purpose:** Soft delete a dataset using its MongoDB ObjectId.
+
+1. **New Request:** `DELETE`
+2. **URL:** `http://localhost:3000/api/dataset/{datasetId}`
+   - Replace `{datasetId}` with a valid MongoDB ObjectId
+3. **Click "Send"**
+
+**Expected Response (Success - 200 OK):**
+```json
+{
+  "message": "Dataset deleted successfully",
+  "datasetId": "507f1f77bcf86cd799439011",
+  "deletedAt": "2024-01-15T14:30:00.000Z"
+}
+```
+
+**Error Responses:**
+
+**Invalid ID Format (400 Bad Request):**
+```json
+{
+  "error": "Invalid dataset ID format",
+  "message": "Dataset ID must be a valid MongoDB ObjectId"
+}
+```
+
+**Dataset Not Found (404 Not Found):**
+```json
+{
+  "error": "Dataset not found",
+  "datasetId": "507f1f77bcf86cd799439011"
+}
+```
+
+**Already Deleted (400 Bad Request):**
+```json
+{
+  "error": "Dataset is already deleted",
+  "datasetId": "507f1f77bcf86cd799439011",
+  "deletedAt": "2024-01-15T10:00:00.000Z"
+}
+```
+
+**Cannot Delete (Processing/Queued - 400 Bad Request):**
+```json
+{
+  "error": "Cannot delete dataset while it is processing or queued",
+  "currentStatus": "processing",
+  "message": "Please wait for the dataset to finish processing (current status: processing) before deleting"
+}
+```
+
+**Important Notes:**
+- ⚠️ **Soft Delete:** Files are deleted from disk, but the MongoDB document is kept with `deletedAt` timestamp
+- ⚠️ **Cannot Delete:** Datasets with status `processing` or `queued` cannot be deleted
+- ⚠️ **Validation:** Invalid ObjectId format returns 400 error immediately
+
+### Test 6: Delete Dataset by Version
+
+**Purpose:** Soft delete a dataset using company/project/version identifier instead of ObjectId.
+
+1. **New Request:** `DELETE`
+2. **URL:** `http://localhost:3000/api/dataset/{company}/{project}/{version}`
+   - Replace `{company}`, `{project}`, and `{version}` with actual values
+   - **Important:** URL-encode special characters (e.g., spaces as `%20`)
+   - Example: `http://localhost:3000/api/dataset/gsn/annotation%20test/v4`
+3. **Click "Send"**
+
+**Expected Response (Success - 200 OK):**
+```json
+{
+  "message": "Dataset version deleted successfully",
+  "datasetId": "507f1f77bcf86cd799439011",
+  "company": "gsn",
+  "project": "annotation test",
+  "version": "v4",
+  "deletedAt": "2024-01-15T14:30:00.000Z"
+}
+```
+
+**Error Responses:**
+
+**Missing Parameters (400 Bad Request):**
+```json
+{
+  "error": "Missing required parameters",
+  "message": "Company, project, and version are required"
+}
+```
+
+**Dataset Version Not Found (404 Not Found):**
+```json
+{
+  "error": "Dataset version not found",
+  "company": "gsn",
+  "project": "annotation test",
+  "version": "v4"
+}
+```
+
+**Already Deleted (400 Bad Request):**
+```json
+{
+  "error": "Dataset is already deleted",
+  "datasetId": "507f1f77bcf86cd799439011",
+  "company": "gsn",
+  "project": "annotation test",
+  "version": "v4",
+  "deletedAt": "2024-01-15T10:00:00.000Z"
+}
+```
+
+**Cannot Delete (Processing/Queued - 400 Bad Request):**
+```json
+{
+  "error": "Cannot delete dataset while it is processing or queued",
+  "currentStatus": "queued",
+  "message": "Please wait for the dataset to finish processing (current status: queued) before deleting",
+  "company": "gsn",
+  "project": "annotation test",
+  "version": "v4"
+}
+```
+
+**Important Notes:**
+- ⚠️ **URL Encoding:** Special characters in company/project names must be URL-encoded (e.g., `annotation test` → `annotation%20test`)
+- ⚠️ **Route Order:** This route must be placed before the generic `DELETE /:datasetId` route to avoid conflicts
+- ⚠️ **Soft Delete:** Same behavior as delete by ID - files deleted, document kept with `deletedAt` timestamp
+
 ## 🔍 Understanding Key Concepts
 
 ### 1. **Middleware**
@@ -404,6 +607,9 @@ After this first iteration works, you can:
 | `POST` | `/api/dataset/upload` | Upload dataset files |
 | `GET` | `/api/dataset/:datasetId` | Get full dataset metadata |
 | `GET` | `/api/dataset/:datasetId/status` | Get minimal status (for polling) |
+| `GET` | `/api/dataset/:datasetId/dependencies` | Get dependencies (training jobs, models, inference jobs) |
+| `DELETE` | `/api/dataset/:datasetId` | Delete dataset by ID |
+| `DELETE` | `/api/dataset/:company/:project/:version` | Delete dataset by version identifier |
 | `GET` | `/health` | Health check |
 
 ## 🤝 Support

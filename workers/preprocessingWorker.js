@@ -38,6 +38,47 @@ const storageAdapter = require('../services/storageAdapter');
  */
 
 /**
+ * Parse YOLO label file and extract class IDs
+ * @param {string} labelPath - Full path to label .txt file
+ * @param {boolean} isAzure - Whether using Azure storage
+ * @param {string} logicalDatasetRoot - Logical root path for Azure
+ * @returns {Promise<number[]>} Array of unique class IDs found in the label file
+ */
+async function extractClassIdsFromLabel(labelPath, isAzure, logicalDatasetRoot) {
+  try {
+    let content;
+    if (isAzure) {
+      // For Azure, use storageAdapter to read file (returns Buffer)
+      const fullPath = labelPath.startsWith('/') ? labelPath : `${logicalDatasetRoot}/${labelPath}`;
+      const buffer = await storageAdapter.readFile(fullPath);
+      content = buffer.toString('utf-8');
+    } else {
+      // For local filesystem
+      content = await fsPromises.readFile(labelPath, 'utf-8');
+    }
+    
+    const classIds = new Set();
+    const lines = content.trim().split('\n');
+    
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length >= 5) { // YOLO format: class_id center_x center_y width height
+        const classId = parseInt(parts[0], 10);
+        if (!isNaN(classId) && classId >= 0) {
+          classIds.add(classId);
+        }
+      }
+    }
+    
+    return Array.from(classIds).sort((a, b) => a - b);
+  } catch (error) {
+    // If file doesn't exist or can't be read, return empty array
+    console.warn(`Failed to parse label file ${labelPath}:`, error.message);
+    return [];
+  }
+}
+
+/**
  * Compute total size of a folder recursively
  * @param {string} rootPath - Root directory path
  * @returns {Promise<number>} Total size in bytes
@@ -198,6 +239,7 @@ const processPreprocessingJob = async (job) => {
           const labelInfo = labelManifest.get(originalBaseName);
           
           let hasLabels = false;
+          let classIds = []; // Extract class IDs from label file
           if (labelInfo) {
             const labelSrcPath = isAzure
               ? `${logicalDatasetRoot}/${labelInfo.storedPath}`
@@ -208,6 +250,8 @@ const processPreprocessingJob = async (job) => {
             if (await storageAdapter.exists(labelSrcPath)) {
               await storageAdapter.copyFile(labelSrcPath, labelDestPath); // Copy and rename to match image
               hasLabels = true;
+              // ✅ Extract class IDs from label file (use source path before copy)
+              classIds = await extractClassIdsFromLabel(labelSrcPath, isAzure, logicalDatasetRoot);
             }
           }
 
@@ -221,6 +265,11 @@ const processPreprocessingJob = async (job) => {
             const trainLabelPath = path.join(trainLabelsPath, `${imageBaseName}.txt`);
             const labelExists = await storageAdapter.exists(trainLabelPath);
             
+            // If label exists in train folder but we haven't extracted class IDs yet, try extracting from train label
+            if (labelExists && classIds.length === 0) {
+              classIds = await extractClassIdsFromLabel(trainLabelPath, false, logicalDatasetRoot);
+            }
+            
             imageDocuments.push({
               datasetId: datasetId,
               filename: imageInfo.storedName,
@@ -230,6 +279,7 @@ const processPreprocessingJob = async (job) => {
               width: imageMetadata.width || 0,
               height: imageMetadata.height || 0,
               hasLabels: hasLabels || labelExists, // Set true if label file exists
+              classes: classIds.length > 0 ? classIds : undefined, // Store class IDs if found
               convertedAt: (hasLabels || labelExists) ? new Date() : undefined
             });
           } catch (dimError) {
@@ -244,6 +294,7 @@ const processPreprocessingJob = async (job) => {
               width: 0,
               height: 0,
               hasLabels: hasLabels,
+              classes: classIds.length > 0 ? classIds : undefined, // Store class IDs if found
               convertedAt: hasLabels ? new Date() : undefined
             });
           }
@@ -289,6 +340,7 @@ const processPreprocessingJob = async (job) => {
           const labelInfo = labelManifest.get(originalBaseName);
           
           let hasLabels = false;
+          let classIds = []; // Extract class IDs from label file
           if (labelInfo) {
             const labelSrcPath = isAzure
               ? `${logicalDatasetRoot}/${labelInfo.storedPath}`
@@ -299,6 +351,8 @@ const processPreprocessingJob = async (job) => {
             if (await storageAdapter.exists(labelSrcPath)) {
               await storageAdapter.copyFile(labelSrcPath, labelDestPath); // Copy and rename to match image
               hasLabels = true;
+              // ✅ Extract class IDs from label file (use source path before copy)
+              classIds = await extractClassIdsFromLabel(labelSrcPath, isAzure, logicalDatasetRoot);
             }
           }
 
@@ -312,6 +366,11 @@ const processPreprocessingJob = async (job) => {
             const valLabelPath = path.join(valLabelsPath, `${imageBaseName}.txt`);
             const labelExists = await storageAdapter.exists(valLabelPath);
             
+            // If label exists in val folder but we haven't extracted class IDs yet, try extracting from val label
+            if (labelExists && classIds.length === 0) {
+              classIds = await extractClassIdsFromLabel(valLabelPath, false, logicalDatasetRoot);
+            }
+            
             imageDocuments.push({
               datasetId: datasetId,
               filename: imageInfo.storedName,
@@ -321,6 +380,7 @@ const processPreprocessingJob = async (job) => {
               width: imageMetadata.width || 0,
               height: imageMetadata.height || 0,
               hasLabels: hasLabels || labelExists, // Set true if label file exists
+              classes: classIds.length > 0 ? classIds : undefined, // Store class IDs if found
               convertedAt: (hasLabels || labelExists) ? new Date() : undefined
             });
           } catch (dimError) {
@@ -335,6 +395,7 @@ const processPreprocessingJob = async (job) => {
               width: 0,
               height: 0,
               hasLabels: hasLabels,
+              classes: classIds.length > 0 ? classIds : undefined, // Store class IDs if found
               convertedAt: hasLabels ? new Date() : undefined
             });
           }

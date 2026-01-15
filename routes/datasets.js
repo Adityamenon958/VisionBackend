@@ -11,9 +11,11 @@ const {
   getDatasetFolders,
   getDatasetFiles,
   getFileThumbnail,
+  getFile,
   updateDataset,
   getDatasetDependencies,
   deleteDataset,
+  deleteDatasetByVersion,
   getDetectedClasses,
   createCategoriesFromClasses
 } = require('../controllers/datasetController');
@@ -159,6 +161,16 @@ router.get('/:datasetId/files', getDatasetFiles);
 router.get('/:datasetId/file/:fileId/thumbnail', getFileThumbnail);
 
 /**
+ * GET /api/dataset/:datasetId/file/:fileId
+ * 
+ * Serves original full-size image (never thumbnail)
+ * fileId can be storedName or file _id
+ * 
+ * ⚠️ CAUTION: This route must be AFTER /thumbnail route to avoid route conflicts
+ */
+router.get('/:datasetId/file/:fileId', getFile);
+
+/**
  * GET /api/dataset/:datasetId/dependencies
  * 
  * Get dependencies (training jobs, models, inference jobs) that use this dataset
@@ -180,6 +192,21 @@ router.get('/:datasetId/dependencies', getDatasetDependencies);
  * ⚠️ CAUTION: This route must be BEFORE GET /:datasetId to avoid route conflicts
  */
 router.patch('/:datasetId', updateDataset);
+
+/**
+ * DELETE /api/dataset/:company/:project/:version
+ * 
+ * Soft delete dataset by company/project/version identifier
+ * Delete files but keep MongoDB document
+ * References in models/inference jobs will remain but show "Dataset deleted" status
+ * 
+ * ⚠️ CAUTION: 
+ * - This route must be BEFORE DELETE /:datasetId to avoid route conflicts
+ * - Cannot delete if:
+ *   - Dataset is processing or queued
+ *   - Dataset is already deleted
+ */
+router.delete('/:company/:project/:version', deleteDatasetByVersion);
 
 /**
  * DELETE /api/dataset/:datasetId
