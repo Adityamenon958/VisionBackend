@@ -46,10 +46,49 @@ const processInferenceJob = async (job) => {
   let sourceFolderPath = null; // Will be set based on sourceType
 
   try {
-    // ✅ Load inference job from MongoDB
-    inferenceJob = await InferenceJob.findOne({ inferenceId });
-    if (!inferenceJob) {
-      throw new Error(`Inference job ${inferenceId} not found`);
+    // ✅ Helper function to check if error is retryable (for document loading)
+    const isRetryableErrorForLoad = (error) => {
+      const retryableErrors = [
+        'MongoNetworkError',
+        'MongoTimeoutError',
+        'MongoServerSelectionError',
+        'MongoWriteConcernError'
+      ];
+      
+      return retryableErrors.some(errorType => 
+        error.name === errorType || error.constructor.name === errorType
+      );
+    };
+
+    // ✅ Load inference job from MongoDB with retry
+    let inferenceJob = null;
+    let retryCount = 0;
+    const MAX_RETRIES = 3;
+
+    while (!inferenceJob && retryCount < MAX_RETRIES) {
+      try {
+        inferenceJob = await InferenceJob.findOne({ inferenceId });
+        
+        if (!inferenceJob) {
+          if (retryCount < MAX_RETRIES - 1) {
+            console.warn(`⚠️ Inference job ${inferenceId} not found, retrying... (${retryCount + 1}/${MAX_RETRIES})`);
+            await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
+            retryCount++;
+            continue;
+          } else {
+            throw new Error(`Inference job ${inferenceId} not found in MongoDB after ${MAX_RETRIES} attempts`);
+          }
+        }
+      } catch (error) {
+        if (isRetryableErrorForLoad(error) && retryCount < MAX_RETRIES - 1) {
+          console.warn(`⚠️ MongoDB error loading inference job, retrying... (${retryCount + 1}/${MAX_RETRIES})`);
+          await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
+          retryCount++;
+          continue;
+        } else {
+          throw error;
+        }
+      }
     }
 
     // ✅ Check if job was cancelled
@@ -58,19 +97,103 @@ const processInferenceJob = async (job) => {
       return;
     }
 
+    // ✅ Helper function to check if error is retryable
+    const isRetryableError = (error) => {
+      // Retry on network errors, timeouts, and connection issues
+      const retryableErrors = [
+        'MongoNetworkError',
+        'MongoTimeoutError',
+        'MongoServerSelectionError',
+        'MongoWriteConcernError'
+      ];
+      
+      return retryableErrors.some(errorType => 
+        error.name === errorType || error.constructor.name === errorType
+      );
+    };
+
+    // ✅ Helper function to recreate missing document
+    const recreateInferenceJobDocument = async (inferenceId, localJob) => {
+      // Only recreate if we have enough information
+      if (!localJob || !localJob.modelId) {
+        return null;
+      }
+      
+      try {
+        // Get model to extract company/project
+        const model = await Model.findById(localJob.modelId);
+        if (!model) {
+          return null;
+        }
+        
+        // Recreate document with current state
+        const recreatedJob = new InferenceJob({
+          inferenceId: localJob.inferenceId,
+          modelId: localJob.modelId,
+          company: model.company,
+          project: model.project,
+          sourceType: localJob.sourceType,
+          status: localJob.status || 'running',
+          progress: localJob.progress || {},
+          results: localJob.results || {},
+          startedAt: localJob.startedAt,
+          completedAt: localJob.completedAt,
+          cancelledAt: localJob.cancelledAt,
+          error: localJob.error
+        });
+        
+        // Add source-specific fields
+        if (localJob.sourceType === 'test_folder') {
+          recreatedJob.datasetId = localJob.datasetId;
+          recreatedJob.testFolderPath = localJob.testFolderPath;
+        } else if (localJob.sourceType === 'custom_folder') {
+          recreatedJob.customFolderPath = localJob.customFolderPath;
+        }
+        
+        return await recreatedJob.save();
+      } catch (error) {
+        console.error(`Failed to recreate document: ${error.message}`);
+        return null;
+      }
+    };
+
     // ✅ Helper function to save inference job (prevents parallel saves)
-    const saveInferenceJob = async () => {
+    const saveInferenceJob = async (retryCount = 0) => {
+      const MAX_RETRIES = 3;
+      const RETRY_DELAY = 1000; // 1 second
+
       if (isSaving) {
         return; // Already saving, skip
       }
       
       try {
         isSaving = true;
-        // Fetch fresh document from DB to avoid stale document issues
+        
+        console.log(`💾 [SAVE] Starting save for ${inferenceId}, status: ${inferenceJob.status}`);
+        
+        // Fetch fresh document from DB
         const freshJob = await InferenceJob.findOne({ inferenceId });
+        
         if (!freshJob) {
-          console.warn(`⚠️ Inference job ${inferenceId} not found in DB`);
-          return;
+          const errorMsg = `Inference job ${inferenceId} not found in MongoDB during save operation`;
+          console.error(`❌ ${errorMsg}`);
+          console.error(`   Current status: ${inferenceJob?.status || 'unknown'}`);
+          console.error(`   Attempting to recreate document...`);
+          
+          // Try to recreate document if it was deleted
+          try {
+            const recreatedJob = await recreateInferenceJobDocument(inferenceId, inferenceJob);
+            if (recreatedJob) {
+              console.log(`✅ Recreated inference job document: ${inferenceId}`);
+              console.log(`✅ [SAVE] Successfully saved ${inferenceId} (recreated), status: ${recreatedJob.status}`);
+              return;
+            }
+          } catch (recreateError) {
+            console.error(`❌ Failed to recreate document: ${recreateError.message}`);
+          }
+          
+          // Throw error to stop processing
+          throw new Error(errorMsg);
         }
         
         // Update fresh document with current state
@@ -82,9 +205,43 @@ const processInferenceJob = async (job) => {
         freshJob.cancelledAt = inferenceJob.cancelledAt;
         freshJob.error = inferenceJob.error;
         
-        await freshJob.save();
+        // Save and validate
+        const savedJob = await freshJob.save();
+        
+        // Validate save succeeded
+        if (!savedJob || !savedJob._id) {
+          throw new Error(`Save operation returned invalid result for ${inferenceId}`);
+        }
+        
+        // Verify document exists after save
+        const verifyJob = await InferenceJob.findOne({ inferenceId });
+        if (!verifyJob) {
+          throw new Error(`Document verification failed: ${inferenceId} not found after save`);
+        }
+        
+        console.log(`✅ [SAVE] Successfully saved ${inferenceId}, status: ${savedJob.status}`);
+        
       } catch (error) {
-        console.error(`Error saving inference job ${inferenceId}:`, error);
+        // Retry on transient errors
+        if (retryCount < MAX_RETRIES && isRetryableError(error)) {
+          console.warn(`⚠️ Retry ${retryCount + 1}/${MAX_RETRIES} for ${inferenceId}: ${error.message}`);
+          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * (retryCount + 1)));
+          isSaving = false;
+          return saveInferenceJob(retryCount + 1);
+        }
+        
+        // Log detailed error
+        console.error(`❌ [SAVE] Failed to save ${inferenceId}:`, {
+          error: error.message,
+          errorType: error.constructor.name,
+          status: inferenceJob?.status,
+          retryCount,
+          hasResults: !!inferenceJob?.results,
+          stack: error.stack
+        });
+        
+        // Re-throw to stop processing
+        throw error;
       } finally {
         isSaving = false;
       }
@@ -551,6 +708,8 @@ const startWorker = async () => {
 
     // ✅ Process inference jobs from queue
     inferenceQueue.process(async (job) => {
+      // ✅ Ensure MongoDB connection is ready before processing
+      await ensureMongoConnection();
       await processInferenceJob(job);
     });
 
@@ -562,14 +721,42 @@ const startWorker = async () => {
   }
 };
 
-// ✅ Handle MongoDB connection errors
+// ✅ Handle MongoDB connection errors with reconnection
 mongoose.connection.on('error', (err) => {
   console.error('❌ MongoDB connection error:', err);
+  // Don't exit - let mongoose handle reconnection
 });
 
 mongoose.connection.on('disconnected', () => {
-  console.warn('⚠️ MongoDB disconnected');
+  console.warn('⚠️ MongoDB disconnected - attempting reconnection...');
+  // Mongoose will automatically attempt to reconnect
 });
+
+mongoose.connection.on('reconnected', () => {
+  console.log('✅ MongoDB reconnected successfully');
+});
+
+// ✅ Ensure connection is ready before processing
+const ensureMongoConnection = async () => {
+  if (mongoose.connection.readyState !== 1) { // 1 = connected
+    console.warn('⚠️ MongoDB not connected, waiting for connection...');
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('MongoDB connection timeout'));
+      }, 30000);
+      
+      mongoose.connection.once('connected', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+      
+      mongoose.connection.once('error', (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+    });
+  }
+};
 
 // ✅ Graceful shutdown
 process.on('SIGTERM', async () => {

@@ -10,6 +10,11 @@ const {
   listCheckpoints,
   deleteModel
 } = require('../controllers/modelController');
+const {
+  scanNetworkDevices,
+  checkDeviceByIp,
+  deployModelToDevice
+} = require('../controllers/deployController');
 
 /**
  * Model Registry Routes
@@ -27,8 +32,15 @@ const {
 // GET /api/models - List all models (filtered by company/project)
 router.get('/', listModels);
 
-// GET /api/models/:modelId - Get model details
-router.get('/:modelId', getModel);
+// Deploy routes (must come before /:modelId to avoid route conflicts)
+// GET /api/models/:modelId/deploy/scan-devices - Scan network for devices
+router.get('/:modelId/deploy/scan-devices', scanNetworkDevices);
+
+// GET /api/models/:modelId/deploy/check-device - Check device by IP address
+router.get('/:modelId/deploy/check-device', checkDeviceByIp);
+
+// POST /api/models/:modelId/deploy - Deploy model to device
+router.post('/:modelId/deploy', deployModelToDevice);
 
 // GET /api/models/:modelId/metrics - Get detailed metrics and chart data
 router.get('/:modelId/metrics', getModelMetrics);
@@ -44,6 +56,9 @@ router.get('/:modelId/download', downloadModel);
 
 // GET /api/models/:modelId/checkpoints - List all checkpoints
 router.get('/:modelId/checkpoints', listCheckpoints);
+
+// GET /api/models/:modelId - Get model details (must come after all specific routes)
+router.get('/:modelId', getModel);
 
 // DELETE /api/models/:modelId - Delete model and its files
 router.delete('/:modelId', deleteModel);
