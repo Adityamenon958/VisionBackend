@@ -3,6 +3,7 @@ const TrainingJob = require('../models/TrainingJob');
 const fs = require('fs');
 const path = require('path');
 const storageAdapter = require('../services/storageAdapter');
+const onnxConverter = require('../services/onnxConverter');
 
 /**
  * Model Controller - Handles model registry operations
@@ -334,6 +335,24 @@ const getModelDownloadUrl = async (req, res) => {
       });
     }
 
+    // ✅ For ONNX format, convert if file doesn't exist
+    if (format === 'onnx' && !fs.existsSync(filePath)) {
+      console.log(`🔄 ONNX file not found, converting from PyTorch model...`);
+      
+      const conversionResult = await onnxConverter.getOrCreateOnnx(model);
+      
+      if (!conversionResult.success) {
+        return res.status(500).json({
+          error: 'ONNX conversion failed',
+          message: conversionResult.error || 'Failed to convert model to ONNX format',
+          modelId: modelId
+        });
+      }
+      
+      // Update filePath to the converted file
+      filePath = conversionResult.path;
+    }
+    
     // ✅ Check if file exists
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({
@@ -374,11 +393,15 @@ const getModelDownloadUrl = async (req, res) => {
 /**
  * GET /api/models/:modelId/download
  * 
- * Download the best checkpoint file
+ * Download the model file in specified format (pt, onnx, or zip)
+ * 
+ * Query params:
+ * - format (optional): File format - 'pt', 'onnx', or 'zip' (default: 'pt')
  */
 const downloadModel = async (req, res) => {
   try {
     const { modelId } = req.params;
+    const { format = 'pt' } = req.query;
 
     if (!modelId) {
       return res.status(400).json({
@@ -396,19 +419,56 @@ const downloadModel = async (req, res) => {
       });
     }
 
-    // ✅ Check if file exists
-    const filePath = model.bestCheckpointPath || path.join(model.storagePath, 'best.pt');
+    // ✅ Determine file path based on format
+    let filePath;
+    let filename;
     
+    if (format === 'pt') {
+      filePath = model.bestCheckpointPath || path.join(model.storagePath, 'best.pt');
+      filename = `model_${model.modelVersion}.pt`;
+    } else if (format === 'onnx') {
+      filePath = path.join(model.storagePath, 'best.onnx');
+      filename = `model_${model.modelVersion}.onnx`;
+      
+      // ✅ Convert to ONNX if file doesn't exist
+      if (!fs.existsSync(filePath)) {
+        console.log(`🔄 ONNX file not found, converting from PyTorch model...`);
+        
+        const conversionResult = await onnxConverter.getOrCreateOnnx(model);
+        
+        if (!conversionResult.success) {
+          return res.status(500).json({
+            error: 'ONNX conversion failed',
+            message: conversionResult.error || 'Failed to convert model to ONNX format',
+            modelId: modelId
+          });
+        }
+        
+        // Update filePath to the converted file
+        filePath = conversionResult.path;
+      }
+    } else if (format === 'zip') {
+      filePath = path.join(model.storagePath, 'model.zip');
+      filename = `model_${model.modelVersion}.zip`;
+    } else {
+      return res.status(400).json({
+        error: 'Invalid format',
+        message: `Format must be 'pt', 'onnx', or 'zip'`,
+        provided: format
+      });
+    }
+    
+    // ✅ Check if file exists
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({
         error: 'Model file not found',
         modelId: modelId,
+        format: format,
         path: filePath
       });
     }
 
     // ✅ Set headers for file download
-    const filename = `model_${model.modelVersion}.pt`;
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
