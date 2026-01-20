@@ -15,9 +15,10 @@ const path = require('path');
  * Deploy model files to target folder
  * @param {Object} model - Model document from MongoDB
  * @param {string} targetFolder - Target folder path (network folder)
+ * @param {string} format - Model format to deploy ('pt' or 'onnx', default: 'pt')
  * @returns {Promise<{filesCopied: string[], totalSize: number, startedAt: Date, completedAt: Date}>}
  */
-async function deployModel(model, targetFolder) {
+async function deployModel(model, targetFolder, format = 'pt') {
   const filesCopied = [];
   let totalSize = 0;
   const startedAt = new Date();
@@ -39,25 +40,44 @@ async function deployModel(model, targetFolder) {
     throw new Error(`Cannot access target folder: ${error.message}`);
   }
   
-  // 3. Copy model checkpoint file
-  if (!model.bestCheckpointPath) {
-    throw new Error('Model checkpoint path not found in model document');
+  // 3. Determine source file path based on format
+  let sourceFilePath;
+  let targetFileName;
+  
+  if (format === 'pt') {
+    // PyTorch format - use bestCheckpointPath
+    if (!model.bestCheckpointPath) {
+      throw new Error('Model checkpoint path not found in model document');
+    }
+    sourceFilePath = model.bestCheckpointPath;
+    targetFileName = path.basename(model.bestCheckpointPath);
+  } else if (format === 'onnx') {
+    // ONNX format - use best.onnx in storagePath
+    if (!model.storagePath) {
+      throw new Error('Model storage path not found in model document');
+    }
+    sourceFilePath = path.join(model.storagePath, 'best.onnx');
+    // Generate filename with model version
+    const modelVersion = model.modelVersion || 'latest';
+    targetFileName = `model_${modelVersion}.onnx`;
+  } else {
+    throw new Error(`Invalid format: ${format}. Must be 'pt' or 'onnx'`);
   }
   
-  if (!fs.existsSync(model.bestCheckpointPath)) {
-    throw new Error(`Model file not found: ${model.bestCheckpointPath}`);
+  // 4. Verify source file exists
+  if (!fs.existsSync(sourceFilePath)) {
+    throw new Error(`Model file not found: ${sourceFilePath}`);
   }
   
-  const modelFileName = path.basename(model.bestCheckpointPath);
-  const targetModelPath = path.join(targetFolder, modelFileName);
+  const targetModelPath = path.join(targetFolder, targetFileName);
   
-  console.log(`📦 Copying model file: ${model.bestCheckpointPath} -> ${targetModelPath}`);
+  console.log(`📦 Copying model file (${format.toUpperCase()}): ${sourceFilePath} -> ${targetModelPath}`);
   
   // Copy the file
-  await fs.promises.copyFile(model.bestCheckpointPath, targetModelPath);
+  await fs.promises.copyFile(sourceFilePath, targetModelPath);
   
   // Verify copy by comparing file sizes
-  const sourceStats = await fs.promises.stat(model.bestCheckpointPath);
+  const sourceStats = await fs.promises.stat(sourceFilePath);
   const targetStats = await fs.promises.stat(targetModelPath);
   
   if (sourceStats.size !== targetStats.size) {
@@ -70,10 +90,10 @@ async function deployModel(model, targetFolder) {
     throw new Error(`File size mismatch after copy. Source: ${sourceStats.size}, Target: ${targetStats.size}`);
   }
   
-  filesCopied.push(modelFileName);
+  filesCopied.push(targetFileName);
   totalSize += targetStats.size;
   
-  console.log(`✅ Copied model file: ${modelFileName} (${(targetStats.size / (1024 * 1024)).toFixed(2)} MB)`);
+  console.log(`✅ Copied model file: ${targetFileName} (${(targetStats.size / (1024 * 1024)).toFixed(2)} MB)`);
   
   // 4. Copy model metadata/config if available
   if (model.storagePath && fs.existsSync(model.storagePath)) {

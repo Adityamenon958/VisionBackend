@@ -21,6 +21,8 @@
   "license": "ISC",
   "dependencies": {
     "@azure/storage-blob": "^12.29.1",
+    "@google/generative-ai": "^0.21.0",
+    "axios": "^1.6.0",
     "bull": "^4.12.0",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",

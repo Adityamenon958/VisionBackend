@@ -6,6 +6,7 @@ const datasetRoutes = require('./routes/datasets');
 const trainingRoutes = require('./routes/training');
 const modelRoutes = require('./routes/models');
 const inferenceRoutes = require('./routes/inference');
+const aiRoutes = require('./routes/ai');
 
 /**
  * Main Server File
@@ -75,6 +76,10 @@ app.use('/api/models', modelRoutes);
 // All routes in routes/inference.js will be prefixed with /api/inference
 app.use('/api/inference', inferenceRoutes);
 
+// ✅ Register AI routes
+// All routes in routes/ai.js will be prefixed with /api/ai
+app.use('/api/ai', aiRoutes);
+
 // ✅ Register annotation routes
 // All routes in routes/annotations.js will be prefixed with /api/dataset
 const annotationRoutes = require('./routes/annotations');
@@ -141,6 +146,7 @@ const startServer = async () => {
       console.log(`🖼️  Inference images: GET http://localhost:${PORT}/api/inference/:inferenceId/image/:filename`);
       console.log(`❌ Inference cancel: POST http://localhost:${PORT}/api/inference/:inferenceId/cancel`);
       console.log(`🗑️  Inference delete: DELETE http://localhost:${PORT}/api/inference/:inferenceId`);
+      console.log(`🤖 Ask AI: POST http://localhost:${PORT}/api/ai/ask`);
     });
 
   } catch (error) {

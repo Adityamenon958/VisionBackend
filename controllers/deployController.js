@@ -1,8 +1,10 @@
 const Model = require('../models/Model');
 const fs = require('fs');
+const path = require('path');
 const networkScanner = require('../services/networkScanner');
 const folderAccessChecker = require('../services/folderAccessChecker');
 const modelDeployer = require('../services/modelDeployer');
+const onnxConverter = require('../services/onnxConverter');
 
 /**
  * Deploy Controller - Handles model deployment operations
@@ -201,11 +203,12 @@ const checkDeviceByIp = async (req, res) => {
  * - ipAddress (required): IP address of target device
  * - folderPath (required): Full folder path (e.g., "\\192.168.1.100\models")
  * - deviceName (optional): Device name for logging
+ * - format (optional): Model format to deploy ('pt' or 'onnx', default: 'pt')
  */
 const deployModelToDevice = async (req, res) => {
   try {
     const { modelId } = req.params;
-    const { ipAddress, folderPath, deviceName } = req.body;
+    const { ipAddress, folderPath, deviceName, format = 'pt' } = req.body;
 
     // 1. Validate inputs
     if (!ipAddress || !folderPath) {
@@ -215,7 +218,16 @@ const deployModelToDevice = async (req, res) => {
       });
     }
 
-    // 2. Validate model exists
+    // 2. Validate format
+    if (format !== 'pt' && format !== 'onnx') {
+      return res.status(400).json({
+        error: 'Invalid format',
+        message: 'Format must be "pt" or "onnx"',
+        provided: format
+      });
+    }
+
+    // 3. Validate model exists
     const model = await Model.findOne({ modelId });
     if (!model) {
       return res.status(404).json({
@@ -224,18 +236,37 @@ const deployModelToDevice = async (req, res) => {
       });
     }
 
-    // 3. Validate model file exists
-    if (!model.bestCheckpointPath || !fs.existsSync(model.bestCheckpointPath)) {
-      return res.status(404).json({
-        error: 'Model file not found',
-        modelId,
-        path: model.bestCheckpointPath
-      });
+    // 4. Handle format-specific file validation and conversion
+    if (format === 'pt') {
+      // PyTorch format - validate .pt file exists
+      if (!model.bestCheckpointPath || !fs.existsSync(model.bestCheckpointPath)) {
+        return res.status(404).json({
+          error: 'Model file not found',
+          modelId,
+          path: model.bestCheckpointPath,
+          format: 'pt'
+        });
+      }
+    } else if (format === 'onnx') {
+      // ONNX format - get or create ONNX file
+      console.log(`🔄 Checking ONNX file for model ${modelId}...`);
+      const onnxResult = await onnxConverter.getOrCreateOnnx(model);
+      
+      if (!onnxResult.success) {
+        return res.status(500).json({
+          error: 'ONNX conversion failed',
+          message: onnxResult.error || 'Failed to convert model to ONNX format',
+          modelId,
+          format: 'onnx'
+        });
+      }
+      
+      console.log(`✅ ONNX file ready: ${onnxResult.path}`);
     }
 
-    console.log(`🚀 Deploying model ${modelId} to ${ipAddress} (${folderPath})`);
+    console.log(`🚀 Deploying model ${modelId} (${format.toUpperCase()}) to ${ipAddress} (${folderPath})`);
 
-    // 4. Verify folder access before deployment
+    // 5. Verify folder access before deployment
     const access = await folderAccessChecker.checkFolderAccess(folderPath);
     
     if (!access.accessible) {
@@ -246,23 +277,24 @@ const deployModelToDevice = async (req, res) => {
       });
     }
 
-    // 5. Deploy model
-    const deploymentResult = await modelDeployer.deployModel(model, folderPath);
+    // 6. Deploy model with specified format
+    const deploymentResult = await modelDeployer.deployModel(model, folderPath, format);
 
-    // 6. Generate deployment ID
+    // 7. Generate deployment ID
     const deploymentId = `deploy_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
 
-    console.log(`✅ Model deployed successfully: ${deploymentId}`);
+    console.log(`✅ Model deployed successfully (${format.toUpperCase()}): ${deploymentId}`);
 
-    // 7. Return success
+    // 8. Return success
     return res.status(200).json({
       deploymentId,
       modelId: model.modelId,
       ipAddress,
       folderPath,
       deviceName: deviceName || ipAddress,
+      format: format,
       status: 'completed',
-      message: 'Model deployed successfully',
+      message: `Model deployed successfully (${format.toUpperCase()})`,
       filesCopied: deploymentResult.filesCopied,
       totalSize: deploymentResult.totalSize,
       startedAt: deploymentResult.startedAt.toISOString(),
