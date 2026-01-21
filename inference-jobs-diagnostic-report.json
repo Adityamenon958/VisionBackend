@@ -1,6 +1,150 @@
 {
-  "total": 18,
+  "total": 19,
   "found": [
+    {
+      "inferenceId": "inf_1768559437082_8a7e8fe5",
+      "company": "gsn",
+      "project": "annotation",
+      "modelId": "model_1768053995956_785rof9",
+      "folderPath": "C:\\Users\\HP\\VisionBackend\\results\\gsn\\annotation\\model_1768053995956_785rof9\\inference_inf_1768559437082_8a7e8fe5",
+      "folderName": "inference_inf_1768559437082_8a7e8fe5",
+      "existsInMongoDB": true,
+      "mongoDBStatus": "completed",
+      "mongoDBCompany": "gsn",
+      "mongoDBProject": "annotation",
+      "folderStatus": {
+        "hasMetadata": true,
+        "hasAnnotatedFolder": true,
+        "hasGoodFolder": true,
+        "hasDefectFolder": true,
+        "metadata": {
+          "totalFiles": 6,
+          "totalImages": 6,
+          "totalVideos": 0,
+          "totalDetections": 1,
+          "averageConfidence": 0.746030867099762,
+          "detectionsByClass": [
+            {
+              "className": "class_2",
+              "count": 1,
+              "avgConfidence": 0.746030867099762
+            }
+          ],
+          "files": [
+            {
+              "filePath": "69648cee801117fcb2ba60e8_1544bfd0-20a2-4826-8ddf-a4f614fdd7f6_20260109_135945.jpg",
+              "fileType": "image",
+              "annotatedPath": "annotated/69648cee801117fcb2ba60e8_1544bfd0-20a2-4826-8ddf-a4f614fdd7f6_20260109_135945.jpg",
+              "detections": [
+                {
+                  "class": "class_2",
+                  "confidence": 0.746030867099762,
+                  "bbox": [
+                    1552.9466552734375,
+                    1300.2880859375,
+                    2279.546142578125,
+                    1981.6842041015625
+                  ]
+                }
+              ],
+              "detectionCount": 1
+            },
+            {
+              "filePath": "69648cee801117fcb2ba60e8_17c329e8-40f4-4230-be7f-e4b9767b0f61_20260109_152022.jpg",
+              "fileType": "image",
+              "annotatedPath": "annotated/69648cee801117fcb2ba60e8_17c329e8-40f4-4230-be7f-e4b9767b0f61_20260109_152022.jpg",
+              "detections": [],
+              "detectionCount": 0
+            },
+            {
+              "filePath": "69648cee801117fcb2ba60e8_18433d41-f3b5-45ba-b3f0-244f70298488_20260109_132711.jpg",
+              "fileType": "image",
+              "annotatedPath": "annotated/69648cee801117fcb2ba60e8_18433d41-f3b5-45ba-b3f0-244f70298488_20260109_132711.jpg",
+              "detections": [],
+              "detectionCount": 0
+            },
+            {
+              "filePath": "69648cee801117fcb2ba60e8_1dd731f3-1586-4fcd-be1c-fc9d9f3397bb_20260109_151951.jpg",
+              "fileType": "image",
+              "annotatedPath": "annotated/69648cee801117fcb2ba60e8_1dd731f3-1586-4fcd-be1c-fc9d9f3397bb_20260109_151951.jpg",
+              "detections": [],
+              "detectionCount": 0
+            },
+            {
+              "filePath": "69648cee801117fcb2ba60e8_1e43c3dd-e6b2-4847-972e-52101f93ecaa_20260109_152017.jpg",
+              "fileType": "image",
+              "annotatedPath": "annotated/69648cee801117fcb2ba60e8_1e43c3dd-e6b2-4847-972e-52101f93ecaa_20260109_152017.jpg",
+              "detections": [],
+              "detectionCount": 0
+            },
+            {
+              "filePath": "69648cee801117fcb2ba60e8_2068a182-83c8-4db9-959d-3bc91a4820d9_20260109_151914.jpg",
+              "fileType": "image",
+              "annotatedPath": "annotated/69648cee801117fcb2ba60e8_2068a182-83c8-4db9-959d-3bc91a4820d9_20260109_151914.jpg",
+              "detections": [],
+              "detectionCount": 0
+            }
+          ],
+          "images": [
+            {
+              "filePath": "69648cee801117fcb2ba60e8_1544bfd0-20a2-4826-8ddf-a4f614fdd7f6_20260109_135945.jpg",
+              "fileType": "image",
+              "annotatedPath": "annotated/69648cee801117fcb2ba60e8_1544bfd0-20a2-4826-8ddf-a4f614fdd7f6_20260109_135945.jpg",
+              "detections": [
+                {
+                  "class": "class_2",
+                  "confidence": 0.746030867099762,
+                  "bbox": [
+                    1552.9466552734375,
+                    1300.2880859375,
+                    2279.546142578125,
+                    1981.6842041015625
+                  ]
+                }
+              ],
+              "detectionCount": 1
+            },
+            {
+              "filePath": "69648cee801117fcb2ba60e8_17c329e8-40f4-4230-be7f-e4b9767b0f61_20260109_152022.jpg",
+              "fileType": "image",
+              "annotatedPath": "annotated/69648cee801117fcb2ba60e8_17c329e8-40f4-4230-be7f-e4b9767b0f61_20260109_152022.jpg",
+              "detections": [],
+              "detectionCount": 0
+            },
+            {
+              "filePath": "69648cee801117fcb2ba60e8_18433d41-f3b5-45ba-b3f0-244f70298488_20260109_132711.jpg",
+              "fileType": "image",
+              "annotatedPath": "annotated/69648cee801117fcb2ba60e8_18433d41-f3b5-45ba-b3f0-244f70298488_20260109_132711.jpg",
+              "detections": [],
+              "detectionCount": 0
+            },
+            {
+              "filePath": "69648cee801117fcb2ba60e8_1dd731f3-1586-4fcd-be1c-fc9d9f3397bb_20260109_151951.jpg",
+              "fileType": "image",
+              "annotatedPath": "annotated/69648cee801117fcb2ba60e8_1dd731f3-1586-4fcd-be1c-fc9d9f3397bb_20260109_151951.jpg",
+              "detections": [],
+              "detectionCount": 0
+            },
+            {
+              "filePath": "69648cee801117fcb2ba60e8_1e43c3dd-e6b2-4847-972e-52101f93ecaa_20260109_152017.jpg",
+              "fileType": "image",
+              "annotatedPath": "annotated/69648cee801117fcb2ba60e8_1e43c3dd-e6b2-4847-972e-52101f93ecaa_20260109_152017.jpg",
+              "detections": [],
+              "detectionCount": 0
+            },
+            {
+              "filePath": "69648cee801117fcb2ba60e8_2068a182-83c8-4db9-959d-3bc91a4820d9_20260109_151914.jpg",
+              "fileType": "image",
+              "annotatedPath": "annotated/69648cee801117fcb2ba60e8_2068a182-83c8-4db9-959d-3bc91a4820d9_20260109_151914.jpg",
+              "detections": [],
+              "detectionCount": 0
+            }
+          ],
+          "videos": []
+        }
+      },
+      "hasResults": true
+    },
     {
       "inferenceId": "inf_1768309094174_78982cc9",
       "company": "gsn",

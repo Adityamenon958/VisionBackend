@@ -7,6 +7,10 @@ const trainingRoutes = require('./routes/training');
 const modelRoutes = require('./routes/models');
 const inferenceRoutes = require('./routes/inference');
 const aiRoutes = require('./routes/ai');
+const dashboardRoutes = require('./routes/dashboard');
+const analyticsRoutes = require('./routes/analytics');
+const auditRoutes = require('./routes/audit');
+const { authenticateToken } = require('./middleware/authMiddleware');
 
 /**
  * Main Server File
@@ -35,7 +39,7 @@ app.use((req, res, next) => {
   if (allowedOrigin === '*' || (origin && origin === allowedOrigin)) {
     res.header('Access-Control-Allow-Origin', allowedOrigin === '*' ? '*' : origin);
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-User-Id, X-User-Role, X-User-Company, X-User-Email, X-User-Company-Id');
     res.header('Access-Control-Allow-Credentials', 'true');
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     return next();
@@ -44,9 +48,21 @@ app.use((req, res, next) => {
   }
 });
 
-// ✅ Health check endpoint
+// ✅ Health check endpoint (public, no authentication required)
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// ✅ Global authentication middleware for all /api routes
+// This ensures all API endpoints require authentication by default
+// Public routes (like /health) are registered before this middleware
+app.use('/api', (req, res, next) => {
+  // Skip authentication for OPTIONS requests (CORS preflight)
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
+  // Apply authentication middleware
+  authenticateToken(req, res, next);
 });
 
 // ✅ Request logging middleware (for debugging)
@@ -80,6 +96,23 @@ app.use('/api/inference', inferenceRoutes);
 // All routes in routes/ai.js will be prefixed with /api/ai
 app.use('/api/ai', aiRoutes);
 
+// ✅ Register dashboard routes
+// All routes in routes/dashboard.js will be prefixed with /api/dashboard
+app.use('/api/dashboard', dashboardRoutes);
+
+// ✅ Register analytics routes
+// All routes in routes/analytics.js will be prefixed with /api/analytics
+app.use('/api/analytics', analyticsRoutes);
+
+// ✅ Register audit routes
+// All routes in routes/audit.js will be prefixed with /api/audit
+app.use('/api/audit', auditRoutes);
+
+// ✅ Register user management routes
+// All routes in routes/users.js will be prefixed with /api/users
+const userRoutes = require('./routes/users');
+app.use('/api/users', userRoutes);
+
 // ✅ Register annotation routes
 // All routes in routes/annotations.js will be prefixed with /api/dataset
 const annotationRoutes = require('./routes/annotations');
@@ -88,7 +121,8 @@ app.use('/api/dataset', annotationRoutes);
 // ✅ Register list datasets endpoint (plural) - separate route for clarity
 // GET /api/datasets - List all datasets
 const { listDatasets } = require('./controllers/datasetController');
-app.get('/api/datasets', listDatasets);
+const { requirePermission } = require('./middleware/authorizationMiddleware');
+app.get('/api/datasets', authenticateToken, requirePermission('viewDatasets'), listDatasets);
 
 // ✅ 404 handler (route not found)
 app.use((req, res) => {

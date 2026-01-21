@@ -3,6 +3,8 @@ const Dataset = require('../models/Dataset');
 const Model = require('../models/Model');
 const { trainingQueue } = require('../queue');
 const trainingService = require('../services/trainingService');
+const auditService = require('../services/auditService');
+const { buildWorkspaceFilter, validateWorkspaceAccess, canAccessAllWorkspaces } = require('../utils/workspaceScoping');
 const fs = require('fs');
 const path = require('path');
 const { BlobServiceClient } = require('@azure/storage-blob');
@@ -395,6 +397,22 @@ const startTraining = async (req, res) => {
       removeOnFail: false
     });
 
+    // Log training job execution activity
+    await auditService.logAction({
+      action: 'execute',
+      resourceType: 'training',
+      resourceId: jobId,
+      details: {
+        company: dataset.company,
+        project: dataset.project,
+        projectName: dataset.project,
+        datasetId: dataset._id.toString(),
+        modelType: finalModelType,
+        modelSize: finalModelSize
+      },
+      req
+    });
+
     return res.status(202).json({
       jobId,
       status: 'queued',
@@ -430,6 +448,17 @@ const getTrainingStatus = async (req, res) => {
         error: 'Training job not found',
         jobId: jobId
       });
+    }
+
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, trainingJob.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this training job'
+        });
+      }
     }
 
     // ✅ Build base response with training job data
@@ -497,6 +526,17 @@ const getTrainingLogs = async (req, res) => {
         error: 'Training job not found',
         jobId: jobId
       });
+    }
+
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, trainingJob.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this training job'
+        });
+      }
     }
 
     // Return last N logs
@@ -577,6 +617,17 @@ const retryTraining = async (req, res) => {
         error: 'Training job not found',
         jobId: jobId
       });
+    }
+
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, originalJob.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this training job'
+        });
+      }
     }
 
     if (!trainingService.canRetryJob(originalJob.status)) {

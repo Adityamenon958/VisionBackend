@@ -40,11 +40,16 @@ MONGO_URI=mongodb://localhost:27017/visiondb
 REDIS_URL=redis://localhost:6379
 STORAGE_MODE=local
 PORT=3000
+
+# Supabase Configuration (for authentication and user management)
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key_here
 ```
 
 **Note:** 
 - If using MongoDB Atlas, your `MONGO_URI` will look like: `mongodb+srv://username:password@cluster.mongodb.net/visiondb`
 - If using Redis Cloud, your `REDIS_URL` will look like: `redis://:password@host:port`
+- **Supabase**: Get your `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` from your Supabase project settings (Settings → API)
 
 ### Step 3: Start MongoDB and Redis
 

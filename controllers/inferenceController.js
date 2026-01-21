@@ -4,6 +4,8 @@ const Model = require('../models/Model');
 const Dataset = require('../models/Dataset');
 const { inferenceQueue } = require('../queue');
 const storageAdapter = require('../services/storageAdapter');
+const auditService = require('../services/auditService');
+const { buildWorkspaceFilter, validateWorkspaceAccess, canAccessAllWorkspaces } = require('../utils/workspaceScoping');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 const path = require('path');
@@ -131,6 +133,17 @@ const startBatchInference = async (req, res) => {
       });
     }
 
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, model.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this model'
+        });
+      }
+    }
+
     let sourceType;
     let testFolderPath = null;
     let customFolderPath = null;
@@ -146,6 +159,17 @@ const startBatchInference = async (req, res) => {
         error: 'Dataset not found',
         datasetId: datasetId
       });
+    }
+
+    // ✅ Validate workspace access to dataset (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, dataset.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this dataset'
+        });
+      }
     }
 
     // ✅ Validate dataset is ready
@@ -281,6 +305,22 @@ const startBatchInference = async (req, res) => {
       attempts: 1,
       removeOnComplete: false,
       removeOnFail: false
+    });
+
+    // Log inference execution activity
+    await auditService.logAction({
+      action: 'execute',
+      resourceType: 'inference',
+      resourceId: inferenceId,
+      details: {
+        company: model.company,
+        project: model.project,
+        projectName: model.project,
+        modelId: model._id.toString(),
+        sourceType: sourceType,
+        totalImages: totalImages
+      },
+      req
     });
 
     return res.status(202).json({
@@ -747,6 +787,17 @@ const stopLiveInference = async (req, res) => {
       });
     }
 
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, inferenceJob.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this inference job'
+        });
+      }
+    }
+
     // ✅ Check if job is already stopped
     if (inferenceJob.status !== 'running') {
       return res.status(400).json({
@@ -839,6 +890,17 @@ const getInferenceStatus = async (req, res) => {
         error: 'Inference job not found',
         inferenceId: inferenceId
       });
+    }
+
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, inferenceJob.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this inference job'
+        });
+      }
     }
 
     // ✅ Format response
@@ -1151,6 +1213,17 @@ const getAnnotatedImage = async (req, res) => {
       });
     }
 
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, inferenceJob.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this inference job'
+        });
+      }
+    }
+
     // ✅ Check if results are available
     if (inferenceJob.status !== 'completed') {
       return res.status(400).json({
@@ -1268,6 +1341,17 @@ const cancelInference = async (req, res) => {
       });
     }
 
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, inferenceJob.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this inference job'
+        });
+      }
+    }
+
     // ✅ Check if job can be cancelled
     if (inferenceJob.status === 'completed') {
       return res.status(400).json({
@@ -1329,6 +1413,17 @@ const deleteInference = async (req, res) => {
         error: 'Inference job not found',
         inferenceId: inferenceId
       });
+    }
+
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, inferenceJob.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this inference job'
+        });
+      }
     }
 
     // ✅ Check if job is running (cannot delete running jobs)
@@ -1455,6 +1550,17 @@ const listInferenceJobs = async (req, res) => {
       });
     }
 
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this workspace'
+        });
+      }
+    }
+
     // ✅ Build query filter
     const filter = { company, project };
     if (status) {
@@ -1549,6 +1655,17 @@ const listDatasetsWithTestFolders = async (req, res) => {
         error: 'Missing required query parameters',
         required: ['company', 'project']
       });
+    }
+
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this workspace'
+        });
+      }
     }
 
     // ✅ Find datasets with status 'ready' or 'ready_to_train' and testCount > 0

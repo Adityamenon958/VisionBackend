@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+const { authenticateToken } = require('../middleware/authMiddleware');
+const { requirePermission } = require('../middleware/authorizationMiddleware');
 const {
   listModels,
   getModel,
@@ -30,38 +32,38 @@ const {
  */
 
 // GET /api/models - List all models (filtered by company/project)
-router.get('/', listModels);
+router.get('/', authenticateToken, requirePermission('viewModels'), listModels);
 
 // Deploy routes (must come before /:modelId to avoid route conflicts)
 // GET /api/models/:modelId/deploy/scan-devices - Scan network for devices
-router.get('/:modelId/deploy/scan-devices', scanNetworkDevices);
+router.get('/:modelId/deploy/scan-devices', authenticateToken, requirePermission('runInference'), scanNetworkDevices);
 
 // GET /api/models/:modelId/deploy/check-device - Check device by IP address
-router.get('/:modelId/deploy/check-device', checkDeviceByIp);
+router.get('/:modelId/deploy/check-device', authenticateToken, requirePermission('runInference'), checkDeviceByIp);
 
 // POST /api/models/:modelId/deploy - Deploy model to device
-router.post('/:modelId/deploy', deployModelToDevice);
+router.post('/:modelId/deploy', authenticateToken, requirePermission('runInference'), deployModelToDevice);
 
 // GET /api/models/:modelId/metrics - Get detailed metrics and chart data
-router.get('/:modelId/metrics', getModelMetrics);
+router.get('/:modelId/metrics', authenticateToken, requirePermission('viewTrainingMetrics'), getModelMetrics);
 
 // GET /api/models/:modelId/insights - Get insights and recommendations
-router.get('/:modelId/insights', getModelInsights);
+router.get('/:modelId/insights', authenticateToken, requirePermission('viewTrainingMetrics'), getModelInsights);
 
 // GET /api/models/:modelId/download-url - Get signed download URL
-router.get('/:modelId/download-url', getModelDownloadUrl);
+router.get('/:modelId/download-url', authenticateToken, requirePermission('viewModels'), getModelDownloadUrl);
 
 // GET /api/models/:modelId/download - Download model file
-router.get('/:modelId/download', downloadModel);
+router.get('/:modelId/download', authenticateToken, requirePermission('viewModels'), downloadModel);
 
 // GET /api/models/:modelId/checkpoints - List all checkpoints
-router.get('/:modelId/checkpoints', listCheckpoints);
+router.get('/:modelId/checkpoints', authenticateToken, requirePermission('viewTrainingMetrics'), listCheckpoints);
 
 // GET /api/models/:modelId - Get model details (must come after all specific routes)
-router.get('/:modelId', getModel);
+router.get('/:modelId', authenticateToken, requirePermission('viewModels'), getModel);
 
 // DELETE /api/models/:modelId - Delete model and its files
-router.delete('/:modelId', deleteModel);
+router.delete('/:modelId', authenticateToken, requirePermission('manageDatasets'), deleteModel);
 
 module.exports = router;
 

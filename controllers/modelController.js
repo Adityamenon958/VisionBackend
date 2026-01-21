@@ -1,5 +1,6 @@
 const Model = require('../models/Model');
 const TrainingJob = require('../models/TrainingJob');
+const { buildWorkspaceFilter, validateWorkspaceAccess, canAccessAllWorkspaces } = require('../utils/workspaceScoping');
 const fs = require('fs');
 const path = require('path');
 const storageAdapter = require('../services/storageAdapter');
@@ -36,6 +37,17 @@ const listModels = async (req, res) => {
         error: 'Missing required query parameters',
         required: ['company', 'project']
       });
+    }
+
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this workspace'
+        });
+      }
     }
 
     // ✅ Find all models for company/project
@@ -111,6 +123,17 @@ const getModel = async (req, res) => {
       });
     }
 
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, model.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this model'
+        });
+      }
+    }
+
     // ✅ Format response
     const response = {
       modelId: model.modelId,
@@ -180,6 +203,17 @@ const getModelMetrics = async (req, res) => {
         error: 'Model not found',
         modelId: modelId
       });
+    }
+
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, model.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this model'
+        });
+      }
     }
 
     // ✅ Load chart data if available
@@ -579,6 +613,17 @@ const deleteModel = async (req, res) => {
         error: 'Model not found',
         modelId: modelId
       });
+    }
+
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, model.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this model'
+        });
+      }
     }
 
     // ✅ Delete storage folder from disk if it exists

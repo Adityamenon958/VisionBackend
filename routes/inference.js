@@ -3,6 +3,8 @@ const router = express.Router();
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { authenticateToken } = require('../middleware/authMiddleware');
+const { requirePermission } = require('../middleware/authorizationMiddleware');
 
 const {
   startBatchInference,
@@ -68,39 +70,39 @@ const uploadInferenceImages = multer({
 });
 
 // GET /api/inference/models - List available models for inference
-router.get('/models', listAvailableModels);
+router.get('/models', authenticateToken, requirePermission('viewModels'), listAvailableModels);
 
 // GET /api/inference/datasets - List datasets with test folders
-router.get('/datasets', listDatasetsWithTestFolders);
+router.get('/datasets', authenticateToken, requirePermission('viewDatasets'), listDatasetsWithTestFolders);
 
 // GET /api/inference/history - List inference jobs (with filters)
-router.get('/history', listInferenceJobs);
+router.get('/history', authenticateToken, requirePermission('viewInferenceResults'), listInferenceJobs);
 
 // POST /api/inference/start - Start batch inference (images/videos)
-router.post('/start', uploadInferenceImages.array('files', 1000), startBatchInference);
+router.post('/start', authenticateToken, requirePermission('runInference'), uploadInferenceImages.array('files', 1000), startBatchInference);
 
 // POST /api/inference/live/start - Start live camera inference
-router.post('/live/start', startLiveInference);
+router.post('/live/start', authenticateToken, requirePermission('runInference'), startLiveInference);
 
 // POST /api/inference/live/:inferenceId/frame - Process a frame from live camera
-router.post('/live/:inferenceId/frame', processLiveFrame);
+router.post('/live/:inferenceId/frame', authenticateToken, requirePermission('runInference'), processLiveFrame);
 
 // POST /api/inference/live/:inferenceId/stop - Stop live camera inference
-router.post('/live/:inferenceId/stop', stopLiveInference);
+router.post('/live/:inferenceId/stop', authenticateToken, requirePermission('runInference'), stopLiveInference);
 
 // GET /api/inference/:inferenceId/status - Get inference job status
-router.get('/:inferenceId/status', getInferenceStatus);
+router.get('/:inferenceId/status', authenticateToken, requirePermission('monitorInference'), getInferenceStatus);
 
 // GET /api/inference/:inferenceId/results - Get inference results
-router.get('/:inferenceId/results', getInferenceResults);
+router.get('/:inferenceId/results', authenticateToken, requirePermission('viewInferenceResults'), getInferenceResults);
 
 // GET /api/inference/:inferenceId/image/:filename - Get annotated image/video
-router.get('/:inferenceId/image/:filename', getAnnotatedImage);
+router.get('/:inferenceId/image/:filename', authenticateToken, requirePermission('viewInferenceResults'), getAnnotatedImage);
 
 // POST /api/inference/:inferenceId/cancel - Cancel a running inference job
-router.post('/:inferenceId/cancel', cancelInference);
+router.post('/:inferenceId/cancel', authenticateToken, requirePermission('runInference'), cancelInference);
 
 // DELETE /api/inference/:inferenceId - Delete an inference job
-router.delete('/:inferenceId', deleteInference);
+router.delete('/:inferenceId', authenticateToken, requirePermission('runInference'), deleteInference);
 
 module.exports = router;
