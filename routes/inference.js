@@ -4,7 +4,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { authenticateToken } = require('../middleware/authMiddleware');
-const { requirePermission } = require('../middleware/authorizationMiddleware');
+const { requirePermission, requirePermissionOr } = require('../middleware/authorizationMiddleware');
 
 const {
   startBatchInference,
@@ -91,7 +91,8 @@ router.post('/live/:inferenceId/frame', authenticateToken, requirePermission('ru
 router.post('/live/:inferenceId/stop', authenticateToken, requirePermission('runInference'), stopLiveInference);
 
 // GET /api/inference/:inferenceId/status - Get inference job status
-router.get('/:inferenceId/status', authenticateToken, requirePermission('monitorInference'), getInferenceStatus);
+// Allow monitorInference (for real-time monitoring) OR viewInferenceResults (for viewing completed jobs)
+router.get('/:inferenceId/status', authenticateToken, requirePermissionOr(['monitorInference', 'viewInferenceResults']), getInferenceStatus);
 
 // GET /api/inference/:inferenceId/results - Get inference results
 router.get('/:inferenceId/results', authenticateToken, requirePermission('viewInferenceResults'), getInferenceResults);
@@ -103,6 +104,7 @@ router.get('/:inferenceId/image/:filename', authenticateToken, requirePermission
 router.post('/:inferenceId/cancel', authenticateToken, requirePermission('runInference'), cancelInference);
 
 // DELETE /api/inference/:inferenceId - Delete an inference job
-router.delete('/:inferenceId', authenticateToken, requirePermission('runInference'), deleteInference);
+// Permission check: deleteProjects (admins) OR deleteOwnInference (operators - with ownership verification in controller)
+router.delete('/:inferenceId', authenticateToken, requirePermissionOr(['deleteProjects', 'deleteOwnInference']), deleteInference);
 
 module.exports = router;

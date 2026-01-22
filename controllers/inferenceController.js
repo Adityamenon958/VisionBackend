@@ -264,6 +264,7 @@ const startBatchInference = async (req, res) => {
       project: model.project,
       sourceType: sourceType,
       status: 'queued',
+      createdBy: req.user ? req.user.id : null, // Store user ID for ownership verification
       progress: {
         totalImages: totalImages,
         processedImages: 0,
@@ -403,6 +404,7 @@ const startLiveInference = async (req, res) => {
       project: model.project,
       sourceType: 'live_camera',
       status: 'running',
+      createdBy: req.user ? req.user.id : null, // Store user ID for ownership verification
       startedAt: new Date(),
       results: {
         framesPath: framesDir // Store frames directory path
@@ -1405,6 +1407,29 @@ const deleteInference = async (req, res) => {
       });
     }
 
+    // ✅ Get user permissions
+    const { checkPermission } = require('../utils/permissions');
+    const userRole = req.user ? req.user.role : null;
+    const userId = req.user ? req.user.id : null;
+
+    if (!userRole || !userId) {
+      return res.status(401).json({
+        error: 'Unauthorized',
+        message: 'Authentication required'
+      });
+    }
+
+    const hasDeleteProjects = checkPermission(userRole, 'deleteProjects');
+    const hasDeleteOwnInference = checkPermission(userRole, 'deleteOwnInference');
+
+    // ✅ Check if user has any delete permission
+    if (!hasDeleteProjects && !hasDeleteOwnInference) {
+      return res.status(403).json({
+        error: 'Permission denied',
+        message: 'You do not have permission to delete inference jobs'
+      });
+    }
+
     // ✅ Find inference job
     const inferenceJob = await InferenceJob.findOne({ inferenceId });
 
@@ -1422,6 +1447,16 @@ const deleteInference = async (req, res) => {
         return res.status(403).json({
           error: 'Permission denied',
           message: accessValidation.error || 'You do not have access to this inference job'
+        });
+      }
+    }
+
+    // ✅ If user only has deleteOwnInference (not deleteProjects), check ownership
+    if (!hasDeleteProjects && hasDeleteOwnInference) {
+      if (!inferenceJob.createdBy || inferenceJob.createdBy !== userId) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: 'You can only delete your own inference jobs'
         });
       }
     }

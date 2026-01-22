@@ -100,6 +100,8 @@ const upload = multer({
  * Controller handles validation gracefully.
  */
 router.post('/upload',
+  authenticateToken,
+  requirePermission('uploadDatasets'),
   upload.fields([
     { name: 'files', maxCount: 5000 }, // ✅ Accept up to 5000 files (controller validates)
     { name: 'fileMeta', maxCount: 1 } // ✅ Accept optional fileMeta (JSON file, validated by fileFilter)
@@ -138,7 +140,7 @@ router.get('/:datasetId/detected-classes', authenticateToken, requirePermission(
  * 
  * Creates Category documents from detected class IDs using user-provided names.
  */
-router.post('/:datasetId/create-categories-from-classes', authenticateToken, requirePermission('manageDatasets'), createCategoriesFromClasses);
+router.post('/:datasetId/create-categories-from-classes', authenticateToken, requirePermission('uploadDatasets'), createCategoriesFromClasses);
 
 /**
  * GET /api/dataset/:datasetId/folders
@@ -151,26 +153,29 @@ router.get('/:datasetId/folders', authenticateToken, requirePermission('viewData
  * GET /api/dataset/:datasetId/files
  * 
  * Returns paginated file manifest with filters and sorting
+ * Requires: viewRawDatasetImages permission (for Viewer role restriction)
  */
-router.get('/:datasetId/files', authenticateToken, requirePermission('viewDatasets'), getDatasetFiles);
+router.get('/:datasetId/files', authenticateToken, requirePermission('viewRawDatasetImages'), getDatasetFiles);
 
 /**
  * GET /api/dataset/:datasetId/file/:fileId/thumbnail
  * 
  * Serves thumbnail image if available
  * fileId can be storedName or file _id
+ * Requires: viewRawDatasetImages permission (for Viewer role restriction)
  */
-router.get('/:datasetId/file/:fileId/thumbnail', authenticateToken, requirePermission('viewDatasets'), getFileThumbnail);
+router.get('/:datasetId/file/:fileId/thumbnail', authenticateToken, requirePermission('viewRawDatasetImages'), getFileThumbnail);
 
 /**
  * GET /api/dataset/:datasetId/file/:fileId
  * 
  * Serves original full-size image (never thumbnail)
  * fileId can be storedName or file _id
+ * Requires: viewRawDatasetImages permission (for Viewer role restriction)
  * 
  * ⚠️ CAUTION: This route must be AFTER /thumbnail route to avoid route conflicts
  */
-router.get('/:datasetId/file/:fileId', authenticateToken, requirePermission('viewDatasets'), getFile);
+router.get('/:datasetId/file/:fileId', authenticateToken, requirePermission('viewRawDatasetImages'), getFile);
 
 /**
  * GET /api/dataset/:datasetId/dependencies
@@ -193,7 +198,7 @@ router.get('/:datasetId/dependencies', authenticateToken, requirePermission('vie
  * 
  * ⚠️ CAUTION: This route must be BEFORE GET /:datasetId to avoid route conflicts
  */
-router.patch('/:datasetId', authenticateToken, requirePermission('manageDatasets'), updateDataset);
+router.patch('/:datasetId', authenticateToken, requirePermission('uploadDatasets'), updateDataset);
 
 /**
  * DELETE /api/dataset/:company/:project/:version
@@ -208,7 +213,7 @@ router.patch('/:datasetId', authenticateToken, requirePermission('manageDatasets
  *   - Dataset is processing or queued
  *   - Dataset is already deleted
  */
-router.delete('/:company/:project/:version', authenticateToken, requirePermission('deleteProjects'), deleteDatasetByVersion);
+router.delete('/:company/:project/:version', authenticateToken, requirePermission('deleteDatasets'), deleteDatasetByVersion);
 
 /**
  * DELETE /api/dataset/:datasetId
@@ -220,7 +225,7 @@ router.delete('/:company/:project/:version', authenticateToken, requirePermissio
  * - Dataset is processing or queued
  * - Dataset is already deleted
  */
-router.delete('/:datasetId', authenticateToken, requirePermission('manageDatasets'), deleteDataset);
+router.delete('/:datasetId', authenticateToken, requirePermission('deleteDatasets'), deleteDataset);
 
 /**
  * GET /api/dataset/:datasetId

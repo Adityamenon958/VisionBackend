@@ -44,36 +44,36 @@ router.get('/:datasetId/image-signed', authenticateToken, requirePermission('vie
 router.get('/:datasetId/annotations', authenticateToken, requirePermission('viewDatasets'), getAnnotations);
 
 // POST /api/dataset/:datasetId/annotations
-router.post('/:datasetId/annotations', authenticateToken, requirePermission('manageDatasets'), createAnnotation);
+router.post('/:datasetId/annotations', authenticateToken, requirePermission('uploadDatasets'), createAnnotation);
 
 // PUT /api/dataset/:datasetId/annotations/:annotationId
-router.put('/:datasetId/annotations/:annotationId', authenticateToken, requirePermission('manageDatasets'), updateAnnotation);
+router.put('/:datasetId/annotations/:annotationId', authenticateToken, requirePermission('uploadDatasets'), updateAnnotation);
 
 // DELETE /api/dataset/:datasetId/annotations/:annotationId
-router.delete('/:datasetId/annotations/:annotationId', authenticateToken, requirePermission('manageDatasets'), deleteAnnotation);
+router.delete('/:datasetId/annotations/:annotationId', authenticateToken, requirePermission('uploadDatasets'), deleteAnnotation);
 
 // POST /api/dataset/:datasetId/annotations/batch
-router.post('/:datasetId/annotations/batch', authenticateToken, requirePermission('manageDatasets'), batchSaveAnnotations);
+router.post('/:datasetId/annotations/batch', authenticateToken, requirePermission('uploadDatasets'), batchSaveAnnotations);
 
 // YOLO Conversion
 // POST /api/dataset/:datasetId/convert-annotations-to-labels
-router.post('/:datasetId/convert-annotations-to-labels', authenticateToken, requirePermission('manageDatasets'), convertAnnotationsToYOLO);
+router.post('/:datasetId/convert-annotations-to-labels', authenticateToken, requirePermission('uploadDatasets'), convertAnnotationsToYOLO);
 
 // Category Management
 // GET /api/dataset/:datasetId/categories
 router.get('/:datasetId/categories', authenticateToken, requirePermission('viewDatasets'), getCategories);
 
 // POST /api/dataset/:datasetId/categories
-router.post('/:datasetId/categories', authenticateToken, requirePermission('manageDatasets'), createCategory);
+router.post('/:datasetId/categories', authenticateToken, requirePermission('uploadDatasets'), createCategory);
 
 // PUT /api/dataset/:datasetId/categories/:categoryId
-router.put('/:datasetId/categories/:categoryId', authenticateToken, requirePermission('manageDatasets'), updateCategory);
+router.put('/:datasetId/categories/:categoryId', authenticateToken, requirePermission('uploadDatasets'), updateCategory);
 
 // DELETE /api/dataset/:datasetId/categories/:categoryId
-router.delete('/:datasetId/categories/:categoryId', authenticateToken, requirePermission('manageDatasets'), deleteCategory);
+router.delete('/:datasetId/categories/:categoryId', authenticateToken, requirePermission('uploadDatasets'), deleteCategory);
 
 // PUT /api/dataset/:datasetId/categories/reorder
-router.put('/:datasetId/categories/reorder', authenticateToken, requirePermission('manageDatasets'), reorderCategories);
+router.put('/:datasetId/categories/reorder', authenticateToken, requirePermission('uploadDatasets'), reorderCategories);
 
 module.exports = router;
 

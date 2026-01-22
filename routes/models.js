@@ -63,7 +63,7 @@ router.get('/:modelId/checkpoints', authenticateToken, requirePermission('viewTr
 router.get('/:modelId', authenticateToken, requirePermission('viewModels'), getModel);
 
 // DELETE /api/models/:modelId - Delete model and its files
-router.delete('/:modelId', authenticateToken, requirePermission('manageDatasets'), deleteModel);
+router.delete('/:modelId', authenticateToken, requirePermission('deleteDatasets'), deleteModel);
 
 module.exports = router;
 

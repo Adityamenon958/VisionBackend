@@ -1,4 +1,4 @@
-const { checkPermission, isValidRole, canAssignRole } = require('../utils/permissions');
+const { checkPermission, isValidRole, canAssignRole, getUserRoleFromHeaders, getUserIdFromHeaders, verifyUserRole } = require('../utils/permissions');
 
 /**
  * Authorization Middleware
@@ -17,25 +17,62 @@ const { checkPermission, isValidRole, canAssignRole } = require('../utils/permis
 function requirePermission(permission) {
   return async (req, res, next) => {
     try {
-      // Check if user is authenticated
-      if (!req.user) {
-        return res.status(401).json({
-          error: 'Unauthorized',
-          message: 'Authentication required'
-        });
-      }
+      // Support both approaches:
+      // 1. req.user from authenticateToken middleware (current approach)
+      // 2. Extract from headers directly (documentation approach)
+      let userRole;
+      let userId;
 
-      const userRole = req.user.role;
+      if (req.user) {
+        // Current approach: use req.user from authenticateToken middleware
+        userRole = req.user.role;
+        userId = req.user.id;
+      } else {
+        // Documentation approach: extract from headers
+        userRole = getUserRoleFromHeaders(req);
+        userId = getUserIdFromHeaders(req);
+
+        if (!userRole || !userId) {
+          return res.status(401).json({
+            error: 'Unauthorized',
+            message: 'Missing authentication information'
+          });
+        }
+
+        // Verify role from database (recommended for security)
+        const { valid, role: verifiedRole } = await verifyUserRole(userId, userRole);
+        if (!valid) {
+          return res.status(403).json({
+            error: 'Permission denied',
+            message: 'Role verification failed'
+          });
+        }
+        userRole = verifiedRole;
+      }
 
       // Check if user has the required permission
       if (!checkPermission(userRole, permission)) {
+        // Get allowed roles for this permission (for better error message)
+        const allowedRoles = [];
+        const { PERMISSIONS } = require('../utils/permissions');
+        for (const [role, rolePerms] of Object.entries(PERMISSIONS)) {
+          if (rolePerms.includes(permission)) {
+            allowedRoles.push(role);
+          }
+        }
+
         return res.status(403).json({
           error: 'Permission denied',
-          message: 'Your role does not have permission to perform this action',
+          message: `Your role (${userRole}) does not have permission to ${permission}`,
           requiredPermission: permission,
-          userRole: userRole
+          userRole: userRole,
+          allowedRoles: allowedRoles
         });
       }
+
+      // Attach role and userId to request for use in route handlers (documentation compatibility)
+      if (!req.userRole) req.userRole = userRole;
+      if (!req.userId) req.userId = userId;
 
       // User has permission, continue
       next();
@@ -151,6 +188,80 @@ function requireWorkspaceAccess(companyParam = 'company') {
 }
 
 /**
+ * Require one of the specified permissions
+ * Returns middleware that checks if the authenticated user has at least one of the required permissions.
+ * Useful for endpoints that can be accessed with different permissions (e.g., monitor OR view results).
+ * 
+ * @param {string[]} permissions - Array of permission names (user needs at least one)
+ * @returns {Function} Express middleware function
+ */
+function requirePermissionOr(permissions) {
+  return async (req, res, next) => {
+    try {
+      // Support both approaches:
+      // 1. req.user from authenticateToken middleware (current approach)
+      // 2. Extract from headers directly (documentation approach)
+      let userRole;
+      let userId;
+
+      if (req.user) {
+        // Current approach: use req.user from authenticateToken middleware
+        userRole = req.user.role;
+        userId = req.user.id;
+      } else {
+        // Documentation approach: extract from headers
+        userRole = getUserRoleFromHeaders(req);
+        userId = getUserIdFromHeaders(req);
+
+        if (!userRole || !userId) {
+          return res.status(401).json({
+            error: 'Unauthorized',
+            message: 'Missing authentication information'
+          });
+        }
+
+        // Verify role from database (recommended for security)
+        const { valid, role: verifiedRole } = await verifyUserRole(userId, userRole);
+        if (!valid) {
+          return res.status(403).json({
+            error: 'Permission denied',
+            message: 'Role verification failed'
+          });
+        }
+        userRole = verifiedRole;
+      }
+
+      // Check if user has at least one of the required permissions
+      const hasAnyPermission = permissions.some(permission => 
+        checkPermission(userRole, permission)
+      );
+
+      if (!hasAnyPermission) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: `Your role (${userRole}) does not have any of the required permissions: ${permissions.join(', ')}`,
+          requiredPermissions: permissions,
+          userRole: userRole
+        });
+      }
+
+      // Attach role and userId to request for use in route handlers (documentation compatibility)
+      if (!req.userRole) req.userRole = userRole;
+      if (!req.userId) req.userId = userId;
+
+      // User has at least one permission, continue
+      next();
+    } catch (error) {
+      console.error('Authorization error:', error);
+      return res.status(500).json({
+        error: 'Internal server error',
+        message: 'Authorization check failed'
+      });
+    }
+  };
+}
+
+/**
  * Check if user can assign a specific role
  * Helper function for role assignment validation
  * 
@@ -184,6 +295,7 @@ function validateRoleAssignment(assignerRole, targetRole) {
 
 module.exports = {
   requirePermission,
+  requirePermissionOr,
   requireRole,
   requireWorkspaceAccess,
   validateRoleAssignment

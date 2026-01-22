@@ -17,7 +17,10 @@ const PERMISSIONS = {
     'manageWorkspaceUsers',
     'assignRoles',
     'deleteProjects',
-    'manageDatasets',
+    'deleteOwnInference',
+    'uploadDatasets',
+    'deleteDatasets',
+    'viewRawDatasetImages',
     'startTraining',
     'tuneHyperparameters',
     'viewTrainingMetrics',
@@ -35,7 +38,9 @@ const PERMISSIONS = {
     'manageWorkspaceUsers',
     'assignRoles',
     'deleteProjects',
-    'manageDatasets',
+    'uploadDatasets',
+    'deleteDatasets',
+    'viewRawDatasetImages',
     'startTraining',
     'tuneHyperparameters',
     'viewTrainingMetrics',
@@ -48,12 +53,11 @@ const PERMISSIONS = {
     'viewInference'
   ],
   ml_engineer: [
-    'manageDatasets',
+    'uploadDatasets',
+    'viewRawDatasetImages',
     'startTraining',
     'tuneHyperparameters',
     'viewTrainingMetrics',
-    'runInference',
-    'monitorInference',
     'viewInferenceResults',
     'viewProjects',
     'viewDatasets',
@@ -64,16 +68,20 @@ const PERMISSIONS = {
     'runInference',
     'monitorInference',
     'viewInferenceResults',
+    'deleteOwnInference',
+    'viewTrainingMetrics',
     'viewProjects',
     'viewDatasets',
     'viewModels',
-    'viewInference'
+    'viewInference',
+    'viewRawDatasetImages'
   ],
   viewer: [
     'viewProjects',
     'viewDatasets',
     'viewModels',
-    'viewInference'
+    'viewInference',
+    'viewInferenceResults'
   ]
 };
 
@@ -155,11 +163,71 @@ function canAssignRole(assignerRole, targetRole) {
   return false;
 }
 
+/**
+ * Get user role from request headers
+ * @param {Object} req - Express request object
+ * @returns {string|null} - User role or null
+ */
+function getUserRoleFromHeaders(req) {
+  return req.headers['x-user-role'] || null;
+}
+
+/**
+ * Get user ID from request headers
+ * @param {Object} req - Express request object
+ * @returns {string|null} - User ID or null
+ */
+function getUserIdFromHeaders(req) {
+  return req.headers['x-user-id'] || null;
+}
+
+/**
+ * Verify user role from database (for security)
+ * This should query your user/profile database to verify the role.
+ * 
+ * NOTE: Currently returns the claimed role as valid. Implement database verification
+ * by querying your user database (e.g., Supabase profiles table, MongoDB users collection).
+ * 
+ * @param {string} userId - User ID
+ * @param {string} claimedRole - Role claimed in headers
+ * @returns {Promise<{valid: boolean, role: string|null}>}
+ */
+async function verifyUserRole(userId, claimedRole) {
+  // TODO: Implement database query to verify user role
+  // Example for MongoDB:
+  // const User = require('../models/User');
+  // const user = await User.findById(userId);
+  // if (!user) return { valid: false, role: null };
+  // return { valid: user.role === claimedRole, role: user.role };
+  
+  // Example for Supabase:
+  // const { getSupabaseClient } = require('../services/supabaseService');
+  // const supabase = getSupabaseClient();
+  // const { data: profile, error } = await supabase
+  //   .from('profiles')
+  //   .select('role')
+  //   .eq('id', userId)
+  //   .single();
+  // if (error || !profile) return { valid: false, role: null };
+  // return { valid: profile.role === claimedRole, role: profile.role };
+  
+  // For now, return the claimed role (backend should implement proper verification)
+  // This maintains backward compatibility while allowing future database verification
+  return { valid: true, role: claimedRole };
+}
+
+// Export rolePermissions as alias for PERMISSIONS (for backward compatibility with documentation)
+const rolePermissions = PERMISSIONS;
+
 module.exports = {
   PERMISSIONS,
+  rolePermissions, // Alias for documentation compatibility
   VALID_ROLES,
   checkPermission,
   getRolePermissions,
   isValidRole,
-  canAssignRole
+  canAssignRole,
+  getUserRoleFromHeaders,
+  getUserIdFromHeaders,
+  verifyUserRole
 };

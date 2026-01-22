@@ -39,6 +39,12 @@ const inferenceJobSchema = new mongoose.Schema({
     index: true
   },
 
+  // User who created this inference job (for ownership verification)
+  createdBy: {
+    type: String, // User ID from X-User-Id header
+    index: true
+  },
+
   // Source type: 'test_folder', 'custom_folder', or 'live_camera'
   sourceType: {
     type: String,
