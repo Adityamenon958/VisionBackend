@@ -1,6 +1,7 @@
 const Model = require('../models/Model');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const networkScanner = require('../services/networkScanner');
 const folderAccessChecker = require('../services/folderAccessChecker');
 const modelDeployer = require('../services/modelDeployer');
@@ -54,8 +55,29 @@ const scanNetworkDevices = async (req, res) => {
     
     for (const ip of activeIPs) {
       try {
-        const folderPath = folderAccessChecker.buildFolderPath(ip, folderName);
-        const access = await folderAccessChecker.checkFolderAccess(folderPath);
+        let hasFolderAccess = false;
+        let folderPath;
+        let accessError;
+        let availableShares;
+
+        if (os.platform() === 'win32') {
+          // Windows: discover any accessible SMB shares, not just a hard-coded name
+          const shareResult = await folderAccessChecker.findAccessibleWindowsShares(ip, folderName);
+          hasFolderAccess = shareResult.accessible;
+          accessError = shareResult.error;
+
+          if (shareResult.accessible && shareResult.shares.length > 0) {
+            // Use the first accessible share as the primary folder path
+            folderPath = shareResult.shares[0].path;
+            availableShares = shareResult.shares;
+          }
+        } else {
+          // Non-Windows: fall back to existing behaviour (specific folderName)
+          folderPath = folderAccessChecker.buildFolderPath(ip, folderName);
+          const access = await folderAccessChecker.checkFolderAccess(folderPath);
+          hasFolderAccess = access.accessible;
+          accessError = access.error;
+        }
         
         // Try to get device name (optional, may fail)
         let deviceName = ip;
@@ -68,10 +90,12 @@ const scanNetworkDevices = async (req, res) => {
         devices.push({
           ipAddress: ip,
           deviceName: deviceName,
-          hasFolderAccess: access.accessible,
-          folderPath: access.accessible ? folderPath : undefined,
-          status: access.accessible ? 'available' : 'unavailable',
-          error: access.error,
+          hasFolderAccess: hasFolderAccess,
+          folderPath: hasFolderAccess ? folderPath : undefined,
+          status: hasFolderAccess ? 'available' : 'unavailable',
+          error: accessError,
+          // Optional extra metadata: list of accessible shares (Windows only)
+          availableShares,
           lastChecked: new Date().toISOString()
         });
       } catch (error) {
@@ -160,8 +184,28 @@ const checkDeviceByIp = async (req, res) => {
     }
 
     // 5. Check folder access
-    const folderPath = folderAccessChecker.buildFolderPath(ipAddress, folderName);
-    const access = await folderAccessChecker.checkFolderAccess(folderPath);
+    let hasFolderAccess = false;
+    let folderPath;
+    let accessError;
+    let availableShares;
+
+    if (os.platform() === 'win32') {
+      // Windows: discover any accessible SMB shares, not just a hard-coded name
+      const shareResult = await folderAccessChecker.findAccessibleWindowsShares(ipAddress, folderName);
+      hasFolderAccess = shareResult.accessible;
+      accessError = shareResult.error;
+
+      if (shareResult.accessible && shareResult.shares.length > 0) {
+        folderPath = shareResult.shares[0].path;
+        availableShares = shareResult.shares;
+      }
+    } else {
+      // Non-Windows: fall back to existing behaviour (specific folderName)
+      folderPath = folderAccessChecker.buildFolderPath(ipAddress, folderName);
+      const access = await folderAccessChecker.checkFolderAccess(folderPath);
+      hasFolderAccess = access.accessible;
+      accessError = access.error;
+    }
 
     // Try to get device name (optional)
     let deviceName = ipAddress;
@@ -175,12 +219,13 @@ const checkDeviceByIp = async (req, res) => {
     return res.status(200).json({
       ipAddress,
       deviceName: deviceName,
-      hasFolderAccess: access.accessible,
-      folderPath: access.accessible ? folderPath : undefined,
-      status: access.accessible ? 'available' : 'unavailable',
-      error: access.error,
-      message: access.accessible 
-        ? 'Folder access available' 
+      hasFolderAccess,
+      folderPath: hasFolderAccess ? folderPath : undefined,
+      status: hasFolderAccess ? 'available' : 'unavailable',
+      error: accessError,
+      availableShares,
+      message: hasFolderAccess
+        ? 'Folder access available'
         : 'Cannot access folder. Please check network connectivity and folder permissions.',
       lastChecked: new Date().toISOString()
     });
