@@ -1,5 +1,9 @@
 const fs = require('fs');
 const os = require('os');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+
+const execAsync = promisify(exec);
 
 /**
  * Folder Access Checker Service
@@ -18,6 +22,54 @@ const os = require('os');
  */
 function buildWindowsFolderPath(ipAddress, folderName = 'models') {
   return `\\\\${ipAddress}\\${folderName}`;
+}
+
+/**
+ * List available SMB shares on a Windows host using `net view`.
+ * 
+ * @param {string} ipAddress - Target IP address
+ * @returns {Promise<string[]>} Array of share names (e.g., ["models", "eg"])
+ */
+async function listWindowsShares(ipAddress) {
+  // Only valid/available on Windows
+  if (os.platform() !== 'win32') {
+    return [];
+  }
+
+  try {
+    // Example command: net view \\192.168.1.7
+    const { stdout } = await execAsync(`net view \\\\${ipAddress}`, {
+      timeout: 5000,
+      windowsHide: true
+    });
+
+    const shares = [];
+    const lines = stdout.split('\n');
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      // Skip empty lines, headers and separators
+      if (!line || line.toLowerCase().startsWith('share name') || line.startsWith('---')) {
+        continue;
+      }
+
+      // Extract first token as share name
+      const match = line.match(/^(\S+)\s+/);
+      if (!match) continue;
+
+      const shareName = match[1];
+
+      // Skip administrative/hidden shares like C$, ADMIN$, IPC$
+      if (shareName.endsWith('$')) continue;
+
+      shares.push(shareName);
+    }
+
+    return shares;
+  } catch (error) {
+    // If net view fails (e.g., SMB disabled or access denied), treat as no shares
+    return [];
+  }
 }
 
 /**
@@ -101,6 +153,73 @@ async function checkUnixFolderAccess(ipAddress, folderName) {
 }
 
 /**
+ * Find any accessible Windows shares on a device.
+ * 
+ * Used for discovery / scanning flows where we only need to know
+ * whether *any* shared folder is usable, not a specific name.
+ * 
+ * @param {string} ipAddress - Target IP address
+ * @param {string} [preferredFolderName] - Optional preferred share name to try first
+ * @returns {Promise<{accessible: boolean, shares: {name: string, path: string}[], error?: string}>}
+ */
+async function findAccessibleWindowsShares(ipAddress, preferredFolderName) {
+  if (os.platform() !== 'win32') {
+    return {
+      accessible: false,
+      shares: [],
+      error: 'Windows share discovery is only supported on win32 platform'
+    };
+  }
+
+  const testedShares = new Set();
+  const accessibleShares = [];
+
+  // 1) Try preferred folder name first (if provided)
+  if (preferredFolderName) {
+    const preferredPath = buildWindowsFolderPath(ipAddress, preferredFolderName);
+    const result = await checkWindowsFolderAccess(preferredPath);
+    testedShares.add(preferredFolderName);
+
+    if (result.accessible) {
+      accessibleShares.push({
+        name: preferredFolderName,
+        path: preferredPath
+      });
+    }
+  }
+
+  // 2) Enumerate all visible shares via `net view`
+  const shares = await listWindowsShares(ipAddress);
+
+  for (const shareName of shares) {
+    if (testedShares.has(shareName)) continue;
+
+    const sharePath = buildWindowsFolderPath(ipAddress, shareName);
+    const result = await checkWindowsFolderAccess(sharePath);
+
+    if (result.accessible) {
+      accessibleShares.push({
+        name: shareName,
+        path: sharePath
+      });
+    }
+  }
+
+  if (accessibleShares.length === 0) {
+    return {
+      accessible: false,
+      shares: [],
+      error: 'No accessible SMB shares found on device'
+    };
+  }
+
+  return {
+    accessible: true,
+    shares: accessibleShares
+  };
+}
+
+/**
  * Check if folder is accessible
  * @param {string} folderPath - Full folder path
  * @returns {Promise<{accessible: boolean, path?: string, error?: string}>}
@@ -162,5 +281,7 @@ module.exports = {
   buildFolderPath,
   checkFolderAccess,
   verifyWriteAccess,
-  buildWindowsFolderPath
+  buildWindowsFolderPath,
+  listWindowsShares,
+  findAccessibleWindowsShares
 };

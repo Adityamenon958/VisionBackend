@@ -3,6 +3,8 @@ const router = express.Router();
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { authenticateToken } = require('../middleware/authMiddleware');
+const { requirePermission } = require('../middleware/authorizationMiddleware');
 
 const {
   uploadDataset,
@@ -98,6 +100,8 @@ const upload = multer({
  * Controller handles validation gracefully.
  */
 router.post('/upload',
+  authenticateToken,
+  requirePermission('uploadDatasets'),
   upload.fields([
     { name: 'files', maxCount: 5000 }, // ✅ Accept up to 5000 files (controller validates)
     { name: 'fileMeta', maxCount: 1 } // ✅ Accept optional fileMeta (JSON file, validated by fileFilter)
@@ -121,7 +125,7 @@ router.post('/upload',
  * 
  * Returns minimal status for polling
  */
-router.get('/:datasetId/status', getDatasetStatus);
+router.get('/:datasetId/status', authenticateToken, requirePermission('viewDatasets'), getDatasetStatus);
 
 /**
  * GET /api/dataset/:datasetId/detected-classes
@@ -129,46 +133,49 @@ router.get('/:datasetId/status', getDatasetStatus);
  * Returns detected class IDs and default class names for labeled datasets.
  * Used by frontend to prompt user to map class IDs to meaningful names.
  */
-router.get('/:datasetId/detected-classes', getDetectedClasses);
+router.get('/:datasetId/detected-classes', authenticateToken, requirePermission('viewDatasets'), getDetectedClasses);
 
 /**
  * POST /api/dataset/:datasetId/create-categories-from-classes
  * 
  * Creates Category documents from detected class IDs using user-provided names.
  */
-router.post('/:datasetId/create-categories-from-classes', createCategoriesFromClasses);
+router.post('/:datasetId/create-categories-from-classes', authenticateToken, requirePermission('uploadDatasets'), createCategoriesFromClasses);
 
 /**
  * GET /api/dataset/:datasetId/folders
  * 
  * Returns folder summary with images/labels counts and size statistics
  */
-router.get('/:datasetId/folders', getDatasetFolders);
+router.get('/:datasetId/folders', authenticateToken, requirePermission('viewDatasets'), getDatasetFolders);
 
 /**
  * GET /api/dataset/:datasetId/files
  * 
  * Returns paginated file manifest with filters and sorting
+ * Requires: viewRawDatasetImages permission (for Viewer role restriction)
  */
-router.get('/:datasetId/files', getDatasetFiles);
+router.get('/:datasetId/files', authenticateToken, requirePermission('viewRawDatasetImages'), getDatasetFiles);
 
 /**
  * GET /api/dataset/:datasetId/file/:fileId/thumbnail
  * 
  * Serves thumbnail image if available
  * fileId can be storedName or file _id
+ * Requires: viewRawDatasetImages permission (for Viewer role restriction)
  */
-router.get('/:datasetId/file/:fileId/thumbnail', getFileThumbnail);
+router.get('/:datasetId/file/:fileId/thumbnail', authenticateToken, requirePermission('viewRawDatasetImages'), getFileThumbnail);
 
 /**
  * GET /api/dataset/:datasetId/file/:fileId
  * 
  * Serves original full-size image (never thumbnail)
  * fileId can be storedName or file _id
+ * Requires: viewRawDatasetImages permission (for Viewer role restriction)
  * 
  * ⚠️ CAUTION: This route must be AFTER /thumbnail route to avoid route conflicts
  */
-router.get('/:datasetId/file/:fileId', getFile);
+router.get('/:datasetId/file/:fileId', authenticateToken, requirePermission('viewRawDatasetImages'), getFile);
 
 /**
  * GET /api/dataset/:datasetId/dependencies
@@ -176,7 +183,7 @@ router.get('/:datasetId/file/:fileId', getFile);
  * Get dependencies (training jobs, models, inference jobs) that use this dataset
  * Used for showing confirmation dialog before deletion
  */
-router.get('/:datasetId/dependencies', getDatasetDependencies);
+router.get('/:datasetId/dependencies', authenticateToken, requirePermission('viewDatasets'), getDatasetDependencies);
 
 /**
  * PATCH /api/dataset/:datasetId
@@ -191,7 +198,7 @@ router.get('/:datasetId/dependencies', getDatasetDependencies);
  * 
  * ⚠️ CAUTION: This route must be BEFORE GET /:datasetId to avoid route conflicts
  */
-router.patch('/:datasetId', updateDataset);
+router.patch('/:datasetId', authenticateToken, requirePermission('uploadDatasets'), updateDataset);
 
 /**
  * DELETE /api/dataset/:company/:project/:version
@@ -206,7 +213,7 @@ router.patch('/:datasetId', updateDataset);
  *   - Dataset is processing or queued
  *   - Dataset is already deleted
  */
-router.delete('/:company/:project/:version', deleteDatasetByVersion);
+router.delete('/:company/:project/:version', authenticateToken, requirePermission('deleteDatasets'), deleteDatasetByVersion);
 
 /**
  * DELETE /api/dataset/:datasetId
@@ -218,7 +225,7 @@ router.delete('/:company/:project/:version', deleteDatasetByVersion);
  * - Dataset is processing or queued
  * - Dataset is already deleted
  */
-router.delete('/:datasetId', deleteDataset);
+router.delete('/:datasetId', authenticateToken, requirePermission('deleteDatasets'), deleteDataset);
 
 /**
  * GET /api/dataset/:datasetId
@@ -227,7 +234,7 @@ router.delete('/:datasetId', deleteDataset);
  * 
  * ⚠️ CAUTION: This route must be LAST to avoid matching /folders, /files, etc.
  */
-router.get('/:datasetId', getDataset);
+router.get('/:datasetId', authenticateToken, requirePermission('viewDatasets'), getDataset);
 
 module.exports = router;
 

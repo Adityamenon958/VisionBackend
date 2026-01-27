@@ -8,6 +8,8 @@ const Category = require('../models/Category');
 const storageAdapter = require('../services/storageAdapter');
 const { preprocessingQueue } = require('../queue');
 const { generateDataYaml } = require('../utils/yoloConverter');
+const auditService = require('../services/auditService');
+const { buildWorkspaceFilter, validateWorkspaceAccess, canAccessAllWorkspaces } = require('../utils/workspaceScoping');
 
 /**
  * Dataset Controller - Handles dataset upload and retrieval
@@ -36,6 +38,17 @@ const uploadDataset = async (req, res) => {
       return res.status(400).json({
         error: 'Missing required fields: company and project are required'
       });
+    }
+
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this workspace'
+        });
+      }
     }
 
     // ✅ Check if files were uploaded
@@ -245,6 +258,21 @@ const uploadDataset = async (req, res) => {
       queueName: preprocessingQueue.name,
     });
 
+    // Log dataset upload activity
+    await auditService.logAction({
+      action: 'create',
+      resourceType: 'dataset',
+      resourceId: datasetId,
+      details: {
+        company: company,
+        project: project,
+        datasetName: `${company}/${project}/${version}`,
+        projectName: project,
+        totalImages: totalImages
+      },
+      req
+    });
+
     // ✅ Return 202 Accepted (async processing started)
     res.status(202).json({
       datasetId,
@@ -279,6 +307,17 @@ const getDataset = async (req, res) => {
       return res.status(404).json({
         error: 'Dataset not found'
       });
+    }
+
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, dataset.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this dataset'
+        });
+      }
     }
 
     // ✅ Compute folders summary (grouped by folder name)
@@ -388,6 +427,17 @@ const getDatasetStatus = async (req, res) => {
       return res.status(404).json({
         error: 'Dataset not found'
       });
+    }
+
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, dataset.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this dataset'
+        });
+      }
     }
 
     // ✅ Return minimal status info (good for frequent polling)
@@ -902,11 +952,33 @@ const updateDataset = async (req, res) => {
       });
     }
 
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, dataset.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this dataset'
+        });
+      }
+    }
+
     // ✅ Validate at least one field is provided
     if (!company && !project) {
       return res.status(400).json({
         error: 'At least one field (company or project) must be provided'
       });
+    }
+
+    // ✅ If updating company, validate workspace access to new company
+    if (company && company !== dataset.company && !canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to the new workspace'
+        });
+      }
     }
 
     // ✅ Update fields if provided
@@ -1077,6 +1149,17 @@ const deleteDatasetByVersion = async (req, res) => {
         error: 'Missing required parameters',
         message: 'Company, project, and version are required'
       });
+    }
+
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this workspace'
+        });
+      }
     }
 
     // ✅ Log deletion attempt
