@@ -1,0 +1,26 @@
+#
+# VisionBackend Python dependencies (CPU-only)
+#
+# Use this on machines without an NVIDIA GPU / CUDA.
+#
+# Install (recommended inside a venv):
+#   python -m pip install -r requirements.cpu.txt
+#
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Core ML stack (CPU)
+torch==2.9.1+cpu
+torchvision==0.24.1+cpu
+torchaudio==2.9.1+cpu
+
+# YOLO / Ultralytics
+ultralytics==8.4.7
+
+# Inference utilities (videos/images)
+moviepy==2.2.1
+opencv-python>=4.8.0
+
+# Common deps (kept broad; ultralytics/moviepy also depend on these)
+numpy>=1.25.0
+pillow>=9.2.0

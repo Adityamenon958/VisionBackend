@@ -8,6 +8,41 @@ const path = require('path');
 const { BlobServiceClient } = require('@azure/storage-blob');
 
 /**
+ * Normalize modelSize input to a consistent format.
+ * Supports:
+ * - "n" | "s" | "m" | "l" | "x"
+ * - "v5n" | "v8n" | "v11s" | "v26n"
+ * - "base-v26n"
+ * - "yolov26n.pt" | "yolo26n.pt" | "yolov5n.pt"
+ */
+function normalizeModelSize(input) {
+  if (!input) return null;
+
+  let value = String(input).trim();
+
+  if (value.startsWith('base-')) {
+    value = value.slice('base-'.length);
+  }
+
+  const fileMatch = value.match(/yolov?(\d+)([nsmlx])\.pt/i);
+  if (fileMatch) {
+    return `v${fileMatch[1]}${fileMatch[2].toLowerCase()}`;
+  }
+
+  const versionMatch = value.match(/^v?(5|8|11|26)([nsmlx])$/i);
+  if (versionMatch) {
+    return `v${versionMatch[1]}${versionMatch[2].toLowerCase()}`;
+  }
+
+  const sizeMatch = value.match(/^([nsmlx])$/i);
+  if (sizeMatch) {
+    return sizeMatch[1].toLowerCase();
+  }
+
+  return value;
+}
+
+/**
  * Training Controller - Handles training job management
  * 
  * This controller provides endpoints for:
@@ -96,10 +131,12 @@ const getAvailableBaseModels = async (req, res) => {
           }
           
           // Extract model size from filename (yolov8n.pt -> 'n', yolov11s.pt -> 's')
+          const v5Match = filename.match(/yolov5([nsmlx])\.pt/);
           const v8Match = filename.match(/yolov8([nsmlx])\.pt/);
           const v11Match = filename.match(/yolov11([nsmlx])\.pt/);
-          const size = v8Match ? v8Match[1] : (v11Match ? v11Match[1] : null);
-          const version = v8Match ? 'v8' : (v11Match ? 'v11' : null);
+          const v26Match = filename.match(/yolov?26([nsmlx])\.pt/);
+          const size = v5Match ? v5Match[1] : (v8Match ? v8Match[1] : (v11Match ? v11Match[1] : (v26Match ? v26Match[1] : null)));
+          const version = v5Match ? 'v5' : (v8Match ? 'v8' : (v11Match ? 'v11' : (v26Match ? 'v26' : null)));
           
           // Skip invalid YOLO models
           if (!size || !version) {
@@ -124,6 +161,7 @@ const getAvailableBaseModels = async (req, res) => {
             filename: filename,
             size: size,
             version: version,
+            key: `base-${version}${size}`,
             name: `YOLO${version} ${sizeNames[size]}`,
             sizeMB: parseFloat(sizeMB),
             path: `/models/${blob.name}` // Logical path for Azure mode
@@ -156,10 +194,12 @@ const getAvailableBaseModels = async (req, res) => {
           const sizeMB = (stats.size / (1024 * 1024)).toFixed(2);
 
           // Extract model size from filename (yolov8n.pt -> 'n', yolov11s.pt -> 's')
+          const v5Match = file.match(/yolov5([nsmlx])\.pt/);
           const v8Match = file.match(/yolov8([nsmlx])\.pt/);
           const v11Match = file.match(/yolov11([nsmlx])\.pt/);
-          const size = v8Match ? v8Match[1] : (v11Match ? v11Match[1] : null);
-          const version = v8Match ? 'v8' : (v11Match ? 'v11' : null);
+          const v26Match = file.match(/yolov?26([nsmlx])\.pt/);
+          const size = v5Match ? v5Match[1] : (v8Match ? v8Match[1] : (v11Match ? v11Match[1] : (v26Match ? v26Match[1] : null)));
+          const version = v5Match ? 'v5' : (v8Match ? 'v8' : (v11Match ? 'v11' : (v26Match ? 'v26' : null)));
 
           // Map size codes to readable names
           const sizeNames = {
@@ -175,6 +215,7 @@ const getAvailableBaseModels = async (req, res) => {
             filename: file,
             size: size,
             version: version,
+            key: `base-${version}${size}`,
             name: size && version ? `YOLO${version} ${sizeNames[size]}` : file.replace('.pt', ''),
             sizeMB: parseFloat(sizeMB),
             path: filePath
@@ -267,7 +308,9 @@ const getDefaultHyperparameters = async (req, res) => {
  */
 const startTraining = async (req, res) => {
   try {
-    const { datasetId, modelId, modelType, modelSize, hyperparameters } = req.body;
+    const { datasetId, modelId, modelType, modelSize, modelKey, hyperparameters } = req.body;
+    const normalizedModelSize = normalizeModelSize(modelSize);
+    const normalizedModelKey = modelKey ? String(modelKey).trim() : null;
 
     // Validate required fields
     if (!datasetId) {
@@ -279,7 +322,8 @@ const startTraining = async (req, res) => {
     // ✅ If modelId is provided, validate and use trained model
     let trainedModel = null;
     let finalModelType = modelType;
-    let finalModelSize = modelSize || 'n';
+    let finalModelSize = normalizedModelSize || 'n';
+    let finalModelKey = normalizedModelKey;
 
     if (modelId) {
       // Fetch trained model from database
@@ -332,10 +376,20 @@ const startTraining = async (req, res) => {
       }
 
       // Validate modelSize for YOLO (optional, defaults to 'n')
-      if (modelType === 'YOLO' && modelSize) {
-        if (!['n', 's', 'm', 'l', 'x'].includes(modelSize)) {
+      if (modelType === 'YOLO' && normalizedModelSize) {
+        const validSizePattern = /^(?:[nsmlx]|v(?:5|8|11|26)[nsmlx])$/i;
+        if (!validSizePattern.test(normalizedModelSize)) {
           return res.status(400).json({
-            error: 'Invalid modelSize. Must be one of: n (nano), s (small), m (medium), l (large), x (extra large)'
+            error: 'Invalid modelSize. Must be one of: n/s/m/l/x or v5n/v8n/v11n/v26n'
+          });
+        }
+      }
+
+      if (modelType === 'YOLO' && normalizedModelKey) {
+        const validKeyPattern = /^base-v(?:5|8|11|26)[nsmlx]$/i;
+        if (!validKeyPattern.test(normalizedModelKey)) {
+          return res.status(400).json({
+            error: 'Invalid modelKey. Must be like base-v5n/base-v8n/base-v11n/base-v26n'
           });
         }
       }
@@ -373,6 +427,7 @@ const startTraining = async (req, res) => {
       project: dataset.project,
       modelType: finalModelType,
       modelSize: finalModelSize,
+      modelKey: finalModelKey,
       status: 'queued',
       hyperparameters: mergedHyperparameters
     });
@@ -387,6 +442,7 @@ const startTraining = async (req, res) => {
       project: dataset.project,
       modelType: finalModelType,
       modelSize: finalModelSize,
+      modelKey: finalModelKey,
       modelId: modelId || null, // ✅ Pass modelId if provided (for trained model)
       hyperparameters: mergedHyperparameters
     }, {

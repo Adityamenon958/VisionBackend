@@ -1,0 +1,30 @@
+#
+# VisionBackend Python dependencies (NVIDIA GPU + CUDA)
+#
+# This file assumes you have an NVIDIA GPU + drivers installed, and you want CUDA-enabled PyTorch.
+# It targets CUDA 12.1 wheels (cu121), which is a common default.
+#
+# Install (recommended inside a venv):
+#   python -m pip install -r requirements.gpu.txt
+#
+# If your environment uses a different CUDA wheel set (e.g., cu124),
+# change the URL below accordingly.
+#
+
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# Core ML stack (CUDA-enabled)
+torch==2.9.1+cu121
+torchvision==0.24.1+cu121
+torchaudio==2.9.1+cu121
+
+# YOLO / Ultralytics
+ultralytics==8.4.7
+
+# Inference utilities (videos/images)
+moviepy==2.2.1
+opencv-python>=4.8.0
+
+# Common deps
+numpy>=1.25.0
+pillow>=9.2.0

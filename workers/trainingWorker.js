@@ -67,38 +67,93 @@ const trainingService = require('../services/trainingService');
  */
 
 /**
+ * Normalize modelSize into { version, size, explicitVersion }.
+ * Accepts: "n", "v5n", "v8n", "v11s", "v26n", "base-v26n".
+ */
+function parseModelSize(modelSize = 'n') {
+  const raw = String(modelSize).trim().replace(/^base-/, '');
+  const versionMatch = raw.match(/^v?(5|8|11|26)([nsmlx])$/i);
+  if (versionMatch) {
+    return {
+      version: versionMatch[1],
+      size: versionMatch[2].toLowerCase(),
+      explicitVersion: true
+    };
+  }
+
+  const sizeMatch = raw.match(/^([nsmlx])$/i);
+  if (sizeMatch) {
+    return {
+      version: null,
+      size: sizeMatch[1].toLowerCase(),
+      explicitVersion: false
+    };
+  }
+
+  return {
+    version: null,
+    size: raw,
+    explicitVersion: false
+  };
+}
+
+/**
+ * Resolve model size from modelKey (e.g., "base-v5n" -> "v5n").
+ */
+function parseModelKey(modelKey) {
+  if (!modelKey) return null;
+  const raw = String(modelKey).trim();
+  const match = raw.match(/^base-v(5|8|11|26)([nsmlx])$/i);
+  if (!match) return null;
+  return `v${match[1]}${match[2].toLowerCase()}`;
+}
+
+/**
  * Get base model path for YOLO training
  * @param {string} modelType - Model type (YOLO, EfficientNet, Custom)
  * @param {string} modelSize - Optional model size (n, s, m, l) - defaults to 'n' for YOLO
  * @returns {string} Path to base model file
  */
-function getBaseModelPath(modelType, modelSize = 'n') {
+function getBaseModelPath(modelType, modelSize = 'n', modelKey = null) {
   if (modelType === 'YOLO') {
     const baseModelsDir = path.join(process.cwd(), 'models', 'base');
-    
-    // Check for YOLOv11 first (newer), then YOLOv8 (fallback)
-    const v11ModelName = `yolov11${modelSize}.pt`;
-    const v11ModelPath = path.join(baseModelsDir, v11ModelName);
-    const v8ModelName = `yolov8${modelSize}.pt`;
-    const v8ModelPath = path.join(baseModelsDir, v8ModelName);
-    
-    // Prefer YOLOv11 if available
-    if (fs.existsSync(v11ModelPath)) {
-      return v11ModelPath;
+
+    const keyResolvedSize = parseModelKey(modelKey);
+    const resolvedModelSize = keyResolvedSize || modelSize;
+    const { version, size, explicitVersion } = parseModelSize(resolvedModelSize);
+
+    const makePath = (name) => path.join(baseModelsDir, name);
+    const candidates = [];
+
+    if (explicitVersion && version) {
+      if (version === '26') {
+        candidates.push(makePath(`yolov26${size}.pt`), makePath(`yolo26${size}.pt`));
+      } else {
+        candidates.push(makePath(`yolov${version}${size}.pt`));
+      }
+    } else {
+      // Prefer YOLOv26 (newest), then YOLOv11, then YOLOv8, then YOLOv5
+      candidates.push(
+        makePath(`yolov26${size}.pt`),
+        makePath(`yolo26${size}.pt`),
+        makePath(`yolov11${size}.pt`),
+        makePath(`yolov8${size}.pt`),
+        makePath(`yolov5${size}.pt`)
+      );
     }
-    
-    // Fallback to YOLOv8
-    if (fs.existsSync(v8ModelPath)) {
-      return v8ModelPath;
+
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
     }
-    
+
     // Fallback: return model name (YOLO will download if not found)
-    // But log a warning
-    console.warn(`⚠️  Base model not found locally: ${v11ModelPath} or ${v8ModelPath}`);
+    console.warn(`⚠️  Base model not found locally: ${candidates.join(', ')}`);
     console.warn(`⚠️  YOLO will download it automatically (slower). Run: npm run download-models`);
-    return v8ModelName; // YOLO will download from internet (default to v8)
+    return `yolov8${size}.pt`; // YOLO will download from internet (default to v8)
   }
-  
+
   // For other model types, return null (let Python script handle it)
   return null;
 }
@@ -110,7 +165,7 @@ function getBaseModelPath(modelType, modelSize = 'n') {
  * @param {object} logger - Logger object (defaults to console)
  * @returns {Promise<{localModelPath: string, jobTempDir: string}>} Local model path and temp directory
  */
-async function downloadBaseModelForJob({ jobId, modelSize, logger = console }) {
+async function downloadBaseModelForJob({ jobId, modelSize, modelKey = null, logger = console }) {
   // Validate inputs
   if (!jobId) {
     throw new Error('jobId is required');
@@ -128,7 +183,21 @@ async function downloadBaseModelForJob({ jobId, modelSize, logger = console }) {
   // Initialize Blob Service Client
   const blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
   const containerName = 'models';
-  const blobName = `base/yolov8${modelSize}.pt`;
+  const keyResolvedSize = parseModelKey(modelKey);
+  const resolvedModelSize = keyResolvedSize || modelSize;
+  const { version, size, explicitVersion } = parseModelSize(resolvedModelSize);
+  const blobCandidates = explicitVersion && version
+    ? (version === '26'
+      ? [`base/yolov26${size}.pt`, `base/yolo26${size}.pt`]
+      : [`base/yolov${version}${size}.pt`]
+    )
+    : [
+      `base/yolov26${size}.pt`,
+      `base/yolo26${size}.pt`,
+      `base/yolov11${size}.pt`,
+      `base/yolov8${size}.pt`,
+      `base/yolov5${size}.pt`
+    ];
 
   // Create job-specific temp directory
   const jobTempDir = path.join(process.cwd(), 'uploads', 'training-temp', jobId);
@@ -141,15 +210,22 @@ async function downloadBaseModelForJob({ jobId, modelSize, logger = console }) {
 
     // Get blob client
     const containerClient = blobServiceClient.getContainerClient(containerName);
-    const blobClient = containerClient.getBlobClient(blobName);
 
-    // Verify blob exists
-    const blobExists = await blobClient.exists();
-    if (!blobExists) {
-      throw new Error(`Base model blob not found: ${containerName}/${blobName}`);
+    let selectedBlobName = null;
+    for (const candidate of blobCandidates) {
+      const candidateClient = containerClient.getBlobClient(candidate);
+      if (await candidateClient.exists()) {
+        selectedBlobName = candidate;
+        break;
+      }
     }
 
-    logger.log(`📥 Downloading base model from Azure Blob: ${containerName}/${blobName}`);
+    if (!selectedBlobName) {
+      throw new Error(`Base model blob not found. Tried: ${blobCandidates.join(', ')}`);
+    }
+
+    const blobClient = containerClient.getBlobClient(selectedBlobName);
+    logger.log(`📥 Downloading base model from Azure Blob: ${containerName}/${selectedBlobName}`);
 
     // Download blob
     const downloadResponse = await blobClient.download();
@@ -243,7 +319,7 @@ names: []
   await fsPromises.writeFile(dataYamlPath, dataYaml, 'utf8');
 
   // ✅ Use provided modelPath (trained model checkpoint) or get base model path
-  const finalModelPath = modelPath || getBaseModelPath(modelType, modelSize);
+  const finalModelPath = modelPath || getBaseModelPath(modelType, modelSize, modelKey);
 
   // Create training config
   const config = {
@@ -362,7 +438,7 @@ function parseLogLine(logLine) {
  * Process a single training job
  */
 const processTrainingJob = async (job) => {
-  const { jobId, datasetId, company, project, modelType, modelSize = 'n', modelId, hyperparameters } = job.data;
+  const { jobId, datasetId, company, project, modelType, modelSize = 'n', modelKey = null, modelId, hyperparameters } = job.data;
 
   console.log(`🚀 Starting training job ${jobId}...`);
 
@@ -445,6 +521,7 @@ const processTrainingJob = async (job) => {
           const { localModelPath, jobTempDir } = await downloadBaseModelForJob({
             jobId,
             modelSize,
+            modelKey,
             logger: console
           });
           modelPath = localModelPath;
@@ -459,7 +536,7 @@ const processTrainingJob = async (job) => {
         }
       } else {
         // ✅ Use base model (existing local logic)
-        modelPath = getBaseModelPath(modelType, modelSize);
+        modelPath = getBaseModelPath(modelType, modelSize, modelKey);
         console.log(`✅ Using base model: ${modelPath}`);
       }
     }

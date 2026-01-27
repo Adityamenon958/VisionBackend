@@ -14,6 +14,8 @@ import argparse
 import json
 import os
 import sys
+import shutil
+import hashlib
 from pathlib import Path
 
 try:
@@ -47,6 +49,47 @@ def load_config(config_path):
         print(f"ERROR: Invalid JSON in config file: {e}", file=sys.stderr)
         sys.exit(1)
 
+def prepare_source_with_short_names(source, output, video_extensions):
+    """
+    If filenames are too long for Windows path limits, copy inputs to a temp
+    folder with short, stable names and return the new source path.
+    """
+    if not os.path.isdir(source):
+        return source, {}
+
+    image_extensions = ['.jpg', '.jpeg', '.png']
+    all_files = os.listdir(source)
+    candidates = [
+        f for f in all_files
+        if any(f.lower().endswith(ext) for ext in image_extensions + video_extensions)
+    ]
+
+    # Check for Windows path-length risk
+    annotated_dir = os.path.join(output, 'annotated')
+    needs_short_names = any(
+        len(os.path.join(annotated_dir, f)) >= 240 for f in candidates
+    )
+
+    if not needs_short_names:
+        return source, {}
+
+    short_dir = os.path.join(output, '_short_source')
+    os.makedirs(short_dir, exist_ok=True)
+
+    short_to_original = {}
+    for idx, filename in enumerate(candidates):
+        ext = os.path.splitext(filename)[1]
+        digest = hashlib.md5(filename.encode('utf-8')).hexdigest()[:8]
+        short_name = f"img_{idx:05d}_{digest}{ext}"
+
+        src_path = os.path.join(source, filename)
+        dest_path = os.path.join(short_dir, short_name)
+        shutil.copy2(src_path, dest_path)
+        short_to_original[short_name] = filename
+
+    print(f"⚠️ Long filenames detected. Copied {len(candidates)} files to short-name folder: {short_dir}")
+    sys.stdout.flush()
+    return short_dir, short_to_original
 
 def convert_avi_to_mp4(source_path, mp4_path):
     """
@@ -150,6 +193,9 @@ def run_inference(config):
         # ✅ Create output directory
         os.makedirs(output, exist_ok=True)
 
+        # ✅ If Windows path length is a risk, use short filenames
+        source_for_inference, short_name_map = prepare_source_with_short_names(source, output, video_extensions)
+
         print(f"Loading model from: {model_path}")
         sys.stdout.flush()
 
@@ -170,7 +216,7 @@ def run_inference(config):
         # For images: saves annotated images to {output}/annotated/
         # For videos: saves annotated videos to {output}/annotated/
         results = model.predict(
-            source=source,
+            source=source_for_inference,
             save=True,  # Save annotated images/videos
             save_txt=False,  # Don't save label files (we only need images/videos)
             conf=conf,  # Confidence threshold
@@ -514,6 +560,13 @@ def run_inference(config):
         print(f"📊 Total detections: {total_detections}")
         print(f"📊 Average confidence: {average_confidence:.4f}")
         sys.stdout.flush()
+
+        # ✅ Cleanup short-name source folder if used
+        if short_name_map:
+            try:
+                shutil.rmtree(os.path.join(output, '_short_source'), ignore_errors=True)
+            except Exception:
+                pass
 
         return 0
 
