@@ -18,7 +18,9 @@ const {
   deleteInference,
   listInferenceJobs,
   listAvailableModels,
-  listDatasetsWithTestFolders
+  listDatasetsWithTestFolders,
+  postEdgeLive,
+  getEdgeLive
 } = require('../controllers/inferenceController');
 
 /**
@@ -89,6 +91,12 @@ router.post('/live/:inferenceId/frame', authenticateToken, requirePermission('ru
 
 // POST /api/inference/live/:inferenceId/stop - Stop live camera inference
 router.post('/live/:inferenceId/stop', authenticateToken, requirePermission('runInference'), stopLiveInference);
+
+// Edge Live: receive from edge device (no auth for MVP) and serve latest to frontend (auth required)
+// POST /api/inference/edge/live - Edge device sends inference result (JSON)
+router.post('/edge/live', postEdgeLive);
+// GET /api/inference/edge/live - Frontend polls for latest (same auth as other inference read endpoints)
+router.get('/edge/live', authenticateToken, requirePermission('viewInferenceResults'), getEdgeLive);
 
 // GET /api/inference/:inferenceId/status - Get inference job status
 // Allow monitorInference (for real-time monitoring) OR viewInferenceResults (for viewing completed jobs)

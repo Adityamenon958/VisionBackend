@@ -20,6 +20,10 @@ const liveInferenceProcesses = new Map();
 // Key: inferenceId_requestId, Value: { resolve, reject, timestamp }
 const pendingFrameRequests = new Map();
 
+// ✅ Edge Live: in-memory store for latest payload from edge device (POST /api/inference/edge/live)
+// Single global "latest" entry; overwritten on each valid POST. GET returns this for frontend polling.
+let latestEdgeLiveEntry = null;
+
 /**
  * Inference Controller - Handles inference/prediction job management
  * 
@@ -1740,6 +1744,138 @@ const listDatasetsWithTestFolders = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/inference/edge/live — Receive inference result from edge device.
+ * Accepts two formats:
+ * 1. Edge format: { project_id?, class_name, confidence?, timestamp (Unix number), image (base64) }
+ * 2. Original spec: { timestamp (ISO string), imageBase64, defectClasses (array) }
+ * No auth required for MVP (edge devices may not send user headers).
+ */
+const postEdgeLive = async (req, res) => {
+  try {
+    const body = req.body;
+    if (!body || typeof body !== 'object') {
+      return res.status(400).json({
+        error: 'Invalid request body',
+        message: 'Body must be valid JSON'
+      });
+    }
+
+    let timestampIso;
+    let imageBase64;
+    let defectClasses;
+
+    // Detect edge format: has "image" and "class_name" (and numeric timestamp)
+    const isEdgeFormat = body.image != null && body.class_name != null;
+
+    if (isEdgeFormat) {
+      const { project_id, class_name, confidence, timestamp: ts, image } = body;
+
+      if (!class_name || typeof class_name !== 'string' || class_name.trim() === '') {
+        return res.status(400).json({
+          error: 'Validation failed',
+          message: 'class_name is required and must be a non-empty string'
+        });
+      }
+      if (!image || typeof image !== 'string' || image.trim() === '') {
+        return res.status(400).json({
+          error: 'Validation failed',
+          message: 'image is required and must be a non-empty string (base64)'
+        });
+      }
+
+      const tsNum = typeof ts === 'number' ? ts : parseFloat(ts);
+      if (typeof tsNum !== 'number' || Number.isNaN(tsNum)) {
+        return res.status(400).json({
+          error: 'Validation failed',
+          message: 'timestamp is required and must be a number (Unix seconds)'
+        });
+      }
+
+      // Unix seconds (with optional fractional part) → ISO 8601
+      timestampIso = new Date(tsNum * 1000).toISOString();
+      imageBase64 = image.trim();
+      defectClasses = [{ className: class_name.trim(), count: 1 }];
+      if (typeof confidence === 'number' && !Number.isNaN(confidence)) {
+        defectClasses[0].confidence = confidence;
+      }
+    } else {
+      // Original spec: timestamp (string), imageBase64, defectClasses (array)
+      const { timestamp, imageBase64: imgB64, defectClasses: dc } = body;
+
+      if (!timestamp || typeof timestamp !== 'string' || timestamp.trim() === '') {
+        return res.status(400).json({
+          error: 'Validation failed',
+          message: 'timestamp is required and must be a non-empty string'
+        });
+      }
+      if (!imgB64 || typeof imgB64 !== 'string' || imgB64.trim() === '') {
+        return res.status(400).json({
+          error: 'Validation failed',
+          message: 'imageBase64 is required and must be a non-empty string'
+        });
+      }
+      if (!Array.isArray(dc)) {
+        return res.status(400).json({
+          error: 'Validation failed',
+          message: 'defectClasses is required and must be an array'
+        });
+      }
+
+      timestampIso = timestamp.trim();
+      imageBase64 = imgB64.trim();
+      defectClasses = dc.map((item) => {
+        if (typeof item === 'string') {
+          return { className: item };
+        }
+        if (item && typeof item === 'object' && typeof item.className === 'string') {
+          return { className: item.className, count: item.count, confidence: item.confidence };
+        }
+        return { className: String(item) };
+      });
+    }
+
+    latestEdgeLiveEntry = {
+      timestamp: timestampIso,
+      imageBase64,
+      defectClasses,
+      receivedAt: Date.now()
+    };
+
+    return res.status(200).json({ ok: true, message: 'Received' });
+  } catch (error) {
+    console.error('Error in postEdgeLive:', error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+};
+
+/**
+ * GET /api/inference/edge/live — Return latest edge live payload for frontend polling.
+ * Frontend polls every 5s when Live Logs tab is active. Auth required (same as other inference APIs).
+ */
+const getEdgeLive = async (req, res) => {
+  try {
+    if (!latestEdgeLiveEntry) {
+      return res.status(204).send();
+    }
+
+    return res.status(200).json({
+      timestamp: latestEdgeLiveEntry.timestamp,
+      imageBase64: latestEdgeLiveEntry.imageBase64,
+      defectClasses: latestEdgeLiveEntry.defectClasses
+    });
+  } catch (error) {
+    console.error('Error in getEdgeLive:', error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+};
+
 module.exports = {
   startBatchInference,
   startLiveInference,
@@ -1752,6 +1888,8 @@ module.exports = {
   deleteInference,
   listInferenceJobs,
   listAvailableModels,
-  listDatasetsWithTestFolders
+  listDatasetsWithTestFolders,
+  postEdgeLive,
+  getEdgeLive
 };
 

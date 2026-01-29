@@ -61,6 +61,10 @@ app.use('/api', (req, res, next) => {
   if (req.method === 'OPTIONS') {
     return next();
   }
+  // Skip authentication for POST /api/inference/edge/live (edge device sends inference results; no user headers in MVP)
+  if (req.method === 'POST' && req.path === '/inference/edge/live') {
+    return next();
+  }
   // Apply authentication middleware
   authenticateToken(req, res, next);
 });
