@@ -151,7 +151,7 @@ async function getUserProfile(userId) {
     
     const { data, error } = await supabase
       .from('profiles')
-      .select('id, email, role, company_id')
+      .select('id, email, role, company_id, is_active')
       .eq('id', userId)
       .single();
 
@@ -163,11 +163,79 @@ async function getUserProfile(userId) {
       id: data.id,
       email: data.email,
       role: data.role,
-      company_id: data.company_id
+      company_id: data.company_id,
+      is_active: data.is_active
     };
   } catch (error) {
     console.error('Error getting user profile:', error.message);
     return null;
+  }
+}
+
+/**
+ * Update user login access (active/inactive) in Supabase profiles
+ * Uses is_active column; default true if column missing is handled by DB.
+ *
+ * @param {string} userId - User ID (UUID)
+ * @param {boolean} active - true = can log in, false = login disabled
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+async function updateUserActive(userId, active) {
+  try {
+    const supabase = getSupabaseClient();
+
+    const { error } = await supabase
+      .from('profiles')
+      .update({ is_active: !!active })
+      .eq('id', userId);
+
+    if (error) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Error updating user active:', error.message);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Deactivate user and remove from workspace (company)
+ * Sets is_active = false and company_id = null so user loses login and is removed from company.
+ *
+ * @param {string} userId - User ID (UUID)
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+async function deactivateAndRemoveFromWorkspace(userId) {
+  try {
+    const supabase = getSupabaseClient();
+
+    const { error } = await supabase
+      .from('profiles')
+      .update({ is_active: false, company_id: null })
+      .eq('id', userId);
+
+    if (error) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Error deactivating/removing user:', error.message);
+    return {
+      success: false,
+      error: error.message
+    };
   }
 }
 
@@ -176,5 +244,7 @@ module.exports = {
   getUserFromToken,
   getUserRole,
   updateUserRole,
-  getUserProfile
+  getUserProfile,
+  updateUserActive,
+  deactivateAndRemoveFromWorkspace
 };
