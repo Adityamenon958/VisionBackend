@@ -349,16 +349,17 @@ const startBatchInference = async (req, res) => {
 
 /**
  * POST /api/inference/live/start
- * 
- * Start live camera inference
- * 
- * Body: { modelId }
- * 
- * Note: Live camera implementation will be handled differently (see Phase 5)
+ *
+ * Start live camera inference.
+ *
+ * Body: {
+ *   modelId: string (required),
+ *   confidenceThreshold?: number (optional, 0–1, default 0.25)
+ * }
  */
 const startLiveInference = async (req, res) => {
   try {
-    const { modelId } = req.body;
+    const { modelId, confidenceThreshold } = req.body;
 
     // ✅ Validate required fields
     if (!modelId) {
@@ -429,9 +430,17 @@ const startLiveInference = async (req, res) => {
     }
 
     // ✅ Get default confidence threshold from request or use 0.25
-    const defaultConf = req.body.confidenceThreshold !== undefined 
-      ? parseFloat(req.body.confidenceThreshold) 
-      : 0.25;
+    let defaultConf = 0.25;
+    if (confidenceThreshold !== undefined) {
+      defaultConf = parseFloat(confidenceThreshold);
+      if (Number.isNaN(defaultConf) || defaultConf < 0 || defaultConf > 1) {
+        return res.status(400).json({
+          error: 'Invalid confidence threshold',
+          message: 'Confidence threshold must be a number between 0 and 1',
+          provided: confidenceThreshold
+        });
+      }
+    }
 
     // ✅ Spawn long-lived Python process
     const pythonProcess = spawn('python', [
@@ -563,7 +572,8 @@ const startLiveInference = async (req, res) => {
       inferenceId: inferenceJob.inferenceId,
       status: inferenceJob.status,
       message: 'Live camera inference started',
-      frameEndpoint: `/api/inference/live/${inferenceId}/frame`
+      frameEndpoint: `/api/inference/live/${inferenceId}/frame`,
+      confidenceThreshold: defaultConf
     });
 
   } catch (error) {

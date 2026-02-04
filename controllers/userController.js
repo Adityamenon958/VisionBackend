@@ -1,11 +1,49 @@
 const { isValidRole } = require('../utils/permissions');
 const { validateRoleAssignment } = require('../middleware/authorizationMiddleware');
+const { getUserProfile, updateUserActive, deactivateAndRemoveFromWorkspace } = require('../services/supabaseService');
 
 /**
  * User Controller
- * 
- * Handles user management operations, specifically role assignment.
+ *
+ * Handles user management: role assignment, login access toggle, and member delete.
  */
+
+/**
+ * Shared validation for "target member" actions (toggle active, delete).
+ * Returns { errorResponse } to send and stop, or { targetProfile } to continue.
+ * Rules: no self; workspace_admin cannot act on platform_admin; workspace_admin only same company.
+ */
+async function validateTargetMemberForManage(req, userId) {
+  const currentUser = req.user;
+  const currentUserId = currentUser.id;
+  const currentUserRole = currentUser.role;
+
+  if (!currentUser) {
+    return { errorResponse: { status: 401, body: { success: false, error: 'Unauthorized', message: 'Authentication required' } } };
+  }
+
+  if (currentUserId === userId) {
+    return { errorResponse: { status: 403, body: { success: false, error: 'Forbidden', message: 'You cannot deactivate or delete your own profile' } } };
+  }
+
+  const targetProfile = await getUserProfile(userId);
+  if (!targetProfile) {
+    return { errorResponse: { status: 404, body: { success: false, error: 'Not found', message: 'User not found' } } };
+  }
+
+  if (currentUserRole === 'workspace_admin') {
+    if (targetProfile.role === 'platform_admin') {
+      return { errorResponse: { status: 403, body: { success: false, error: 'Forbidden', message: 'Workspace admin cannot deactivate or delete platform admin users' } } };
+    }
+    const currentCompanyId = currentUser.company_id || currentUser.company;
+    const targetCompanyId = targetProfile.company_id;
+    if (currentCompanyId != null && targetCompanyId != null && currentCompanyId !== targetCompanyId) {
+      return { errorResponse: { status: 403, body: { success: false, error: 'Forbidden', message: 'You can only manage members in your own workspace' } } };
+    }
+  }
+
+  return { targetProfile };
+}
 
 /**
  * PUT /api/users/:userId/role
@@ -131,6 +169,96 @@ const updateUserRoleHandler = async (req, res) => {
   }
 };
 
+/**
+ * PATCH /api/users/:userId/active
+ *
+ * Toggle login access for a member (active = can log in, inactive = cannot).
+ * Only platform_admin and workspace_admin. Cannot toggle self or (for workspace_admin) platform_admins.
+ */
+const setMemberActiveHandler = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { active } = req.body;
+
+    const validation = await validateTargetMemberForManage(req, userId);
+    if (validation.errorResponse) {
+      return res.status(validation.errorResponse.status).json(validation.errorResponse.body);
+    }
+
+    if (typeof active !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        error: 'Bad request',
+        message: 'Request body must include { "active": true | false }'
+      });
+    }
+
+    const result = await updateUserActive(userId, active);
+    if (!result.success) {
+      return res.status(500).json({
+        success: false,
+        error: 'Update failed',
+        message: result.error || 'Failed to update login access'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: active ? 'Login access enabled' : 'Login access disabled',
+      userId,
+      active
+    });
+  } catch (error) {
+    console.error('Error setting member active:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      message: error.message || 'An unexpected error occurred'
+    });
+  }
+};
+
+/**
+ * DELETE /api/users/:userId
+ *
+ * Remove member: revoke login and remove from workspace (is_active = false, company_id = null).
+ * Only platform_admin and workspace_admin. Cannot delete self or (for workspace_admin) platform_admins.
+ */
+const deleteMemberHandler = async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const validation = await validateTargetMemberForManage(req, userId);
+    if (validation.errorResponse) {
+      return res.status(validation.errorResponse.status).json(validation.errorResponse.body);
+    }
+
+    const result = await deactivateAndRemoveFromWorkspace(userId);
+    if (!result.success) {
+      return res.status(500).json({
+        success: false,
+        error: 'Delete failed',
+        message: result.error || 'Failed to remove member'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Member removed from workspace and login disabled',
+      userId
+    });
+  } catch (error) {
+    console.error('Error deleting member:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      message: error.message || 'An unexpected error occurred'
+    });
+  }
+};
+
 module.exports = {
-  updateUserRoleHandler
+  updateUserRoleHandler,
+  setMemberActiveHandler,
+  deleteMemberHandler
 };
