@@ -81,7 +81,8 @@ const PERMISSIONS = {
     'viewDatasets',
     'viewModels',
     'viewInference',
-    'viewInferenceResults'
+    'viewInferenceResults',
+    'viewRawDatasetImages'
   ]
 };
 
