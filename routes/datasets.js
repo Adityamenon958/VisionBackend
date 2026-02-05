@@ -10,6 +10,7 @@ const {
   uploadDataset,
   getDataset,
   getDatasetStatus,
+  getAnnotationSummary,
   getDatasetFolders,
   getDatasetFiles,
   getFileThumbnail,
@@ -126,6 +127,13 @@ router.post('/upload',
  * Returns minimal status for polling
  */
 router.get('/:datasetId/status', authenticateToken, requirePermission('viewDatasets'), getDatasetStatus);
+
+/**
+ * GET /api/dataset/:datasetId/annotation-summary
+ *
+ * Returns annotation progress summary for a dataset.
+ */
+router.get('/:datasetId/annotation-summary', authenticateToken, requirePermission('viewDatasets'), getAnnotationSummary);
 
 /**
  * GET /api/dataset/:datasetId/detected-classes

@@ -6,6 +6,7 @@ const { requirePermission } = require('../middleware/authorizationMiddleware');
 const {
   getUnlabeledImages,
   getUnannotatedImages,
+  getDatasetImages,
   getAnnotations,
   createAnnotation,
   updateAnnotation,
@@ -32,6 +33,9 @@ const {
 // Image Management
 // GET /api/dataset/:datasetId/unlabeled-images
 router.get('/:datasetId/unlabeled-images', authenticateToken, requirePermission('viewDatasets'), getUnlabeledImages);
+
+// GET /api/dataset/:datasetId/images - Full image list with optional status filter
+router.get('/:datasetId/images', authenticateToken, requirePermission('viewDatasets'), getDatasetImages);
 
 // GET /api/dataset/:datasetId/images/unannotated
 router.get('/:datasetId/images/unannotated', authenticateToken, requirePermission('viewDatasets'), getUnannotatedImages);

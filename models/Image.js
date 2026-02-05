@@ -55,6 +55,14 @@ const imageSchema = new mongoose.Schema({
     default: false
   },
 
+  // Annotation state
+  // hasAnnotations = true means at least one non-deleted Annotation document exists for this image
+  hasAnnotations: {
+    type: Boolean,
+    required: true,
+    default: false
+  },
+
   // Class IDs present in this image (for labeled datasets)
   // Array of numeric class IDs (e.g., [0, 1, 2]) extracted from label .txt files
   // Used to find representative images for each class during class name mapping

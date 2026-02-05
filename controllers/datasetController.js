@@ -462,6 +462,55 @@ const getDatasetStatus = async (req, res) => {
 };
 
 /**
+ * GET /api/dataset/:datasetId/annotation-summary
+ *
+ * Returns high-level annotation progress summary for a dataset.
+ * This endpoint is additive and does not change existing behavior.
+ */
+const getAnnotationSummary = async (req, res) => {
+  try {
+    const { datasetId } = req.params;
+
+    // Validate datasetId
+    if (!mongoose.Types.ObjectId.isValid(datasetId)) {
+      return res.status(404).json({
+        error: 'Dataset not found',
+        datasetId
+      });
+    }
+
+    // Find dataset
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return res.status(404).json({
+        error: 'Dataset not found',
+        datasetId
+      });
+    }
+
+    // Use Image model to compute annotation-based counts (independent of hasLabels)
+    const Image = require('../models/Image');
+
+    const totalImages = await Image.countDocuments({ datasetId });
+    const annotatedImages = await Image.countDocuments({ datasetId, hasAnnotations: true });
+    const unannotatedImages = totalImages - annotatedImages;
+
+    return res.status(200).json({
+      datasetId,
+      totalImages,
+      annotatedImages,
+      unannotatedImages
+    });
+  } catch (error) {
+    console.error('Get annotation summary error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+};
+
+/**
  * GET /api/dataset/:datasetId/folders
  * 
  * Returns folder summary with images/labels counts and size statistics
@@ -1636,6 +1685,7 @@ module.exports = {
   listDatasets,
   getDataset,
   getDatasetStatus,
+  getAnnotationSummary,
   getDatasetFolders,
   getDatasetFiles,
   getFileThumbnail,

@@ -167,6 +167,91 @@ const getUnlabeledImages = async (req, res) => {
 };
 
 /**
+ * GET /api/dataset/:datasetId/images
+ *
+ * Get all images for a dataset with optional status filter.
+ * This endpoint is additive and does not change existing behavior of getUnlabeledImages.
+ *
+ * Query params:
+ * - status: 'all' | 'unannotated' | 'annotated' (default: 'all')
+ */
+const getDatasetImages = async (req, res) => {
+  try {
+    const { datasetId } = req.params;
+    const { status = 'all' } = req.query;
+
+    // Validate datasetId
+    if (!mongoose.Types.ObjectId.isValid(datasetId)) {
+      return sendNotFoundError(res, 'Dataset', datasetId);
+    }
+
+    // Check dataset exists
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return sendNotFoundError(res, 'Dataset', datasetId);
+    }
+
+    // Build base filter
+    const imageFilter = { datasetId };
+
+    // Apply optional annotation status filter (based on hasAnnotations flag)
+    if (status === 'annotated') {
+      imageFilter.hasAnnotations = true;
+    } else if (status === 'unannotated') {
+      imageFilter.hasAnnotations = false;
+    }
+
+    // Fetch images in a stable order (by createdAt ascending, then _id)
+    const images = await Image.find(imageFilter)
+      .sort({ createdAt: 1, _id: 1 })
+      .lean();
+
+    // Format response with signed URLs
+    const formatted = await Promise.all(
+      images.map(async (img) => {
+        const imagePath = img.storedPath;
+
+        const imageUrl = await storageAdapter.generateSignedUrl(imagePath, 3600, {
+          datasetId: datasetId.toString()
+        });
+
+        const thumbnailPath = imagePath.replace(/^images\//, 'thumbnails/');
+        const datasetPath = storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version);
+        const fullThumbnailPath = path.join(datasetPath, thumbnailPath);
+        const thumbnailExists = await storageAdapter.exists(fullThumbnailPath);
+
+        const thumbnailUrl = await storageAdapter.generateSignedUrl(
+          thumbnailExists ? thumbnailPath : imagePath,
+          3600,
+          { datasetId: datasetId.toString() }
+        );
+
+        return {
+          id: img._id,
+          filename: img.filename,
+          url: imageUrl,
+          thumbnailUrl,
+          folder: img.folder,
+          size: img.size,
+          width: img.width,
+          height: img.height,
+          hasAnnotations: img.hasAnnotations === true,
+          hasLabels: img.hasLabels === true
+        };
+      })
+    );
+
+    return res.status(200).json({
+      images: formatted,
+      total: formatted.length
+    });
+  } catch (error) {
+    console.error('Error getting dataset images:', error);
+    return sendError(res, 500, 'Internal Server Error', error.message);
+  }
+};
+
+/**
  * GET /api/dataset/:datasetId/annotations
  * 
  * Get annotations for a dataset (optionally filtered by imageId)
@@ -313,6 +398,12 @@ const createAnnotation = async (req, res) => {
 
     await annotation.save();
 
+    // Update image annotation state (this image now has at least one annotation)
+    if (image.hasAnnotations !== true) {
+      image.hasAnnotations = true;
+      await image.save();
+    }
+
     // Format response
     return res.status(200).json({
       annotation: {
@@ -438,6 +529,22 @@ const deleteAnnotation = async (req, res) => {
     annotation.deletedAt = new Date();
     await annotation.save();
 
+    // After deletion, check if any active annotations remain for this image
+    const remainingCount = await Annotation.countDocuments({
+      datasetId,
+      imageId: annotation.imageId,
+      deletedAt: null
+    });
+
+    if (remainingCount === 0) {
+      // Safely update image annotation state
+      const image = await Image.findById(annotation.imageId);
+      if (image && image.hasAnnotations !== false) {
+        image.hasAnnotations = false;
+        await image.save();
+      }
+    }
+
     return res.status(200).json({
       message: 'Annotation deleted',
       annotationId: annotationId
@@ -552,6 +659,17 @@ const batchSaveAnnotations = async (req, res) => {
           },
           {
             $set: { deletedAt: new Date() }
+          },
+          { session }
+        );
+
+        // After soft-deleting, ensure hasAnnotations is true for all affected images
+        await Image.updateMany(
+          {
+            _id: { $in: uniqueImageIds }
+          },
+          {
+            $set: { hasAnnotations: true }
           },
           { session }
         );
@@ -848,6 +966,7 @@ const serveSignedImage = async (req, res) => {
 module.exports = {
   getUnlabeledImages,
   getUnannotatedImages,
+  getDatasetImages,
   getAnnotations,
   createAnnotation,
   updateAnnotation,
