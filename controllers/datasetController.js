@@ -739,9 +739,11 @@ const getFileThumbnail = async (req, res) => {
 
 /**
  * GET /api/dataset/:datasetId/file/:fileId
- * 
- * Serves original full-size image (never thumbnail)
- * fileId can be storedName, file _id, or Image document _id
+ *
+ * Serves dataset file by type:
+ * - Image: original full-size image (Content-Type by extension)
+ * - Label (e.g. .txt): raw file content as text/plain; charset=utf-8
+ * fileId can be storedName, file _id, or (for images) Image document _id
  */
 const getFile = async (req, res) => {
   try {
@@ -820,33 +822,42 @@ const getFile = async (req, res) => {
       }
     }
 
-    if (!file || file.type !== 'image') {
+    if (!file) {
       return res.status(404).json({
-        error: 'Image file not found'
+        error: 'File not found'
       });
     }
 
-    // ✅ Always serve the original file (never thumbnail)
+    // ✅ Resolve path and verify file exists
     const originalFilePath = path.join(dataset.storagePath, file.storedPath);
-
-    // ✅ Verify file exists before serving
     if (!(await storageAdapter.exists(originalFilePath))) {
       return res.status(404).json({
-        error: 'Image file not found'
+        error: 'File not found'
       });
     }
 
-    // ✅ Read file content using storageAdapter
     const fileBuffer = await storageAdapter.readFile(originalFilePath);
 
-    // ✅ Set appropriate content type for image
-    const ext = path.extname(file.storedName).toLowerCase();
-    const contentType = ext === '.png' ? 'image/png' : 
-                       ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 
-                       'image/jpeg';
+    // ✅ Branch by file type: image (binary) or label (text/plain)
+    if (file.type === 'label') {
+      res.set('Content-Type', 'text/plain; charset=utf-8');
+      res.send(fileBuffer);
+      return;
+    }
 
-    res.set('Content-Type', contentType);
-    res.send(fileBuffer);
+    if (file.type === 'image') {
+      const ext = path.extname(file.storedName).toLowerCase();
+      const contentType = ext === '.png' ? 'image/png' :
+                         ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' :
+                         'image/jpeg';
+      res.set('Content-Type', contentType);
+      res.send(fileBuffer);
+      return;
+    }
+
+    return res.status(404).json({
+      error: 'File not found'
+    });
 
   } catch (error) {
     console.error('Get file error:', error);

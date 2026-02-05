@@ -5,7 +5,9 @@ const { requirePermission } = require('../middleware/authorizationMiddleware');
 const {
   getDashboardOverview,
   getDashboardActivity,
-  getDashboardProjects
+  getDashboardProjects,
+  getProjectSummary,
+  deleteProject
 } = require('../controllers/dashboardController');
 
 /**
@@ -22,6 +24,14 @@ router.get('/activity', authenticateToken, requirePermission('viewProjects'), ge
 
 // GET /api/dashboard/projects
 router.get('/projects', authenticateToken, requirePermission('viewProjects'), getDashboardProjects);
+
+// GET /api/dashboard/project - Single project summary (counts for delete confirmation modal)
+// Query: company, project
+router.get('/project', authenticateToken, requirePermission('viewProjects'), getProjectSummary);
+
+// DELETE /api/dashboard/project - Delete entire project (all datasets, models, training, inference)
+// Query or body: company, project. Requires deleteProjects.
+router.delete('/project', authenticateToken, requirePermission('deleteProjects'), deleteProject);
 
 module.exports = router;
 
