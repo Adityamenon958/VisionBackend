@@ -239,6 +239,34 @@ async function deactivateAndRemoveFromWorkspace(userId) {
   }
 }
 
+/**
+ * Delete project row from Supabase (so project name disappears from frontend UI).
+ * Assumes a table named "projects" with columns "company" and "project" (or "name").
+ * If your Supabase schema uses different table/column names, update this or call from frontend after our API succeeds.
+ *
+ * @param {string} company - Company identifier
+ * @param {string} project - Project name
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+async function deleteProjectRow(company, project) {
+  try {
+    const supabase = getSupabaseClient();
+    const { error } = await supabase
+      .from('projects')
+      .delete()
+      .eq('company', company)
+      .eq('project', project);
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (error) {
+    console.error('Error deleting project row from Supabase:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
 module.exports = {
   getSupabaseClient,
   getUserFromToken,
@@ -246,5 +274,6 @@ module.exports = {
   updateUserRole,
   getUserProfile,
   updateUserActive,
-  deactivateAndRemoveFromWorkspace
+  deactivateAndRemoveFromWorkspace,
+  deleteProjectRow
 };
