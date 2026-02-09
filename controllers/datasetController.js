@@ -10,6 +10,8 @@ const { preprocessingQueue } = require('../queue');
 const { generateDataYaml } = require('../utils/yoloConverter');
 const auditService = require('../services/auditService');
 const { buildWorkspaceFilter, validateWorkspaceAccess, canAccessAllWorkspaces } = require('../utils/workspaceScoping');
+const { validateProjectName, validateCompanyName } = require('../middleware/inputValidator');
+const { sanitizeString } = require('../middleware/xssSanitizer');
 
 /**
  * Dataset Controller - Handles dataset upload and retrieval
@@ -40,6 +42,28 @@ const uploadDataset = async (req, res) => {
       });
     }
 
+    // ✅ Defense-in-depth: Validate and sanitize inputs before DB write
+    const companyValidation = validateCompanyName(company);
+    if (!companyValidation.valid) {
+      return res.status(400).json({
+        error: 'Invalid input',
+        message: `company: ${companyValidation.error}`
+      });
+    }
+
+    const projectValidation = validateProjectName(project);
+    if (!projectValidation.valid) {
+      return res.status(400).json({
+        error: 'Invalid input',
+        message: `project: ${projectValidation.error}`
+      });
+    }
+
+    // ✅ Sanitize again before DB write (defense-in-depth)
+    const sanitizedCompany = sanitizeString(company);
+    const sanitizedProject = sanitizeString(project);
+    const sanitizedVersion = version ? sanitizeString(version) : 'v1';
+
     // ✅ Validate workspace access (for non-platform-admin users)
     if (!canAccessAllWorkspaces(req.user)) {
       const accessValidation = validateWorkspaceAccess(req.user, company);
@@ -62,10 +86,10 @@ const uploadDataset = async (req, res) => {
 
     // ✅ Create Dataset document in MongoDB with initial status
     const dataset = new Dataset({
-      company,
-      project,
-      version,
-      storagePath: storageAdapter.buildDatasetPath(company, project, version),
+      company: sanitizedCompany,
+      project: sanitizedProject,
+      version: sanitizedVersion,
+      storagePath: storageAdapter.buildDatasetPath(sanitizedCompany, sanitizedProject, sanitizedVersion),
       status: 'uploaded',
       uploadErrors: [],
       files: [] // ✅ Initialize files manifest array
@@ -103,10 +127,12 @@ const uploadDataset = async (req, res) => {
     if (fileMetaRaw) {
       try {
         const fileMeta = JSON.parse(fileMetaRaw);
-        // Build map for fast lookup
+        // Build map for fast lookup (sanitize folder names)
         for (const m of fileMeta) {
           if (m && m.originalName) {
-            fileMetaMap[m.originalName] = m.folder || 'dataset';
+            const folder = m.folder || 'dataset';
+            // ✅ Sanitize folder name before using it
+            fileMetaMap[m.originalName] = sanitizeString(folder);
           }
         }
       } catch (e) {
@@ -123,8 +149,8 @@ const uploadDataset = async (req, res) => {
     const uploadErrors = [];
 
     // ✅ Ensure storage directories exist
-    const imagesPath = storageAdapter.buildImagesPath(company, project, version);
-    const labelsPath = storageAdapter.buildLabelsPath(company, project, version);
+    const imagesPath = storageAdapter.buildImagesPath(sanitizedCompany, sanitizedProject, sanitizedVersion);
+    const labelsPath = storageAdapter.buildLabelsPath(sanitizedCompany, sanitizedProject, sanitizedVersion);
     await storageAdapter.ensureDir(imagesPath);
     await storageAdapter.ensureDir(labelsPath);
 
@@ -1030,6 +1056,27 @@ const updateDataset = async (req, res) => {
       });
     }
 
+    // ✅ Defense-in-depth: Validate and sanitize inputs before DB write
+    if (company) {
+      const companyValidation = validateCompanyName(company);
+      if (!companyValidation.valid) {
+        return res.status(400).json({
+          error: 'Invalid input',
+          message: `company: ${companyValidation.error}`
+        });
+      }
+    }
+
+    if (project) {
+      const projectValidation = validateProjectName(project);
+      if (!projectValidation.valid) {
+        return res.status(400).json({
+          error: 'Invalid input',
+          message: `project: ${projectValidation.error}`
+        });
+      }
+    }
+
     // ✅ If updating company, validate workspace access to new company
     if (company && company !== dataset.company && !canAccessAllWorkspaces(req.user)) {
       const accessValidation = validateWorkspaceAccess(req.user, company);
@@ -1041,13 +1088,13 @@ const updateDataset = async (req, res) => {
       }
     }
 
-    // ✅ Update fields if provided
+    // ✅ Update fields if provided (sanitize before DB write)
     if (company) {
-      dataset.company = company;
+      dataset.company = sanitizeString(company);
     }
     
     if (project) {
-      dataset.project = project;
+      dataset.project = sanitizeString(project);
     }
 
     // ✅ Update storage path if company or project changed

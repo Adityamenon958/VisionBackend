@@ -3,6 +3,8 @@ const Category = require('../models/Category');
 const Annotation = require('../models/Annotation');
 const Dataset = require('../models/Dataset');
 const { validateColor, validateName } = require('../utils/categoryValidator');
+const { validateClassName, validateDescription } = require('../middleware/inputValidator');
+const { sanitizeString } = require('../middleware/xssSanitizer');
 const { sendError, sendValidationError, sendNotFoundError } = require('../utils/errors');
 
 /**
@@ -100,10 +102,24 @@ const createCategory = async (req, res) => {
       return sendValidationError(res, 'name', nameValidation.error);
     }
 
+    // ✅ Defense-in-depth: Additional XSS validation
+    const classNameValidation = validateClassName(name);
+    if (!classNameValidation.valid) {
+      return sendValidationError(res, 'name', classNameValidation.error);
+    }
+
     // Validate color
     const colorValidation = validateColor(color);
     if (!colorValidation.valid) {
       return sendValidationError(res, 'color', colorValidation.error);
+    }
+
+    // ✅ Defense-in-depth: Validate description if provided
+    if (description) {
+      const descValidation = validateDescription(description);
+      if (!descValidation.valid) {
+        return sendValidationError(res, 'description', descValidation.error);
+      }
     }
 
     // Check name uniqueness within dataset
@@ -125,12 +141,16 @@ const createCategory = async (req, res) => {
 
     const nextOrder = maxOrder ? maxOrder.order + 1 : 0;
 
+    // ✅ Sanitize before DB write (defense-in-depth)
+    const sanitizedName = sanitizeString(trimmedName);
+    const sanitizedDescription = description ? sanitizeString(description) : '';
+
     // Create category
     const category = new Category({
       datasetId,
-      name: trimmedName,
+      name: sanitizedName,
       color,
-      description: description || '',
+      description: sanitizedDescription,
       order: nextOrder,
       createdBy: SYSTEM_USER_ID
     });
@@ -182,6 +202,12 @@ const updateCategory = async (req, res) => {
         return sendValidationError(res, 'name', nameValidation.error);
       }
 
+      // ✅ Defense-in-depth: Additional XSS validation
+      const classNameValidation = validateClassName(name);
+      if (!classNameValidation.valid) {
+        return sendValidationError(res, 'name', classNameValidation.error);
+      }
+
       const trimmedName = name.trim();
 
       // Check name uniqueness (if changed)
@@ -201,13 +227,16 @@ const updateCategory = async (req, res) => {
         session.startTransaction();
 
         try {
+          // ✅ Sanitize before DB write (defense-in-depth)
+          const sanitizedName = sanitizeString(trimmedName);
+
           await Annotation.updateMany(
             { categoryId, deletedAt: null },
-            { $set: { categoryName: trimmedName } },
+            { $set: { categoryName: sanitizedName } },
             { session }
           );
 
-          category.name = trimmedName;
+          category.name = sanitizedName;
           await category.save({ session });
 
           await session.commitTransaction();
@@ -231,7 +260,12 @@ const updateCategory = async (req, res) => {
 
     // Update description if provided
     if (description !== undefined) {
-      category.description = description;
+      // ✅ Defense-in-depth: Validate and sanitize description
+      const descValidation = validateDescription(description);
+      if (!descValidation.valid) {
+        return sendValidationError(res, 'description', descValidation.error);
+      }
+      category.description = sanitizeString(description);
     }
 
     // Save if not already saved in transaction

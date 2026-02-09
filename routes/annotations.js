@@ -40,8 +40,11 @@ router.get('/:datasetId/images', authenticateToken, requirePermission('viewDatas
 // GET /api/dataset/:datasetId/images/unannotated
 router.get('/:datasetId/images/unannotated', authenticateToken, requirePermission('viewDatasets'), getUnannotatedImages);
 
-// GET /api/dataset/:datasetId/image-signed - Serve image with signed URL verification
+// GET /api/dataset/:datasetId/image-signed - Legacy alias for image route
 router.get('/:datasetId/image-signed', authenticateToken, requirePermission('viewDatasets'), serveSignedImage);
+
+// GET /api/dataset/:datasetId/image - Serve image by path (preferred)
+router.get('/:datasetId/image', authenticateToken, requirePermission('viewDatasets'), serveSignedImage);
 
 // Annotation CRUD
 // GET /api/dataset/:datasetId/annotations

@@ -385,13 +385,17 @@ const createAnnotation = async (req, res) => {
       return sendNotFoundError(res, 'Category', categoryId);
     }
 
+    // ✅ Defense-in-depth: Sanitize categoryName before DB write
+    // (Even though it comes from Category which is already sanitized)
+    const sanitizedCategoryName = sanitizeString(category.name);
+
     // Create annotation
     const annotation = new Annotation({
       datasetId,
       imageId,
       bbox,
       categoryId,
-      categoryName: category.name, // Denormalize category name
+      categoryName: sanitizedCategoryName, // Denormalize category name
       state: 'draft',
       createdBy: SYSTEM_USER_ID
     });
@@ -478,7 +482,8 @@ const updateAnnotation = async (req, res) => {
       }
 
       annotation.categoryId = categoryId;
-      annotation.categoryName = category.name; // Update denormalized category name
+      // ✅ Defense-in-depth: Sanitize categoryName before DB write
+      annotation.categoryName = sanitizeString(category.name); // Update denormalized category name
     }
 
     // Update timestamps
@@ -683,12 +688,15 @@ const batchSaveAnnotations = async (req, res) => {
         // ✅ Always create new annotation (batch save is for creating new annotations only)
         // Updates should use PUT /api/dataset/:datasetId/annotations/:annotationId endpoint
         // This prevents overwriting annotations with the same category on the same image
+        // ✅ Defense-in-depth: Sanitize categoryName before DB write
+        const sanitizedCategoryName = sanitizeString(category.name);
+
         const annotation = new Annotation({
           datasetId,
           imageId: ann.imageId,
           bbox: ann.bbox,
           categoryId: ann.categoryId,
-          categoryName: category.name,
+          categoryName: sanitizedCategoryName,
           state: 'draft',
           createdBy: SYSTEM_USER_ID
         });
@@ -878,33 +886,30 @@ const convertAnnotationsToYOLO = async (req, res) => {
 /**
  * GET /api/dataset/:datasetId/image-signed
  * 
- * Serve image file with signed URL verification
- * This endpoint validates the signed URL token and serves the image
+ * Serve image file by path.
+ * 
+ * Security:
+ * - Auth and permissions are enforced by route middleware.
+ * - Path traversal is prevented by checking the resolved path stays under the
+ *   dataset root directory.
+ * 
+ * We no longer require or validate signed URL tokens here.
  */
 const serveSignedImage = async (req, res) => {
   try {
     const { datasetId } = req.params;
-    const { path: filePath, expires, signature } = req.query;
+    const { path: filePath } = req.query;
 
     // Validate required parameters
-    if (!filePath || !expires || !signature) {
+    if (!filePath) {
       return res.status(400).json({
         error: 'Bad Request',
-        message: 'Missing required parameters: path, expires, signature'
+        message: 'Missing required parameter: path'
       });
     }
 
     // Decode file path
     const decodedPath = decodeURIComponent(filePath);
-
-    // Verify signed URL
-    const expiresAt = parseInt(expires);
-    if (!storageAdapter.verifySignedUrl(decodedPath, expiresAt, signature)) {
-      return res.status(403).json({
-        error: 'Forbidden',
-        message: 'Invalid or expired signed URL'
-      });
-    }
 
     // Validate datasetId
     if (!mongoose.Types.ObjectId.isValid(datasetId)) {

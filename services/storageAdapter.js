@@ -565,34 +565,22 @@ class StorageAdapter {
    */
   async generateSignedUrl(filePath, expiresInSeconds = 3600, options = {}) {
     if (this.mode === 'local') {
-      // ✅ For local storage, generate a token-based signed URL
-      // The token includes file path, expiration, and a simple hash for security
-      const crypto = require('crypto');
-      const baseUrl = process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
-      
-      // Create expiration timestamp
-      const expiresAt = Date.now() + (expiresInSeconds * 1000);
-      
-      // Create a simple signature (HMAC) for security
-      // In production, use a secret key from environment variable
-      const secret = process.env.SIGNED_URL_SECRET || 'default-secret-change-in-production';
-      const signature = crypto
-        .createHmac('sha256', secret)
-        .update(`${filePath}:${expiresAt}`)
-        .digest('hex')
-        .substring(0, 16); // Use first 16 chars for shorter URL
-      
-      // Encode file path for URL
+      // ✅ Local mode: do NOT use signed URLs anymore.
+      // We rely on auth/permission middleware and path validation only.
+      // Return relative API URLs so the frontend can prepend its own base.
+      // Encode file path for URL (relative to dataset root, e.g. images/train/...)
       const encodedPath = encodeURIComponent(filePath);
-      
+
       // If datasetId is provided, use image serving route (for annotation images)
       if (options.datasetId) {
-        return `${baseUrl}/api/dataset/${options.datasetId}/image-signed?path=${encodedPath}&expires=${expiresAt}&signature=${signature}`;
+        // Auth is enforced via middleware; no signature/expiry query params needed.
+        // Use the generic image endpoint (alias for legacy /image-signed).
+        return `/api/dataset/${options.datasetId}/image?path=${encodedPath}`;
       }
-      
-      // Generic signed URL endpoint (if needed for other use cases)
-      return `${baseUrl}/api/storage/signed?path=${encodedPath}&expires=${expiresAt}&signature=${signature}`;
-      
+
+      // Generic local URL (if needed) without signing
+      return `/api/storage/file?path=${encodedPath}`;
+
     } else if (this.mode === 'azure') {
       // ✅ For Azure Blob Storage, generate SAS URL
       const { containerName, blobName } = this._parseAzurePath(filePath);
@@ -613,31 +601,6 @@ class StorageAdapter {
     throw new Error(`Unsupported storage mode: ${this.mode}`);
   }
 
-  /**
-   * Verify and decode signed URL parameters
-   * 
-   * @param {string} filePath - File path from URL
-   * @param {number} expiresAt - Expiration timestamp
-   * @param {string} signature - Signature hash
-   * @returns {boolean} True if signature is valid and not expired
-   */
-  verifySignedUrl(filePath, expiresAt, signature) {
-    // Check expiration
-    if (Date.now() > expiresAt) {
-      return false;
-    }
-    
-    // Verify signature
-    const crypto = require('crypto');
-    const secret = process.env.SIGNED_URL_SECRET || 'default-secret-change-in-production';
-    const expectedSignature = crypto
-      .createHmac('sha256', secret)
-      .update(`${filePath}:${expiresAt}`)
-      .digest('hex')
-      .substring(0, 16);
-    
-    return signature === expectedSignature;
-  }
 }
 
 // ✅ Export singleton instance
