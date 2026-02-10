@@ -1,7 +1,6 @@
 const { isValidRole } = require('../utils/permissions');
 const { validateRoleAssignment } = require('../middleware/authorizationMiddleware');
 const { getUserProfile, updateUserActive, deactivateAndRemoveFromWorkspace } = require('../services/supabaseService');
-const { sanitizeString } = require('../middleware/xssSanitizer');
 
 /**
  * User Controller
@@ -100,11 +99,8 @@ const updateUserRoleHandler = async (req, res) => {
       });
     }
 
-    // ✅ Defense-in-depth: Sanitize role string (even though it's validated against allowlist)
-    const sanitizedRole = sanitizeString(newRole);
-
     // Validate role value
-    if (!isValidRole(sanitizedRole)) {
+    if (!isValidRole(newRole)) {
       return res.status(400).json({
         success: false,
         error: 'Invalid role',
@@ -114,7 +110,7 @@ const updateUserRoleHandler = async (req, res) => {
     }
 
     // Validate role assignment permission
-    const assignmentValidation = validateRoleAssignment(currentUserRole, sanitizedRole);
+    const assignmentValidation = validateRoleAssignment(currentUserRole, newRole);
     if (!assignmentValidation.allowed) {
       return res.status(403).json({
         success: false,
@@ -159,7 +155,7 @@ const updateUserRoleHandler = async (req, res) => {
       success: true,
       message: 'Role assignment authorized. Frontend should update role in Supabase.',
       userId: userId,
-      newRole: sanitizedRole,
+      newRole: newRole,
       note: 'Backend has validated permissions. Frontend must update the role in Supabase profiles table.'
     });
 

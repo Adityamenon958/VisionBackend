@@ -11,7 +11,6 @@ const dashboardRoutes = require('./routes/dashboard');
 const analyticsRoutes = require('./routes/analytics');
 const auditRoutes = require('./routes/audit');
 const { authenticateToken } = require('./middleware/authMiddleware');
-const { xssSanitizationMiddleware } = require('./middleware/xssSanitizer');
 
 /**
  * Main Server File
@@ -29,11 +28,6 @@ app.use(express.json());
 
 // ✅ Middleware: Parse URL-encoded form data
 app.use(express.urlencoded({ extended: true }));
-
-// ✅ Global XSS Sanitization Middleware
-// Sanitizes all inputs (body, query, params, headers) before they reach route handlers
-// This prevents XSS attacks by escaping HTML entities and blocking dangerous patterns
-app.use(xssSanitizationMiddleware);
 
 // --- production-safe CORS (replace existing CORS middleware) ---
 const allowedOrigin = process.env.CORS_ORIGIN || '*'; // set in Azure later

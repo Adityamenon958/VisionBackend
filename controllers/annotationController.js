@@ -385,17 +385,13 @@ const createAnnotation = async (req, res) => {
       return sendNotFoundError(res, 'Category', categoryId);
     }
 
-    // ✅ Defense-in-depth: Sanitize categoryName before DB write
-    // (Even though it comes from Category which is already sanitized)
-    const sanitizedCategoryName = sanitizeString(category.name);
-
     // Create annotation
     const annotation = new Annotation({
       datasetId,
       imageId,
       bbox,
       categoryId,
-      categoryName: sanitizedCategoryName, // Denormalize category name
+      categoryName: category.name, // Denormalize category name
       state: 'draft',
       createdBy: SYSTEM_USER_ID
     });
@@ -482,8 +478,8 @@ const updateAnnotation = async (req, res) => {
       }
 
       annotation.categoryId = categoryId;
-      // ✅ Defense-in-depth: Sanitize categoryName before DB write
-      annotation.categoryName = sanitizeString(category.name); // Update denormalized category name
+      // Update denormalized category name
+      annotation.categoryName = category.name;
     }
 
     // Update timestamps
@@ -688,15 +684,12 @@ const batchSaveAnnotations = async (req, res) => {
         // ✅ Always create new annotation (batch save is for creating new annotations only)
         // Updates should use PUT /api/dataset/:datasetId/annotations/:annotationId endpoint
         // This prevents overwriting annotations with the same category on the same image
-        // ✅ Defense-in-depth: Sanitize categoryName before DB write
-        const sanitizedCategoryName = sanitizeString(category.name);
-
         const annotation = new Annotation({
           datasetId,
           imageId: ann.imageId,
           bbox: ann.bbox,
           categoryId: ann.categoryId,
-          categoryName: sanitizedCategoryName,
+          categoryName: category.name,
           state: 'draft',
           createdBy: SYSTEM_USER_ID
         });
