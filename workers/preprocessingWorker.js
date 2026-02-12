@@ -16,10 +16,11 @@ const mongoose = require('mongoose');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 const sharp = require('sharp');
-const { preprocessingQueue } = require('../queue');
+const { preprocessingQueue, augmentationQueue } = require('../queue');
 const Dataset = require('../models/Dataset');
 const Image = require('../models/Image');
 const storageAdapter = require('../services/storageAdapter');
+const { processAugmentationJob } = require('./augmentationWorker');
 
 /**
  * Preprocessing Worker - Background Job Processor
@@ -770,7 +771,7 @@ const startWorker = async () => {
     });
   });
 
-  // ✅ Process jobs from the queue
+  // ✅ Process preprocessing jobs from the queue
   preprocessingQueue.process(1, async (job) => {
     console.log('[WORKER-JOB] Received preprocessing job', {
       jobId: job.id,
@@ -779,7 +780,35 @@ const startWorker = async () => {
     return await processPreprocessingJob(job);
   });
 
-  console.log('✅ Preprocessing worker started. Waiting for jobs...');
+  // ✅ Ensure augmentation queue readiness (so we can process augmentation jobs in the same worker)
+  await augmentationQueue.isReady();
+  console.log('[AUGMENT-QUEUE] augmentationQueue is ready and listening');
+
+  augmentationQueue.on('error', (err) => {
+    console.error('[AUGMENT-QUEUE] Redis/Queue error', err);
+  });
+
+  augmentationQueue.on('waiting', (jobId) => {
+    console.log('[AUGMENT-QUEUE] Job waiting', jobId);
+  });
+
+  augmentationQueue.on('active', (job) => {
+    console.log('[AUGMENT-QUEUE] Job active', {
+      jobId: job.id,
+      datasetId: job.data?.datasetId,
+    });
+  });
+
+  // ✅ Process augmentation jobs from the augmentation queue
+  augmentationQueue.process(1, async (job) => {
+    console.log('[AUGMENT-WORKER] Received augmentation job', {
+      jobId: job.id,
+      datasetId: job.data?.datasetId,
+    });
+    return processAugmentationJob(job);
+  });
+
+  console.log('✅ Preprocessing worker started. Waiting for preprocessing and augmentation jobs...');
 };
 
 // ✅ Global error handlers

@@ -57,6 +57,10 @@ function initQueues() {
     redis: redisConfig,
   });
 
+  const augmentationQueue = new Bull('augment-dataset', {
+    redis: redisConfig,
+  });
+
   const trainingQueue = new Bull('train-model', {
     redis: redisConfig,
   });
@@ -77,6 +81,14 @@ function initQueues() {
     console.error(`❌ Preprocessing job ${job?.id} failed:`, err?.message)
   );
 
+  augmentationQueue.on('completed', (job) =>
+    console.log(`✅ Augmentation job ${job.id} completed`)
+  );
+
+  augmentationQueue.on('failed', (job, err) =>
+    console.error(`❌ Augmentation job ${job?.id} failed:`, err?.message)
+  );
+
   trainingQueue.on('completed', (job) =>
     console.log(`✅ Training job ${job.id} completed`)
   );
@@ -95,6 +107,7 @@ function initQueues() {
 
   queues = {
     preprocessingQueue,
+    augmentationQueue,
     trainingQueue,
     inferenceQueue,
   };
@@ -123,6 +136,9 @@ module.exports = {
   },
   get preprocessingQueue() {
     return getQueues().preprocessingQueue;
+  },
+  get augmentationQueue() {
+    return getQueues().augmentationQueue;
   },
   get inferenceQueue() {
     return getQueues().inferenceQueue;

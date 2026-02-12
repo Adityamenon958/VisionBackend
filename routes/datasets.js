@@ -10,6 +10,9 @@ const {
   uploadDataset,
   getDataset,
   getDatasetStatus,
+  getActiveDataset,
+  startAugmentation,
+  cancelAugmentation,
   getAnnotationSummary,
   getDatasetFolders,
   getDatasetFiles,
@@ -120,6 +123,38 @@ router.post('/upload',
   },
   uploadDataset
 );
+
+/**
+ * POST /api/dataset/:datasetId/augment
+ *
+ * Starts augmentation for a dataset using the augmentation worker.
+ */
+router.post(
+  '/:datasetId/augment',
+  authenticateToken,
+  requirePermission('uploadDatasets'),
+  startAugmentation
+);
+
+/**
+ * POST /api/dataset/:datasetId/augment/cancel
+ *
+ * Cancels a running augmentation job for a dataset (best-effort).
+ */
+router.post(
+  '/:datasetId/augment/cancel',
+  authenticateToken,
+  requirePermission('uploadDatasets'),
+  cancelAugmentation
+);
+
+/**
+ * GET /api/dataset/active/:company/:project
+ * 
+ * Returns the active dataset for a given company/project.
+ * Useful for file browser and training to resolve which dataset version to use.
+ */
+router.get('/active/:company/:project', authenticateToken, requirePermission('viewDatasets'), getActiveDataset);
 
 /**
  * GET /api/dataset/:datasetId/status

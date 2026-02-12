@@ -398,6 +398,12 @@ const createAnnotation = async (req, res) => {
 
     await annotation.save();
 
+    console.log('[ANNOTATION] annotation_saved', {
+      datasetId: datasetId.toString(),
+      imageId: imageId.toString(),
+      annotationId: annotation._id.toString()
+    });
+
     // Update image annotation state (this image now has at least one annotation)
     if (image.hasAnnotations !== true) {
       image.hasAnnotations = true;
@@ -848,27 +854,44 @@ const convertAnnotationsToYOLO = async (req, res) => {
       categoryOrder: categoryOrder,
       categoryNames: categoryNames
     };
-
+    
     // Recalculate labeled/unlabeled counts
     const labeledCount = await Image.countDocuments({ datasetId, hasLabels: true });
     const unlabeledCount = await Image.countDocuments({ datasetId, hasLabels: false });
     
     dataset.labeledImages = labeledCount;
     dataset.unlabeledImages = unlabeledCount;
+
+    // ================= DATASET LIFECYCLE METADATA =================
+    // After converting annotations to YOLO labels, this dataset version becomes
+    // a labeled dataset with completed annotation flow.
+    dataset.datasetType = 'labeled';
+    dataset.annotationStatus = 'completed';
+    dataset.unlabeledImagesCount = 0;
+    // ==============================================================
     
     // ✅ Update dataset status to ready_to_train
     dataset.status = 'ready_to_train';
     
     await dataset.save();
 
-    return res.status(200).json({
+    const responsePayload = {
       converted: converted,
       labelFilesCreated: labelFilesCreated,
       emptyLabelsCreated: emptyLabelsCreated,
       status: 'ready_to_train',
       unannotatedImages: unannotatedImageList.length > 0 ? unannotatedImageList : undefined,
       message: 'Annotations converted to YOLO format. Dataset ready for training.'
+    };
+
+    console.log('[ANNOTATION] yolo_conversion_completed', {
+      datasetId: datasetId.toString(),
+      converted,
+      labelFilesCreated,
+      emptyLabelsCreated
     });
+
+    return res.status(200).json(responsePayload);
 
   } catch (error) {
     console.error('Error converting annotations to YOLO:', error);

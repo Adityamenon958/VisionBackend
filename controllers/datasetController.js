@@ -6,7 +6,7 @@ const mongoose = require('mongoose');
 const Dataset = require('../models/Dataset');
 const Category = require('../models/Category');
 const storageAdapter = require('../services/storageAdapter');
-const { preprocessingQueue } = require('../queue');
+const { preprocessingQueue, augmentationQueue } = require('../queue');
 const { generateDataYaml } = require('../utils/yoloConverter');
 const auditService = require('../services/auditService');
 const { buildWorkspaceFilter, validateWorkspaceAccess, canAccessAllWorkspaces } = require('../utils/workspaceScoping');
@@ -226,6 +226,24 @@ const uploadDataset = async (req, res) => {
     dataset.totalImages = totalImages;
     dataset.sizeBytes = totalSize;
     dataset.uploadErrors = uploadErrors;
+
+    // ================= DATASET LIFECYCLE METADATA =================
+    // Decide datasetType / annotationStatus / unlabeledImagesCount based on
+    // whether any label files (.txt) were uploaded for this dataset version.
+    const hasLabelFiles = dataset.files.some((f) => f.type === 'label');
+    if (hasLabelFiles) {
+      // Labeled dataset: labels are present at upload time.
+      dataset.datasetType = 'labeled';
+      dataset.annotationStatus = null; // Not used for labeled datasets
+      dataset.unlabeledImagesCount = 0;
+    } else {
+      // Unlabeled dataset: no label files yet; will go through annotation flow.
+      dataset.datasetType = 'unlabeled';
+      dataset.annotationStatus = 'pending';
+      dataset.unlabeledImagesCount = totalImages;
+    }
+    // ==============================================================
+
     dataset.status = 'queued'; // Ready for preprocessing
     await dataset.save();
 
@@ -384,6 +402,14 @@ const listDatasets = async (req, res) => {
       filter.project = project;
     }
 
+    // Optional: filter by isActive (default: show all, but frontend can filter)
+    // If includeInactive query param is not set, prefer active datasets
+    const includeInactive = req.query.includeInactive === 'true';
+    if (!includeInactive) {
+      // By default, only show active datasets (augmented dataset replaces original)
+      filter.isActive = true;
+    }
+
     // ✅ Find datasets matching filter
     const datasets = await Dataset.find(filter)
       .sort({ createdAt: -1 }) // Newest first
@@ -399,6 +425,9 @@ const listDatasets = async (req, res) => {
         totalImages: d.totalImages,
         sizeBytes: d.sizeBytes,
         status: d.status,
+        isActive: d.isActive,
+        isAugmented: d.isAugmented,
+        augmentationStatus: d.augmentationStatus,
         createdAt: d.createdAt,
         updatedAt: d.updatedAt
       })),
@@ -444,14 +473,25 @@ const getDatasetStatus = async (req, res) => {
 
     // ✅ Return minimal status info (good for frequent polling)
     res.json({
+      id: dataset._id.toString(),
       status: dataset.status,
+      version: dataset.version,
       totalImages: dataset.totalImages,
+      sizeBytes: dataset.sizeBytes,
+      createdAt: dataset.createdAt,
       uploadErrors: dataset.uploadErrors.length > 0 ? dataset.uploadErrors : undefined,
-      // Include progress info if processing
+      // Include preprocessing progress info if processing
       ...(dataset.status === 'processing' && {
         trainCount: dataset.trainCount,
         valCount: dataset.valCount
-      })
+      }),
+      // Augmentation fields for frontend polling
+      augmentation_status: dataset.augmentationStatus,
+      is_augmented: dataset.isAugmented,
+      backup_dataset_id: dataset.backupDatasetId || null,
+      augmentation_error: dataset.augmentationError || null,
+      // Active dataset flag (indicates if this is the active version for the project)
+      is_active: dataset.isActive
     });
 
   } catch (error) {
@@ -1682,11 +1722,299 @@ const createCategoriesFromClasses = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/dataset/:datasetId/augment
+ *
+ * Starts augmentation job for a dataset using the augmentation worker.
+ * This endpoint is additive and does not change existing upload/preprocessing flows.
+ */
+const startAugmentation = async (req, res) => {
+  try {
+    const { datasetId } = req.params;
+    const { options } = req.body || {};
+
+    if (!mongoose.Types.ObjectId.isValid(datasetId)) {
+      return res.status(400).json({
+        error: 'Invalid dataset ID',
+      });
+    }
+
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return res.status(404).json({
+        error: 'Dataset not found',
+      });
+    }
+
+    // Validate workspace access
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, dataset.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this dataset',
+        });
+      }
+    }
+
+    // Dataset must be in a ready state
+    if (dataset.status !== 'ready' && dataset.status !== 'ready_to_train') {
+      return res.status(400).json({
+        error: 'Dataset must be annotated/ready before augmentation',
+      });
+    }
+
+    if (dataset.augmentationStatus === 'running') {
+      return res.status(409).json({
+        error: 'Augmentation already running for this dataset',
+      });
+    }
+
+    // Prepare options with safe defaults
+    const targetTrainTotal =
+      typeof options?.targetTrainTotal === 'number' && options.targetTrainTotal > 0
+        ? options.targetTrainTotal
+        : 0; // 0 means "let worker decide" (may use augmentationMultiplier or default)
+    const valTestMultiplier =
+      typeof options?.valTestMultiplier === 'number' && options.valTestMultiplier > 0
+        ? options.valTestMultiplier
+        : 2;
+    const augmentationMultiplier =
+      typeof options?.augmentationMultiplier === 'number' && options.augmentationMultiplier > 0
+        ? options.augmentationMultiplier
+        : null;
+
+    // Enqueue augmentation job
+    const jobPayload = {
+      datasetId: dataset._id.toString(),
+      targetTrainTotal,
+      valTestMultiplier,
+      augmentationMultiplier,
+    };
+
+    const job = await augmentationQueue.add(jobPayload, {
+      attempts: 1,
+    });
+
+    console.log('[AUGMENTATION] augmentation_started', {
+      jobId: job.id,
+      datasetId: dataset._id.toString(),
+      company: dataset.company,
+      project: dataset.project,
+      version: dataset.version,
+      targetTrainTotal,
+      valTestMultiplier,
+      augmentationMultiplier
+    });
+
+    // Optimistically update dataset augmentationStatus to running for faster feedback
+    dataset.augmentationStatus = 'running';
+    await dataset.save();
+
+    return res.status(202).json({
+      datasetId: dataset._id.toString(),
+      message: 'Augmentation started',
+    });
+  } catch (error) {
+    console.error('Start augmentation error:', error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: error.message,
+    });
+  }
+};
+
+/**
+ * GET /api/dataset/active/:company/:project
+ * 
+ * Returns the active dataset for a given company/project.
+ * Useful for file browser and training to resolve which dataset version to use.
+ */
+const getActiveDataset = async (req, res) => {
+  try {
+    const { company, project } = req.params;
+
+    // ✅ Validate workspace access (for non-platform-admin users)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this workspace'
+        });
+      }
+    }
+
+    // ✅ Find active dataset for this company/project
+    const activeDataset = await Dataset.findOne({
+      company,
+      project,
+      deletedAt: null,
+      isActive: true
+    })
+      .sort({ createdAt: -1 }) // If multiple active (shouldn't happen), get newest
+      .select('-files'); // Exclude files array for performance
+
+    if (!activeDataset) {
+      return res.status(404).json({
+        error: 'No active dataset found',
+        company,
+        project
+      });
+    }
+
+    // ✅ Return active dataset info
+    res.json({
+      datasetId: activeDataset._id.toString(),
+      company: activeDataset.company,
+      project: activeDataset.project,
+      version: activeDataset.version,
+      status: activeDataset.status,
+      isAugmented: activeDataset.isAugmented,
+      augmentationStatus: activeDataset.augmentationStatus,
+      totalImages: activeDataset.totalImages,
+      sizeBytes: activeDataset.sizeBytes,
+      createdAt: activeDataset.createdAt
+    });
+
+  } catch (error) {
+    console.error('Get active dataset error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+};
+
+/**
+ * POST /api/dataset/:datasetId/augment/cancel
+ *
+ * Cancels a running augmentation job for a dataset (best-effort).
+ * - Removes the job from augmentationQueue if found.
+ * - Marks original dataset augmentationStatus as 'failed' with a cancellation message.
+ * - Marks any in-progress augmented datasets (backupDatasetId = original) as failed.
+ */
+const cancelAugmentation = async (req, res) => {
+  try {
+    const { datasetId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(datasetId)) {
+      return res.status(400).json({
+        error: 'Invalid dataset ID',
+      });
+    }
+
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return res.status(404).json({
+        error: 'Dataset not found',
+      });
+    }
+
+    // Validate workspace access
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, dataset.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this dataset',
+        });
+      }
+    }
+
+    // Only allow cancel if augmentation is currently marked as running
+    if (dataset.augmentationStatus !== 'running') {
+      return res.status(409).json({
+        error: 'No running augmentation to cancel for this dataset',
+      });
+    }
+
+    // Best-effort: find and remove the corresponding job from the augmentation queue
+    try {
+      const jobs = await augmentationQueue.getJobs(['waiting', 'active', 'delayed']);
+      const matchingJob = jobs.find(
+        (job) => job?.data?.datasetId === dataset._id.toString(),
+      );
+      if (matchingJob) {
+        await matchingJob.remove();
+        console.log('[AUGMENTATION] augmentation_cancelled_job_removed', {
+          jobId: matchingJob.id,
+          datasetId: dataset._id.toString(),
+        });
+      } else {
+        console.log('[AUGMENTATION] augmentation_cancel_requested_no_job_found', {
+          datasetId: dataset._id.toString(),
+        });
+      }
+    } catch (queueError) {
+      console.warn('[AUGMENTATION] Failed to inspect/remove augmentation job', {
+        datasetId: dataset._id.toString(),
+        error: queueError.message,
+      });
+      // Continue to mark datasets as cancelled even if queue inspection fails.
+    }
+
+    const cancellationMessage = 'Augmentation cancelled by user';
+
+    // Mark original dataset augmentation as failed (cancelled)
+    dataset.augmentationStatus = 'failed';
+    dataset.augmentationError = cancellationMessage;
+    await dataset.save();
+
+    // Mark any in-progress augmented datasets that were created from this dataset as failed
+    try {
+      const augmentedDatasets = await Dataset.find({
+        backupDatasetId: dataset._id,
+        status: 'processing',
+        augmentationStatus: 'running',
+      });
+
+      for (const aug of augmentedDatasets) {
+        aug.status = 'failed';
+        aug.augmentationStatus = 'failed';
+        aug.augmentationError = cancellationMessage;
+        await aug.save();
+      }
+
+      if (augmentedDatasets.length > 0) {
+        console.log('[AUGMENTATION] augmentation_cancelled_augmented_datasets_marked_failed', {
+          datasetId: dataset._id.toString(),
+          augmentedCount: augmentedDatasets.length,
+        });
+      }
+    } catch (markError) {
+      console.warn('[AUGMENTATION] Failed to mark augmented datasets as cancelled', {
+        datasetId: dataset._id.toString(),
+        error: markError.message,
+      });
+    }
+
+    console.log('[AUGMENTATION] augmentation_cancelled', {
+      datasetId: dataset._id.toString(),
+      company: dataset.company,
+      project: dataset.project,
+      version: dataset.version,
+    });
+
+    return res.status(200).json({
+      datasetId: dataset._id.toString(),
+      message: 'Augmentation cancelled (best-effort).',
+    });
+  } catch (error) {
+    console.error('Cancel augmentation error:', error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   uploadDataset,
   listDatasets,
   getDataset,
   getDatasetStatus,
+  getActiveDataset,
   getAnnotationSummary,
   getDatasetFolders,
   getDatasetFiles,
@@ -1697,5 +2025,7 @@ module.exports = {
   deleteDataset,
   deleteDatasetByVersion,
   getDetectedClasses,
-  createCategoriesFromClasses
+  createCategoriesFromClasses,
+  startAugmentation,
+  cancelAugmentation
 };

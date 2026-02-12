@@ -79,6 +79,27 @@ const datasetSchema = new mongoose.Schema({
     type: String // List of class names found in .txt files
   }],
 
+  // High-level dataset lifecycle metadata
+  // datasetType: 'labeled' datasets have labels present at upload or after annotation,
+  // 'unlabeled' datasets start without labels and can be annotated later.
+  datasetType: {
+    type: String,
+    enum: ['labeled', 'unlabeled'],
+    default: null
+  },
+  // Annotation status is only used for unlabeled datasets during the annotation flow.
+  // Labeled datasets should keep this as null.
+  annotationStatus: {
+    type: String,
+    enum: ['pending', 'completed'],
+    default: null
+  },
+  // Cached count of unlabeled images for this dataset version (for UI enable/disable logic).
+  unlabeledImagesCount: {
+    type: Number,
+    default: 0
+  },
+
   // Upload errors (invalid files, rejected files)
   uploadErrors: [{
     filename: String,
@@ -126,11 +147,51 @@ const datasetSchema = new mongoose.Schema({
     type: String
   },
 
+  // Augmentation metadata (for image data augmentation feature)
+  augmentationStatus: {
+    // not_started → running → succeeded | failed
+    type: String,
+    enum: ['not_started', 'running', 'succeeded', 'failed'],
+    default: 'not_started',
+    index: true
+  },
+  isAugmented: {
+    type: Boolean,
+    default: false
+  },
+  backupDatasetId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Dataset',
+    default: null
+  },
+  augmentationError: {
+    type: String
+  },
+  // Augmentation configuration metadata
+  augmentationMultiplier: {
+    // e.g. 2x, 5x; purely informational and used for UX
+    type: Number,
+    default: null
+  },
+  augmentedFromVersion: {
+    // Original version string this dataset was augmented from (e.g. 'v3')
+    type: String,
+    default: null
+  },
+
   // Soft delete: Mark dataset as deleted without removing the document
   deletedAt: {
     type: Date,
     default: null,
     index: true // Indexed for faster queries to filter deleted datasets
+  },
+
+  // Active dataset flag (for augmentation feature)
+  // When augmentation completes, the augmented dataset becomes active and original becomes inactive
+  isActive: {
+    type: Boolean,
+    default: true,
+    index: true // Indexed for faster queries to filter active datasets
   },
 
   // YOLO conversion metadata (for annotation feature)
@@ -152,5 +213,7 @@ const datasetSchema = new mongoose.Schema({
 
 // ✅ Create compound index for faster queries
 datasetSchema.index({ company: 1, project: 1, version: 1 });
+// ✅ Index for active dataset queries (used by file browser and training)
+datasetSchema.index({ company: 1, project: 1, isActive: 1 });
 
 module.exports = mongoose.model('Dataset', datasetSchema);
