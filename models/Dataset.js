@@ -206,7 +206,14 @@ const datasetSchema = new mongoose.Schema({
     categoryNames: [{
       type: String // Snapshot of category names at conversion time
     }]
-  }
+  },
+
+  // Canonical split configuration (used by utils/splitDataset.js)
+  // If not set, workers use defaults: seed 42, train 0.8, val 0.2, test 0.1
+  split_seed: { type: Number, default: null },
+  split_ratio_train: { type: Number, default: null },
+  split_ratio_val: { type: Number, default: null },
+  test_sample_ratio: { type: Number, default: null }
 }, {
   timestamps: true // ✅ Automatically adds createdAt and updatedAt
 });

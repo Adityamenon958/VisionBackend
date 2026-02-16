@@ -21,6 +21,7 @@ const Dataset = require('../models/Dataset');
 const Image = require('../models/Image');
 const storageAdapter = require('../services/storageAdapter');
 const { processAugmentationJob } = require('./augmentationWorker');
+const { splitDataset } = require('../utils/splitDataset');
 
 /**
  * Preprocessing Worker - Background Job Processor
@@ -199,18 +200,9 @@ const processPreprocessingJob = async (job) => {
       combinedList = [...labeledImages, ...unlabeledImages];
     }
 
-    // ✅ Perform 80:20 train/val split on combined list
-    // ⚠️ CAUTION: Using deterministic shuffle for reproducibility
-    // For true randomness, use: combinedList.sort(() => Math.random() - 0.5)
-    // Or use a seeded random number generator for reproducible splits
-    const shuffled = [...combinedList].sort((a, b) => {
-      // Simple deterministic shuffle based on stored filename
-      return a.storedName.localeCompare(b.storedName);
-    });
-
-    const splitIndex = Math.floor(shuffled.length * 0.8);
-    const trainImages = shuffled.slice(0, splitIndex);
-    const valImages = shuffled.slice(splitIndex);
+    // ✅ Canonical split: seeded shuffle + configurable ratios (utils/splitDataset.js)
+    // Uses dataset.split_seed, split_ratio_train, split_ratio_val, test_sample_ratio when set; else defaults
+    const { train: trainImages, val: valImages, test: testSampleImages } = splitDataset(combinedList, dataset);
 
     // ✅ Copy images and labels to train/val folders (flattened structure)
     // ⚠️ CAUTION: We COPY (not move) to preserve original folder structure for dashboard
@@ -478,16 +470,8 @@ const processPreprocessingJob = async (job) => {
       await dataset.save();
     }
 
-    // ✅ Copy 10% of images to test folder (images only, no labels)
-    // Build candidate list: same as used for train/val split
-    const allImagesForTest = splitStrategy === 'labeled-only' ? labeledImages : combinedList;
-    const testSampleSize = Math.max(1, Math.ceil(allImagesForTest.length * 0.10));
-    
-    // Ensure test folder exists
+    // ✅ Copy test split to test folder (test_sample_ratio from splitDataset; already in testSampleImages)
     await storageAdapter.ensureDir(testImagesPath);
-    
-    // Select first testSampleSize images from shuffled list (already sorted)
-    const testSampleImages = shuffled.slice(0, testSampleSize);
     let testImagesCopied = 0;
     
     for (const imageInfo of testSampleImages) {

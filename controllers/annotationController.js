@@ -9,6 +9,7 @@ const storageAdapter = require('../services/storageAdapter');
 const { validateBbox } = require('../utils/bboxValidator');
 const { sendError, sendValidationError, sendNotFoundError } = require('../utils/errors');
 const { generateLabelFileContent, generateDataYaml, getLabelFilePath } = require('../utils/yoloConverter');
+const { splitDataset } = require('../utils/splitDataset');
 
 /**
  * Annotation Controller
@@ -848,17 +849,104 @@ const convertAnnotationsToYOLO = async (req, res) => {
     });
     await fs.writeFile(classMappingPath, JSON.stringify(classMapping, null, 2), 'utf8');
 
+    // ================= RE-SPLIT USING CANONICAL SPLIT (utils/splitDataset) =================
+    // Build full labeled pool and re-run split so train/val/test match configured seed and ratios
+    const labeledImagesForSplit = await Image.find({ datasetId, hasLabels: true });
+    if (labeledImagesForSplit.length > 0) {
+      const poolIds = new Set(labeledImagesForSplit.map((img) => img._id.toString()));
+      // Paths already taken by images NOT in the pool (e.g. unlabeled in train) — we must not assign these
+      const reservedPaths = new Set();
+      const allDatasetImages = await Image.find({ datasetId }, { storedPath: 1 });
+      for (const img of allDatasetImages) {
+        if (!poolIds.has(img._id.toString())) {
+          reservedPaths.add(img.storedPath);
+        }
+      }
+
+      const pool = labeledImagesForSplit.map((img) => ({
+        storedName: path.basename(img.storedPath),
+        storedPath: img.storedPath,
+        imageDoc: img,
+      }));
+      const { train: trainList, val: valList, test: testList } = splitDataset(pool, dataset);
+
+      const imagesTrainPath = path.join(datasetPath, 'images', 'train');
+      const imagesValPath = path.join(datasetPath, 'images', 'val');
+      const imagesTestPath = path.join(datasetPath, 'images', 'test');
+      const labelsTrainPath = path.join(datasetPath, 'labels', 'train');
+      const labelsValPath = path.join(datasetPath, 'labels', 'val');
+      const labelsTestPath = path.join(datasetPath, 'labels', 'test');
+      await storageAdapter.ensureDir(imagesTrainPath);
+      await storageAdapter.ensureDir(imagesValPath);
+      await storageAdapter.ensureDir(imagesTestPath);
+      await storageAdapter.ensureDir(labelsTrainPath);
+      await storageAdapter.ensureDir(labelsValPath);
+      await storageAdapter.ensureDir(labelsTestPath);
+
+      const copyAndUpdate = async (list, folder, imagesDir, labelsDir) => {
+        for (const item of list) {
+          let newPath = `images/${folder}/${item.storedName}`;
+          if (reservedPaths.has(newPath)) {
+            const ext = path.extname(item.storedName);
+            const base = path.basename(item.storedName, ext);
+            item.storedName = `${base}_${item.imageDoc._id.toString()}${ext}`;
+            newPath = `images/${folder}/${item.storedName}`;
+          }
+          reservedPaths.add(newPath);
+
+          const srcImage = path.join(datasetPath, item.storedPath);
+          const destImage = path.join(imagesDir, item.storedName);
+          const labelPath = getLabelFilePath(item.storedPath);
+          const srcLabel = path.join(datasetPath, labelPath);
+          const labelBaseName = path.parse(item.storedName).name + '.txt';
+          const destLabel = path.join(labelsDir, labelBaseName);
+
+          const imageMoved = path.resolve(srcImage) !== path.resolve(destImage);
+          const labelMoved = path.resolve(srcLabel) !== path.resolve(destLabel);
+
+          if (imageMoved && (await storageAdapter.exists(srcImage))) {
+            await storageAdapter.copyFile(srcImage, destImage);
+            try {
+              await fs.unlink(srcImage);
+            } catch (e) {
+              // ignore if delete fails (e.g. read-only)
+            }
+          }
+          if (labelMoved && (await storageAdapter.exists(srcLabel))) {
+            await storageAdapter.copyFile(srcLabel, destLabel);
+            try {
+              await fs.unlink(srcLabel);
+            } catch (e) {
+              // ignore if delete fails
+            }
+          }
+
+          item.imageDoc.storedPath = newPath;
+          item.imageDoc.folder = folder;
+          await item.imageDoc.save();
+        }
+      };
+
+      await copyAndUpdate(trainList, 'train', imagesTrainPath, labelsTrainPath);
+      await copyAndUpdate(valList, 'val', imagesValPath, labelsValPath);
+      await copyAndUpdate(testList, 'test', imagesTestPath, labelsTestPath);
+
+      dataset.trainCount = trainList.length;
+      dataset.valCount = valList.length;
+      dataset.testCount = testList.length;
+    }
+
     // Update Dataset conversion metadata
     dataset.conversionMetadata = {
       convertedAt: new Date(),
       categoryOrder: categoryOrder,
       categoryNames: categoryNames
     };
-    
+
     // Recalculate labeled/unlabeled counts
     const labeledCount = await Image.countDocuments({ datasetId, hasLabels: true });
     const unlabeledCount = await Image.countDocuments({ datasetId, hasLabels: false });
-    
+
     dataset.labeledImages = labeledCount;
     dataset.unlabeledImages = unlabeledCount;
 
@@ -869,10 +957,10 @@ const convertAnnotationsToYOLO = async (req, res) => {
     dataset.annotationStatus = 'completed';
     dataset.unlabeledImagesCount = 0;
     // ==============================================================
-    
+
     // ✅ Update dataset status to ready_to_train
     dataset.status = 'ready_to_train';
-    
+
     await dataset.save();
 
     const responsePayload = {

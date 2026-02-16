@@ -1731,7 +1731,7 @@ const createCategoriesFromClasses = async (req, res) => {
 const startAugmentation = async (req, res) => {
   try {
     const { datasetId } = req.params;
-    const { options } = req.body || {};
+    const { options, versionName: rawVersionName } = req.body || {};
 
     if (!mongoose.Types.ObjectId.isValid(datasetId)) {
       return res.status(400).json({
@@ -1770,6 +1770,39 @@ const startAugmentation = async (req, res) => {
       });
     }
 
+    // Validate and sanitize versionName (required for augmentation)
+    const versionName = typeof rawVersionName === 'string' ? rawVersionName.trim() : '';
+    if (!versionName) {
+      return res.status(400).json({
+        error: 'Version name is required.',
+      });
+    }
+    if (versionName.length > 50) {
+      return res.status(400).json({
+        error: 'Version name must be at most 50 characters.',
+      });
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(versionName)) {
+      return res.status(400).json({
+        error: 'Version name may only contain letters, numbers, underscores, and hyphens.',
+      });
+    }
+    if (versionName === dataset.version) {
+      return res.status(400).json({
+        error: 'Version name cannot be the same as the source version.',
+      });
+    }
+    const existingWithVersion = await Dataset.findOne({
+      company: dataset.company,
+      project: dataset.project,
+      version: versionName,
+    });
+    if (existingWithVersion) {
+      return res.status(400).json({
+        error: 'Version name already exists for this project.',
+      });
+    }
+
     // Prepare options with safe defaults
     const targetTrainTotal =
       typeof options?.targetTrainTotal === 'number' && options.targetTrainTotal > 0
@@ -1784,9 +1817,10 @@ const startAugmentation = async (req, res) => {
         ? options.augmentationMultiplier
         : null;
 
-    // Enqueue augmentation job
+    // Enqueue augmentation job (versionName is validated and sanitized)
     const jobPayload = {
       datasetId: dataset._id.toString(),
+      versionName,
       targetTrainTotal,
       valTestMultiplier,
       augmentationMultiplier,
@@ -1801,7 +1835,8 @@ const startAugmentation = async (req, res) => {
       datasetId: dataset._id.toString(),
       company: dataset.company,
       project: dataset.project,
-      version: dataset.version,
+      sourceVersion: dataset.version,
+      versionName,
       targetTrainTotal,
       valTestMultiplier,
       augmentationMultiplier

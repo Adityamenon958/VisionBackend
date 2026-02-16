@@ -12,6 +12,26 @@ const TrainingJob = require('../models/TrainingJob');
  */
 
 /**
+ * Resolve the active dataset for a company/project. Training must use this dataset.
+ * @param {string} company - Company id
+ * @param {string} project - Project id
+ * @returns {Promise<{dataset?: object, error?: string}>}
+ */
+async function resolveActiveDataset(company, project) {
+  try {
+    const dataset = await Dataset.findOne({ company, project, isActive: true });
+    if (!dataset) {
+      return {
+        error: 'No active dataset for this project. Run preprocessing, annotation, or augmentation first, or set an active dataset.'
+      };
+    }
+    return { dataset };
+  } catch (err) {
+    return { error: err.message || 'Failed to resolve active dataset' };
+  }
+}
+
+/**
  * Validate if a dataset is ready for training
  * @param {string} datasetId - MongoDB ObjectId of the dataset
  * @returns {Promise<{valid: boolean, error?: string, dataset?: object}>}
@@ -203,6 +223,7 @@ function canRetryJob(status) {
 }
 
 module.exports = {
+  resolveActiveDataset,
   validateDatasetForTraining,
   generateJobId,
   getDefaultHyperparameters,

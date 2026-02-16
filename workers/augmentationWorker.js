@@ -10,6 +10,8 @@ const fs = require('fs').promises;
 const { augmentationQueue } = require('../queue');
 const Dataset = require('../models/Dataset');
 const storageAdapter = require('../services/storageAdapter');
+const { splitDataset } = require('../utils/splitDataset');
+const { getLabelFilePath } = require('../utils/yoloConverter');
 
 /**
  * Augmentation Worker - Background Job Processor
@@ -212,6 +214,7 @@ async function computeFolderSize(rootPath) {
 const processAugmentationJob = async (job) => {
   const {
     datasetId,
+    versionName,
     targetTrainTotal,
     valTestMultiplier,
     targetSize,
@@ -277,8 +280,27 @@ const processAugmentationJob = async (job) => {
     originalDataset.augmentationStatus = 'running';
     await originalDataset.save();
 
+    const versionNameTrimmed = typeof versionName === 'string' ? versionName.trim() : '';
+    if (!versionNameTrimmed) {
+      throw new Error('Augmentation job missing required versionName. Re-submit with a version name.');
+    }
+    if (versionNameTrimmed.length > 50 || !/^[a-zA-Z0-9_-]+$/.test(versionNameTrimmed)) {
+      throw new Error('Invalid versionName in job (length ≤ 50, only a-z, A-Z, 0-9, _, -).');
+    }
     const { company, project } = originalDataset;
-    const newVersion = await getNextVersion(company, project);
+    const existingWithVersion = await Dataset.findOne({
+      company,
+      project,
+      version: versionNameTrimmed,
+    });
+    if (existingWithVersion) {
+      throw new Error(`Version name "${versionNameTrimmed}" already exists for this project.`);
+    }
+    if (versionNameTrimmed === originalDataset.version) {
+      throw new Error('Version name cannot be the same as the source version.');
+    }
+
+    const newVersion = versionNameTrimmed;
 
     const outputRoot = storageAdapter.buildDatasetPath(company, project, newVersion);
     const inputRoot = storageAdapter.buildDatasetPath(
@@ -318,47 +340,79 @@ const processAugmentationJob = async (job) => {
       outputRoot,
     });
 
-    // Ensure outputRoot exists
     await storageAdapter.ensureDir(outputRoot);
 
-    // Determine effective augmentation parameters
-    let effectiveValTestMultiplier =
-      typeof valTestMultiplier === 'number' && valTestMultiplier > 0
-        ? valTestMultiplier
-        : 2;
+    // ---------- 1. Build full labeled pool from source (before any split) ----------
+    const pool = [];
+    for (const split of ['train', 'val', 'test']) {
+      const splitImagesDir = path.join(inputRoot, 'images', split);
+      try {
+        const entries = await fs.readdir(splitImagesDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isFile()) continue;
+          const storedName = entry.name;
+          const ext = path.extname(storedName).toLowerCase();
+          if (ext !== '.jpg' && ext !== '.jpeg' && ext !== '.png') continue;
+          const storedPath = `images/${split}/${storedName}`;
+          const labelPath = getLabelFilePath(storedPath);
+          const fullLabelPath = path.join(inputRoot, labelPath);
+          const exists = await storageAdapter.exists(fullLabelPath);
+          if (!exists) continue;
+          pool.push({
+            storedName,
+            storedPath,
+            sourcePath: path.join(inputRoot, storedPath),
+            labelPath: fullLabelPath,
+          });
+        }
+      } catch {
+        // Skip missing split dir
+      }
+    }
 
+    if (pool.length === 0) {
+      throw new Error('No labeled images found in source dataset. Ensure images have corresponding .txt labels in labels/train, val, or test.');
+    }
+
+    // ---------- 2. Temp dirs: input pool (all images) and output pool (Python writes augmented here) ----------
+    const inputPoolRoot = path.join(outputRoot, '_input_pool');
+    const outputPoolRoot = path.join(outputRoot, '_output_pool');
+    const poolImagesDir = path.join(inputPoolRoot, 'images', 'train');
+    const poolLabelsDir = path.join(inputPoolRoot, 'labels', 'train');
+    await storageAdapter.ensureDir(poolImagesDir);
+    await storageAdapter.ensureDir(poolLabelsDir);
+
+    for (const item of pool) {
+      const destImage = path.join(poolImagesDir, item.storedName);
+      const destLabel = path.join(poolLabelsDir, path.parse(item.storedName).name + '.txt');
+      if (path.resolve(item.sourcePath) !== path.resolve(destImage)) {
+        await storageAdapter.copyFile(item.sourcePath, destImage);
+      }
+      if (path.resolve(item.labelPath) !== path.resolve(destLabel)) {
+        await storageAdapter.copyFile(item.labelPath, destLabel);
+      }
+    }
+
+    // ---------- 3. Augmentation parameters: target total from multiplier or explicit ----------
     let effectiveTargetTrainTotal =
       typeof targetTrainTotal === 'number' && targetTrainTotal > 0
         ? targetTrainTotal
         : 0;
-
-    // If an augmentationMultiplier is provided and no explicit targetTrainTotal,
-    // derive targetTrainTotal based on the existing train split size so that
-    // the final dataset roughly matches the desired multiplier.
     if (augmentationMultiplier && !effectiveTargetTrainTotal) {
-      try {
-        const trainDir = path.join(inputRoot, 'images', 'train');
-        const entries = await fs.readdir(trainDir, { withFileTypes: true });
-        const trainImages = entries.filter((e) => e.isFile()).length;
-        if (trainImages > 0) {
-          effectiveTargetTrainTotal = Math.max(
-            trainImages,
-            Math.round(trainImages * augmentationMultiplier),
-          );
-        }
-      } catch {
-        // If we cannot derive, leave target total at 0 to fall back to default below.
-      }
+      effectiveTargetTrainTotal = Math.max(
+        pool.length,
+        Math.round(pool.length * augmentationMultiplier),
+      );
     }
-
     if (!effectiveTargetTrainTotal) {
-      // Fallback to a sensible default if nothing else was provided/derived.
       effectiveTargetTrainTotal = 1000;
     }
+    const effectiveValTestMultiplier =
+      typeof valTestMultiplier === 'number' && valTestMultiplier > 0 ? valTestMultiplier : 2;
 
     const result = await runPythonAugmentation({
-      inputRoot,
-      outputRoot,
+      inputRoot: inputPoolRoot,
+      outputRoot: outputPoolRoot,
       targetTrainTotal: effectiveTargetTrainTotal,
       valTestMultiplier: effectiveValTestMultiplier,
       targetSize: typeof targetSize === 'number' && targetSize > 0 ? targetSize : 640,
@@ -372,7 +426,70 @@ const processAugmentationJob = async (job) => {
       throw new Error(message);
     }
 
-    // After successful augmentation, run fix_labels on the augmented labels directory
+    // ---------- 4. Combined list: original pool + augmented (from _output_pool/images/train) ----------
+    const combinedList = pool.map((p) => ({ ...p }));
+
+    try {
+      const augImagesDir = path.join(outputPoolRoot, 'images', 'train');
+      const augEntries = await fs.readdir(augImagesDir, { withFileTypes: true });
+      for (const entry of augEntries) {
+        if (!entry.isFile()) continue;
+        const storedName = entry.name;
+        const storedPath = `images/train/${storedName}`;
+        const labelPath = getLabelFilePath(storedPath);
+        const fullLabelPath = path.join(outputPoolRoot, labelPath);
+        const labelExists = await storageAdapter.exists(fullLabelPath);
+        if (!labelExists) continue;
+        combinedList.push({
+          storedName,
+          storedPath,
+          sourcePath: path.join(outputPoolRoot, storedPath),
+          labelPath: fullLabelPath,
+        });
+      }
+    } catch {
+      // No augmented images dir
+    }
+
+    // ---------- 5. Canonical split once (same seed/ratios as preprocessing and post-annotation) ----------
+    const { train: trainList, val: valList, test: testList } = splitDataset(combinedList, originalDataset);
+
+    // ---------- 6. Write new version train/val/test from split (no reuse of old structure) ----------
+    const imagesTrainPath = path.join(outputRoot, 'images', 'train');
+    const imagesValPath = path.join(outputRoot, 'images', 'val');
+    const imagesTestPath = path.join(outputRoot, 'images', 'test');
+    const labelsTrainPath = path.join(outputRoot, 'labels', 'train');
+    const labelsValPath = path.join(outputRoot, 'labels', 'val');
+    const labelsTestPath = path.join(outputRoot, 'labels', 'test');
+    await storageAdapter.ensureDir(imagesTrainPath);
+    await storageAdapter.ensureDir(imagesValPath);
+    await storageAdapter.ensureDir(imagesTestPath);
+    await storageAdapter.ensureDir(labelsTrainPath);
+    await storageAdapter.ensureDir(labelsValPath);
+    await storageAdapter.ensureDir(labelsTestPath);
+
+    const writeSplit = async (list, imagesDir, labelsDir) => {
+      for (const item of list) {
+        const destImage = path.join(imagesDir, item.storedName);
+        const destLabel = path.join(labelsDir, path.parse(item.storedName).name + '.txt');
+        await storageAdapter.copyFile(item.sourcePath, destImage);
+        await storageAdapter.copyFile(item.labelPath, destLabel);
+      }
+    };
+
+    await writeSplit(trainList, imagesTrainPath, labelsTrainPath);
+    await writeSplit(valList, imagesValPath, labelsValPath);
+    await writeSplit(testList, imagesTestPath, labelsTestPath);
+
+    // ---------- 7. Clean up temp pools ----------
+    try {
+      await fs.rm(path.join(outputRoot, '_input_pool'), { recursive: true, force: true });
+      await fs.rm(path.join(outputRoot, '_output_pool'), { recursive: true, force: true });
+    } catch (e) {
+      console.warn('[AUGMENT-WORKER] Could not remove temp pools:', e.message);
+    }
+
+    // ---------- 8. fix_labels on final labels ----------
     const labelsRootForFix = path.join(outputRoot, 'labels');
     const fixResult = await runPythonFixLabels({ labelsRoot: labelsRootForFix });
     if (fixResult.exitCode !== 0) {
@@ -383,10 +500,46 @@ const processAugmentationJob = async (job) => {
       throw new Error(message);
     }
 
-    // Compute basic stats from outputRoot and build files manifest for augmented dataset
+    // ---------- 8.5. Copy dataset metadata files (data.yaml, class-mapping.json) from source ----------
+    const metadataFiles = ['data.yaml', 'class-mapping.json'];
+    const filesCopied = [];
+    const filesMissing = [];
+
+    for (const fileName of metadataFiles) {
+      const sourcePath = path.join(inputRoot, fileName);
+      const targetPath = path.join(outputRoot, fileName);
+
+      try {
+        const exists = await storageAdapter.exists(sourcePath);
+        if (exists) {
+          await storageAdapter.copyFile(sourcePath, targetPath);
+          filesCopied.push(fileName);
+        } else {
+          filesMissing.push(fileName);
+          console.warn('[AUGMENT-WORKER] Metadata file missing in source', {
+            file: fileName,
+            sourceVersion: originalDataset.version,
+            sourcePath,
+          });
+        }
+      } catch (copyError) {
+        // Copy failure is critical - fail the augmentation job
+        throw new Error(
+          `Failed to copy metadata file "${fileName}" from source dataset: ${copyError.message}`,
+        );
+      }
+    }
+
+    console.log('[AUGMENT-WORKER] Copied dataset metadata files', {
+      sourceVersion: originalDataset.version,
+      targetVersion: newVersion,
+      filesCopied,
+      filesMissing: filesMissing.length > 0 ? filesMissing : undefined,
+    });
+
+    // ---------- 9. Build files manifest and counts from outputRoot ----------
     const imagesRoot = path.join(outputRoot, 'images');
     const labelRoot = path.join(outputRoot, 'labels');
-
     let totalImages = 0;
     let trainCount = 0;
     let valCount = 0;
@@ -397,7 +550,6 @@ const processAugmentationJob = async (job) => {
       const splitImagesDir = path.join(imagesRoot, split);
       const splitLabelsDir = path.join(labelRoot, split);
 
-      // Images
       try {
         const imageEntries = await fs.readdir(splitImagesDir, { withFileTypes: true });
         for (const entry of imageEntries) {
@@ -410,31 +562,23 @@ const processAugmentationJob = async (job) => {
           } catch {
             continue;
           }
-          const storedPath = path
-            .relative(outputRoot, fullPath)
-            .replace(/\\/g, '/'); // path relative to dataset root
+          const storedPath = path.relative(outputRoot, fullPath).replace(/\\/g, '/');
 
-          const fileEntry = {
+          filesManifest.push({
             storedName,
             originalName: storedName,
             type: 'image',
             size: stat.size,
-            folder: split, // train/val/test for augmented datasets
+            folder: split,
             storedPath,
-          };
-
-          filesManifest.push(fileEntry);
-
+          });
           totalImages += 1;
           if (split === 'train') trainCount += 1;
           else if (split === 'val') valCount += 1;
           else if (split === 'test') testCount += 1;
         }
-      } catch {
-        // Ignore missing image split dirs
-      }
+      } catch {}
 
-      // Labels
       try {
         const labelEntries = await fs.readdir(splitLabelsDir, { withFileTypes: true });
         for (const entry of labelEntries) {
@@ -447,10 +591,7 @@ const processAugmentationJob = async (job) => {
           } catch {
             continue;
           }
-          const storedPath = path
-            .relative(outputRoot, fullPath)
-            .replace(/\\/g, '/'); // path relative to dataset root
-
+          const storedPath = path.relative(outputRoot, fullPath).replace(/\\/g, '/');
           filesManifest.push({
             storedName,
             originalName: storedName,
@@ -460,9 +601,7 @@ const processAugmentationJob = async (job) => {
             storedPath,
           });
         }
-      } catch {
-        // Ignore missing label split dirs
-      }
+      } catch {}
     }
 
     const sizeBytes = await computeFolderSize(outputRoot);

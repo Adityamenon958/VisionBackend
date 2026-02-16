@@ -321,6 +321,19 @@ const startTraining = async (req, res) => {
       });
     }
 
+    // Use the requested dataset for training; it must be active
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return res.status(404).json({
+        error: 'Dataset not found'
+      });
+    }
+    if (!dataset.isActive) {
+      return res.status(400).json({
+        error: 'Selected dataset is not active. Activate it before training.'
+      });
+    }
+
     // ✅ If modelId is provided, validate and use trained model
     let trainedModel = null;
     let finalModelType = modelType;
@@ -349,17 +362,10 @@ const startTraining = async (req, res) => {
       finalModelType = trainedModel.modelType;
       // Note: trained models don't have modelSize stored, so we'll use the one from request or default
       
-      // Validate that model belongs to same company/project as dataset
-      const dataset = await Dataset.findById(datasetId);
-      if (!dataset) {
-        return res.status(404).json({
-          error: 'Dataset not found'
-        });
-      }
-
+      // Validate that model belongs to same company/project as the selected dataset
       if (trainedModel.company !== dataset.company || trainedModel.project !== dataset.project) {
         return res.status(400).json({
-          error: 'Trained model does not belong to the same company/project as the dataset'
+          error: 'Trained model does not belong to the same company/project as the selected dataset'
         });
       }
     } else {
@@ -397,15 +403,13 @@ const startTraining = async (req, res) => {
       }
     }
 
-    // Validate dataset
-    const validation = await trainingService.validateDatasetForTraining(datasetId);
+    // Validate dataset is ready for training
+    const validation = await trainingService.validateDatasetForTraining(dataset._id);
     if (!validation.valid) {
       return res.status(400).json({
         error: validation.error
       });
     }
-
-    const dataset = validation.dataset;
 
     // Merge hyperparameters with defaults (use finalModelType which may come from trained model)
     const mergedHyperparameters = trainingService.mergeHyperparameters(finalModelType, hyperparameters);
