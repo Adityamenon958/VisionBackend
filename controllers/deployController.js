@@ -239,6 +239,9 @@ const checkDeviceByIp = async (req, res) => {
   }
 };
 
+const INVALID_FILENAME_CHARS = /[\\/:*?"<>|]/;
+const FORMAT_EXTENSIONS = { pt: '.pt', onnx: '.onnx' };
+
 /**
  * POST /api/models/:modelId/deploy
  * 
@@ -247,13 +250,14 @@ const checkDeviceByIp = async (req, res) => {
  * Request body:
  * - ipAddress (required): IP address of target device
  * - folderPath (required): Full folder path (e.g., "\\192.168.1.100\models")
+ * - targetFileName (required): Target filename (e.g., "my_model.pt" or "model_v1.onnx")
  * - deviceName (optional): Device name for logging
  * - format (optional): Model format to deploy ('pt' or 'onnx', default: 'pt')
  */
 const deployModelToDevice = async (req, res) => {
   try {
     const { modelId } = req.params;
-    const { ipAddress, folderPath, deviceName, format = 'pt' } = req.body;
+    const { ipAddress, folderPath, targetFileName, deviceName, format = 'pt' } = req.body;
 
     // 1. Validate inputs
     if (!ipAddress || !folderPath) {
@@ -269,6 +273,29 @@ const deployModelToDevice = async (req, res) => {
         error: 'Invalid format',
         message: 'Format must be "pt" or "onnx"',
         provided: format
+      });
+    }
+
+    if (!targetFileName || typeof targetFileName !== 'string' || !targetFileName.trim()) {
+      return res.status(400).json({
+        error: 'Invalid targetFileName',
+        message: 'targetFileName must not be empty'
+      });
+    }
+
+    const trimmedTargetFileName = targetFileName.trim();
+    if (INVALID_FILENAME_CHARS.test(trimmedTargetFileName)) {
+      return res.status(400).json({
+        error: 'Invalid targetFileName',
+        message: 'targetFileName must not contain: \\ / : * ? " < > |'
+      });
+    }
+
+    const requiredExt = FORMAT_EXTENSIONS[format];
+    if (!trimmedTargetFileName.toLowerCase().endsWith(requiredExt)) {
+      return res.status(400).json({
+        error: 'Invalid targetFileName',
+        message: `targetFileName must end with ${requiredExt} for format "${format}"`
       });
     }
 
@@ -323,7 +350,7 @@ const deployModelToDevice = async (req, res) => {
     }
 
     // 6. Deploy model with specified format
-    const deploymentResult = await modelDeployer.deployModel(model, folderPath, format);
+    const deploymentResult = await modelDeployer.deployModel(model, folderPath, format, trimmedTargetFileName);
 
     // 7. Generate deployment ID
     const deploymentId = `deploy_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
