@@ -589,6 +589,15 @@ const processAugmentationJob = async (job) => {
         if (exists) {
           await storageAdapter.copyFile(sourcePath, targetPath);
           filesCopied.push(fileName);
+
+          // ✅ For data.yaml: update 'path' to point to augmented output, not source
+          // Otherwise YOLO training loads from source dataset (e.g. 47 images) instead of augmented (e.g. 849)
+          if (fileName === 'data.yaml') {
+            let content = await fs.readFile(targetPath, 'utf8');
+            const outputPathNormalized = outputRoot.replace(/\\/g, '/');
+            content = content.replace(/^path:\s*.*$/m, `path: ${outputPathNormalized}`);
+            await fs.writeFile(targetPath, content, 'utf8');
+          }
         } else {
           filesMissing.push(fileName);
           console.warn('[AUGMENT-WORKER] Metadata file missing in source', {

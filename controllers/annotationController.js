@@ -854,13 +854,11 @@ const convertAnnotationsToYOLO = async (req, res) => {
     const labeledImagesForSplit = await Image.find({ datasetId, hasLabels: true });
     if (labeledImagesForSplit.length > 0) {
       const poolIds = new Set(labeledImagesForSplit.map((img) => img._id.toString()));
-      // Paths already taken by images NOT in the pool (e.g. unlabeled in train) — we must not assign these
+      // Paths already taken by ANY image (labeled or unlabeled) — we must not assign a path that another image already has
       const reservedPaths = new Set();
       const allDatasetImages = await Image.find({ datasetId }, { storedPath: 1 });
       for (const img of allDatasetImages) {
-        if (!poolIds.has(img._id.toString())) {
-          reservedPaths.add(img.storedPath);
-        }
+        reservedPaths.add(img.storedPath);
       }
 
       const pool = labeledImagesForSplit.map((img) => ({
