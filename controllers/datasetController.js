@@ -1796,6 +1796,7 @@ const startAugmentation = async (req, res) => {
       company: dataset.company,
       project: dataset.project,
       version: versionName,
+      deletedAt: null,
     });
     if (existingWithVersion) {
       return res.status(400).json({
@@ -1924,10 +1925,10 @@ const getActiveDataset = async (req, res) => {
 /**
  * POST /api/dataset/:datasetId/augment/cancel
  *
- * Cancels a running augmentation job for a dataset (best-effort).
- * - Removes the job from augmentationQueue if found.
- * - Marks original dataset augmentationStatus as 'failed' with a cancellation message.
- * - Marks any in-progress augmented datasets (backupDatasetId = original) as failed.
+ * Cancels a running augmentation job for a dataset.
+ * - Marks source dataset augmentationStatus as 'cancelled'.
+ * - Sends SIGTERM to active Python process; worker performs cleanup (delete augmented folder + document).
+ * - Idempotent: already cancelled / completed / no job → return 200 with appropriate message.
  */
 const cancelAugmentation = async (req, res) => {
   try {
@@ -1957,27 +1958,89 @@ const cancelAugmentation = async (req, res) => {
       }
     }
 
-    // Only allow cancel if augmentation is currently marked as running
+    // Idempotent: already cancelled, completed, or never started → return 200
+    if (dataset.augmentationStatus === 'cancelled') {
+      return res.status(200).json({
+        message: 'Augmentation already cancelled',
+        datasetId: dataset._id.toString(),
+      });
+    }
+    if (dataset.augmentationStatus === 'succeeded') {
+      return res.status(200).json({
+        message: 'Augmentation already completed',
+        datasetId: dataset._id.toString(),
+      });
+    }
     if (dataset.augmentationStatus !== 'running') {
-      return res.status(409).json({
-        error: 'No running augmentation to cancel for this dataset',
+      return res.status(200).json({
+        message: 'No active augmentation to cancel',
+        datasetId: dataset._id.toString(),
       });
     }
 
-    // Best-effort: find and remove the corresponding job from the augmentation queue
+    console.log('[AUGMENTATION] Cancellation requested', {
+      datasetId: dataset._id.toString(),
+      company: dataset.company,
+      project: dataset.project,
+      version: dataset.version,
+    });
+
+    // Mark dataset as cancelled (worker will detect this and clean up)
+    const cancellationMessage = 'Cancelled by user';
+    await Dataset.findByIdAndUpdate(dataset._id, {
+      augmentationStatus: 'cancelled',
+      augmentationError: cancellationMessage,
+    });
+
+    // Find and terminate active Python process if job is running
+    const { activeAugmentations } = require('../workers/augmentationWorker');
+    let jobId = null;
+    let pythonProcessKilled = false;
+
     try {
       const jobs = await augmentationQueue.getJobs(['waiting', 'active', 'delayed']);
       const matchingJob = jobs.find(
         (job) => job?.data?.datasetId === dataset._id.toString(),
       );
+
       if (matchingJob) {
-        await matchingJob.remove();
-        console.log('[AUGMENTATION] augmentation_cancelled_job_removed', {
-          jobId: matchingJob.id,
-          datasetId: dataset._id.toString(),
-        });
+        jobId = matchingJob.id;
+
+        // Check if job is active (has Python process)
+        const active = activeAugmentations.get(jobId);
+        if (active?.pythonProcess && !active.pythonProcess.killed) {
+          // Job is active - kill Python process
+          try {
+            active.pythonProcess.kill('SIGTERM');
+            pythonProcessKilled = true;
+            console.log('[AUGMENTATION] Sent SIGTERM to active process', {
+              jobId,
+              datasetId: dataset._id.toString(),
+              pid: active.pythonProcess.pid,
+            });
+          } catch (killError) {
+            console.warn('[AUGMENTATION] Failed to kill Python process', {
+              jobId,
+              error: killError.message,
+            });
+          }
+        } else {
+          // Job is waiting/delayed - remove from queue
+          try {
+            await matchingJob.remove();
+            console.log('[AUGMENTATION] Removed job from queue', {
+              jobId,
+              datasetId: dataset._id.toString(),
+            });
+          } catch (removeError) {
+            console.warn('[AUGMENTATION] Failed to remove job from queue', {
+              jobId,
+              error: removeError.message,
+            });
+          }
+        }
       } else {
-        console.log('[AUGMENTATION] augmentation_cancel_requested_no_job_found', {
+        console.log('[AUGMENTATION] No matching job found in queue', {
           datasetId: dataset._id.toString(),
         });
       }
@@ -1986,42 +2049,7 @@ const cancelAugmentation = async (req, res) => {
         datasetId: dataset._id.toString(),
         error: queueError.message,
       });
-      // Continue to mark datasets as cancelled even if queue inspection fails.
-    }
-
-    const cancellationMessage = 'Augmentation cancelled by user';
-
-    // Mark original dataset augmentation as failed (cancelled)
-    dataset.augmentationStatus = 'failed';
-    dataset.augmentationError = cancellationMessage;
-    await dataset.save();
-
-    // Mark any in-progress augmented datasets that were created from this dataset as failed
-    try {
-      const augmentedDatasets = await Dataset.find({
-        backupDatasetId: dataset._id,
-        status: 'processing',
-        augmentationStatus: 'running',
-      });
-
-      for (const aug of augmentedDatasets) {
-        aug.status = 'failed';
-        aug.augmentationStatus = 'failed';
-        aug.augmentationError = cancellationMessage;
-        await aug.save();
-      }
-
-      if (augmentedDatasets.length > 0) {
-        console.log('[AUGMENTATION] augmentation_cancelled_augmented_datasets_marked_failed', {
-          datasetId: dataset._id.toString(),
-          augmentedCount: augmentedDatasets.length,
-        });
-      }
-    } catch (markError) {
-      console.warn('[AUGMENTATION] Failed to mark augmented datasets as cancelled', {
-        datasetId: dataset._id.toString(),
-        error: markError.message,
-      });
+      // Continue - dataset is already marked as cancelled, worker will handle cleanup
     }
 
     console.log('[AUGMENTATION] augmentation_cancelled', {
@@ -2029,11 +2057,13 @@ const cancelAugmentation = async (req, res) => {
       company: dataset.company,
       project: dataset.project,
       version: dataset.version,
+      jobId: jobId || null,
+      pythonProcessKilled,
     });
 
     return res.status(200).json({
+      message: 'Augmentation cancelled',
       datasetId: dataset._id.toString(),
-      message: 'Augmentation cancelled (best-effort).',
     });
   } catch (error) {
     console.error('Cancel augmentation error:', error);

@@ -24,3 +24,7 @@ opencv-python>=4.8.0
 # Common deps (kept broad; ultralytics/moviepy also depend on these)
 numpy>=1.25.0
 pillow>=9.2.0
+
+# Augmentation and progress utilities
+albumentations>=1.4.0
+tqdm>=4.66.0

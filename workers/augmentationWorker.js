@@ -22,6 +22,13 @@ const { getLabelFilePath } = require('../utils/yoloConverter');
  */
 
 /**
+ * Track active augmentation jobs and their Python processes.
+ * Map: jobId (string) -> { pythonProcess, datasetId }
+ * Exported so controller can access it for cancellation.
+ */
+const activeAugmentations = new Map();
+
+/**
  * Compute next dataset version string for a given company/project.
  * Existing convention is simple strings like "v1", "v2", ...
  * We keep that convention and increment the numeric suffix.
@@ -48,7 +55,8 @@ async function getNextVersion(company, project) {
 
 /**
  * Run Python augmentation script as a child process.
- * Returns { exitCode, stdout, stderr }.
+ * Returns { exitCode, stdout, stderr, process }.
+ * The process is also tracked in activeAugmentations map.
  */
 function runPythonAugmentation({
   inputRoot,
@@ -56,8 +64,10 @@ function runPythonAugmentation({
   targetTrainTotal,
   valTestMultiplier,
   targetSize,
+  jobId,
+  datasetId,
 }) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const pythonBin = process.env.AUG_PYTHON_BIN || 'python';
     const scriptPath = path.join(
       process.cwd(),
@@ -93,6 +103,19 @@ function runPythonAugmentation({
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    // Track process in activeAugmentations map
+    if (jobId && datasetId) {
+      activeAugmentations.set(jobId, {
+        pythonProcess: child,
+        datasetId,
+      });
+      console.log('[AUGMENT-WORKER] Tracked Python process', {
+        jobId,
+        datasetId,
+        pid: child.pid,
+      });
+    }
+
     let stdout = '';
     let stderr = '';
 
@@ -108,13 +131,39 @@ function runPythonAugmentation({
       console.error('[AUGMENT-PYTHON-STDERR]', text.trimEnd());
     });
 
-    child.on('close', (code) => {
-      console.log('[AUGMENT-WORKER] Python process exited with code', code);
-      resolve({
-        exitCode: code,
-        stdout,
-        stderr,
-      });
+    child.on('close', (code, signal) => {
+      // Remove from tracking map
+      if (jobId) {
+        activeAugmentations.delete(jobId);
+        console.log('[AUGMENT-WORKER] Removed job from active map', {
+          jobId,
+          code,
+          signal,
+        });
+      }
+
+      if (signal === 'SIGTERM') {
+        console.log('[AUGMENT-WORKER] Python terminated due to cancellation', {
+          jobId,
+          pid: child.pid,
+        });
+        reject(new Error('Python augmentation process terminated by cancellation'));
+      } else {
+        console.log('[AUGMENT-WORKER] Python process exited with code', code);
+        resolve({
+          exitCode: code,
+          stdout,
+          stderr,
+          process: child,
+        });
+      }
+    });
+
+    child.on('error', (error) => {
+      if (jobId) {
+        activeAugmentations.delete(jobId);
+      }
+      reject(error);
     });
   });
 }
@@ -228,11 +277,17 @@ const processAugmentationJob = async (job) => {
 
   let originalDataset;
   let augmentedDataset;
+  let pythonProcess = null;
 
   try {
     originalDataset = await Dataset.findById(datasetId);
     if (!originalDataset) {
       throw new Error(`Dataset ${datasetId} not found`);
+    }
+
+    // Check for cancellation before starting
+    if (originalDataset.augmentationStatus === 'cancelled') {
+      throw new Error('Augmentation cancelled by user');
     }
 
     if (originalDataset.status !== 'ready' && originalDataset.status !== 'ready_to_train') {
@@ -292,6 +347,7 @@ const processAugmentationJob = async (job) => {
       company,
       project,
       version: versionNameTrimmed,
+      deletedAt: null,
     });
     if (existingWithVersion) {
       throw new Error(`Version name "${versionNameTrimmed}" already exists for this project.`);
@@ -410,13 +466,32 @@ const processAugmentationJob = async (job) => {
     const effectiveValTestMultiplier =
       typeof valTestMultiplier === 'number' && valTestMultiplier > 0 ? valTestMultiplier : 2;
 
+    // Check for cancellation before starting Python
+    const checkBeforePython = await Dataset.findById(datasetId);
+    if (checkBeforePython?.augmentationStatus === 'cancelled') {
+      throw new Error('Augmentation cancelled by user');
+    }
+
     const result = await runPythonAugmentation({
       inputRoot: inputPoolRoot,
       outputRoot: outputPoolRoot,
       targetTrainTotal: effectiveTargetTrainTotal,
       valTestMultiplier: effectiveValTestMultiplier,
       targetSize: typeof targetSize === 'number' && targetSize > 0 ? targetSize : 640,
+      jobId: job.id,
+      datasetId,
     });
+
+    // Capture process reference for cleanup if needed
+    if (result.process) {
+      pythonProcess = result.process;
+    }
+
+    // Check for cancellation after Python completes
+    const checkAfterPython = await Dataset.findById(datasetId);
+    if (checkAfterPython?.augmentationStatus === 'cancelled') {
+      throw new Error('Augmentation cancelled by user');
+    }
 
     if (result.exitCode !== 0) {
       const message =
@@ -610,6 +685,12 @@ const processAugmentationJob = async (job) => {
       augmentedDataset.files = filesManifest;
     }
 
+    // Final cancellation check before activation (race condition safety)
+    const latestDataset = await Dataset.findById(datasetId);
+    if (latestDataset?.augmentationStatus === 'cancelled') {
+      throw new Error('Augmentation cancelled before activation');
+    }
+
     augmentedDataset.status = 'ready';
     augmentedDataset.augmentationStatus = 'succeeded';
     augmentedDataset.totalImages = totalImages;
@@ -627,6 +708,12 @@ const processAugmentationJob = async (job) => {
     originalDataset.isActive = false;
     originalDataset.augmentationStatus = 'succeeded';
     await originalDataset.save();
+
+    // Remove from active tracking map on success
+    activeAugmentations.delete(job.id);
+    console.log('[AUGMENT-WORKER] Removed job from active map (success)', {
+      jobId: job.id,
+    });
 
     console.log('[AUGMENTATION] augmentation_completed', {
       originalDatasetId: originalDataset._id.toString(),
@@ -657,25 +744,103 @@ const processAugmentationJob = async (job) => {
       error: err.message,
     });
 
+    // Check if this is a cancellation
+    const isCancellation =
+      err.message?.includes('cancelled') ||
+      err.message?.includes('terminated by cancellation') ||
+      (originalDataset && (await Dataset.findById(datasetId))?.augmentationStatus === 'cancelled');
+
+    if (isCancellation) {
+      console.log('[AUGMENT-WORKER] Cancellation detected', {
+        jobId: job.id,
+        datasetId,
+      });
+
+      // Kill Python process if still running
+      if (pythonProcess && !pythonProcess.killed) {
+        try {
+          pythonProcess.kill('SIGTERM');
+          console.log('[AUGMENT-WORKER] Sent SIGTERM to Python process', {
+            jobId: job.id,
+            pid: pythonProcess.pid,
+          });
+        } catch (killError) {
+          console.warn('[AUGMENT-WORKER] Failed to kill Python process', {
+            jobId: job.id,
+            error: killError.message,
+          });
+        }
+      }
+
+      // Cleanup: Delete augmented dataset files and MongoDB document (plan: no orphan folder or document)
+      if (augmentedDataset && augmentedDataset._id) {
+        // Delete files from disk (best-effort)
+        if (augmentedDataset.storagePath) {
+          try {
+            const storagePathExists = await storageAdapter.exists(augmentedDataset.storagePath);
+            if (storagePathExists) {
+              await fs.rm(augmentedDataset.storagePath, { recursive: true, force: true });
+              console.log('[AUGMENT-WORKER] Deleted augmented dataset files', {
+                augmentedDatasetId: augmentedDataset._id.toString(),
+                storagePath: augmentedDataset.storagePath,
+              });
+            }
+          } catch (folderErr) {
+            console.error('[AUGMENT-WORKER] Failed to delete augmented dataset folder', {
+              augmentedDatasetId: augmentedDataset._id.toString(),
+              error: folderErr.message,
+            });
+          }
+        }
+        // Always delete MongoDB document so list endpoints never return the cancelled version
+        try {
+          await Dataset.findByIdAndDelete(augmentedDataset._id);
+          console.log('[AUGMENT-WORKER] Deleted augmented dataset from MongoDB', {
+            augmentedDatasetId: augmentedDataset._id.toString(),
+            version: augmentedDataset.version,
+          });
+        } catch (docErr) {
+          console.error('[AUGMENT-WORKER] Failed to delete augmented dataset document', {
+            augmentedDatasetId: augmentedDataset._id.toString(),
+            error: docErr.message,
+          });
+        }
+      }
+
+      console.log('[AUGMENT-WORKER] Cleanup completed', {
+        jobId: job.id,
+        datasetId,
+      });
+    }
+
+    // Remove from active tracking map
+    activeAugmentations.delete(job.id);
+    console.log('[AUGMENT-WORKER] Removed job from active map', {
+      jobId: job.id,
+    });
+
     try {
       // Special case: if the error is "Augmentation already running for this dataset",
       // this job is effectively a duplicate/no-op and we should NOT overwrite the
       // original dataset's augmentationStatus/augmentationError, which may reflect
       // a real in-flight augmentation. We still allow Bull to mark the job as failed.
       if (err.message !== 'Augmentation already running for this dataset') {
-        if (augmentedDataset && augmentedDataset._id) {
-          augmentedDataset.status = 'failed';
-          augmentedDataset.augmentationStatus = 'failed';
-          augmentedDataset.augmentationError = err.message;
-          await augmentedDataset.save();
-        }
+        if (!isCancellation) {
+          // Only update status if not cancelled (cancellation is handled by controller)
+          if (augmentedDataset && augmentedDataset._id) {
+            augmentedDataset.status = 'failed';
+            augmentedDataset.augmentationStatus = 'failed';
+            augmentedDataset.augmentationError = err.message;
+            await augmentedDataset.save();
+          }
 
-        if (originalDataset) {
-          // Do not touch original status for duplicate jobs; for real failures we
-          // mark the augmentation as failed with the error message.
-          originalDataset.augmentationStatus = 'failed';
-          originalDataset.augmentationError = err.message;
-          await originalDataset.save();
+          if (originalDataset) {
+            // Do not touch original status for duplicate jobs; for real failures we
+            // mark the augmentation as failed with the error message.
+            originalDataset.augmentationStatus = 'failed';
+            originalDataset.augmentationError = err.message;
+            await originalDataset.save();
+          }
         }
       }
     } catch (updateErr) {
@@ -754,5 +919,6 @@ if (require.main === module) {
 module.exports = {
   startWorker,
   processAugmentationJob,
+  activeAugmentations, // Export for controller to access for cancellation
 };
 

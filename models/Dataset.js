@@ -149,9 +149,9 @@ const datasetSchema = new mongoose.Schema({
 
   // Augmentation metadata (for image data augmentation feature)
   augmentationStatus: {
-    // not_started → running → succeeded | failed
+    // not_started → running → succeeded | failed | cancelled
     type: String,
-    enum: ['not_started', 'running', 'succeeded', 'failed'],
+    enum: ['not_started', 'running', 'succeeded', 'failed', 'cancelled'],
     default: 'not_started',
     index: true
   },
