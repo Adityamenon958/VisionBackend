@@ -94,26 +94,12 @@ function generateJobId() {
 
 /**
  * Get default hyperparameters based on model type
- * @param {string} modelType - Model type ('YOLO', 'EfficientNet', 'Custom')
+ * @param {string} modelType - Model type ('YOLO')
  * @returns {object} Default hyperparameters
  */
 function getDefaultHyperparameters(modelType) {
   const defaults = {
     YOLO: {
-      epochs: 20,
-      batchSize: 8,
-      imgSize: 416,
-      learningRate: 0.01,
-      workers: 2
-    },
-    EfficientNet: {
-      epochs: 10,
-      batchSize: 16,
-      imgSize: 224,
-      learningRate: 0.001,
-      workers: 2
-    },
-    Custom: {
       epochs: 20,
       batchSize: 8,
       imgSize: 416,

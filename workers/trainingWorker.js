@@ -110,7 +110,7 @@ function parseModelKey(modelKey) {
 
 /**
  * Get base model path for YOLO training
- * @param {string} modelType - Model type (YOLO, EfficientNet, Custom)
+ * @param {string} modelType - Model type (YOLO)
  * @param {string} modelSize - Optional model size (n, s, m, l) - defaults to 'n' for YOLO
  * @returns {string} Path to base model file
  */
@@ -276,7 +276,7 @@ async function downloadBaseModelForJob({ jobId, modelSize, modelKey = null, logg
  * @param {object} hyperparameters - Training hyperparameters
  * @param {string} datasetPath - Path to dataset directory
  * @param {string} outputPath - Path where config will be saved
- * @param {string} modelType - Model type (YOLO, EfficientNet, Custom)
+ * @param {string} modelType - Model type (YOLO)
  * @param {string} modelSize - Optional model size (n, s, m, l) - defaults to 'n'
  * @returns {Promise<string>} Path to generated config file
  */

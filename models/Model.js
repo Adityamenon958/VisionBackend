@@ -49,7 +49,7 @@ const modelSchema = new mongoose.Schema({
   // Model type
   modelType: {
     type: String,
-    enum: ['YOLO', 'EfficientNet', 'Custom'],
+    enum: ['YOLO'],
     required: true
   },
 

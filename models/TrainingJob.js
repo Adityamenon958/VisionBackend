@@ -42,7 +42,7 @@ const trainingJobSchema = new mongoose.Schema({
   // Model type selection
   modelType: {
     type: String,
-    enum: ['YOLO', 'EfficientNet', 'Custom'],
+    enum: ['YOLO'],
     required: true
   },
 

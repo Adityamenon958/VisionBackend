@@ -254,7 +254,7 @@ const getAvailableBaseModels = async (req, res) => {
  * Get default hyperparameters for a model type
  * 
  * Query params:
- * - modelType: 'YOLO' | 'EfficientNet' | 'Custom'
+ * - modelType: 'YOLO'
  * 
  * Response:
  * {
@@ -275,11 +275,11 @@ const getDefaultHyperparameters = async (req, res) => {
     if (!modelType) {
       return res.status(400).json({
         error: 'modelType query parameter is required',
-        validTypes: ['YOLO', 'EfficientNet', 'Custom']
+        validTypes: ['YOLO']
       });
     }
 
-    const validTypes = ['YOLO', 'EfficientNet', 'Custom'];
+    const validTypes = ['YOLO'];
     if (!validTypes.includes(modelType)) {
       return res.status(400).json({
         error: `Invalid modelType: ${modelType}`,
@@ -377,9 +377,9 @@ const startTraining = async (req, res) => {
       }
 
       // Validate modelType
-      if (!['YOLO', 'EfficientNet', 'Custom'].includes(modelType)) {
+      if (!['YOLO'].includes(modelType)) {
         return res.status(400).json({
-          error: 'Invalid modelType. Must be one of: YOLO, EfficientNet, Custom'
+          error: 'Invalid modelType. Must be: YOLO'
         });
       }
 
