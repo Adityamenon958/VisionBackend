@@ -207,6 +207,36 @@ async function updateUserActive(userId, active) {
 }
 
 /**
+ * Delete user from Supabase Auth (auth.users).
+ * Requires service role key. Use after deactivating/removing from workspace.
+ * If profiles has ON DELETE CASCADE on auth.users, the profile will be cascade-deleted.
+ *
+ * @param {string} userId - User ID (UUID, same as auth.users.id)
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+async function deleteAuthUser(userId) {
+  try {
+    const supabase = getSupabaseClient();
+    const { error } = await supabase.auth.admin.deleteUser(userId);
+
+    if (error) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+
+    return { success: true };
+  } catch (err) {
+    console.error('Error deleting user from Supabase Auth:', err.message);
+    return {
+      success: false,
+      error: err.message
+    };
+  }
+}
+
+/**
  * Deactivate user and remove from workspace (company)
  * Sets is_active = false and company_id = null so user loses login and is removed from company.
  *
@@ -275,5 +305,6 @@ module.exports = {
   getUserProfile,
   updateUserActive,
   deactivateAndRemoveFromWorkspace,
+  deleteAuthUser,
   deleteProjectRow
 };

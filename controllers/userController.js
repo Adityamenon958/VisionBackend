@@ -1,6 +1,6 @@
 const { isValidRole } = require('../utils/permissions');
 const { validateRoleAssignment } = require('../middleware/authorizationMiddleware');
-const { getUserProfile, updateUserActive, deactivateAndRemoveFromWorkspace } = require('../services/supabaseService');
+const { getUserProfile, updateUserActive, deactivateAndRemoveFromWorkspace, deleteAuthUser } = require('../services/supabaseService');
 
 /**
  * User Controller
@@ -221,7 +221,8 @@ const setMemberActiveHandler = async (req, res) => {
 /**
  * DELETE /api/users/:userId
  *
- * Remove member: revoke login and remove from workspace (is_active = false, company_id = null).
+ * Remove member: revoke login, remove from workspace, and delete from Supabase Auth.
+ * This allows the user to sign up again with the same email.
  * Only platform_admin and workspace_admin. Cannot delete self or (for workspace_admin) platform_admins.
  */
 const deleteMemberHandler = async (req, res) => {
@@ -233,18 +234,31 @@ const deleteMemberHandler = async (req, res) => {
       return res.status(validation.errorResponse.status).json(validation.errorResponse.body);
     }
 
-    const result = await deactivateAndRemoveFromWorkspace(userId);
-    if (!result.success) {
+    // 1. Remove from workspace (is_active = false, company_id = null)
+    const deactivateResult = await deactivateAndRemoveFromWorkspace(userId);
+    if (!deactivateResult.success) {
       return res.status(500).json({
         success: false,
         error: 'Delete failed',
-        message: result.error || 'Failed to remove member'
+        message: deactivateResult.error || 'Failed to remove member from workspace'
+      });
+    }
+
+    // 2. Delete from Supabase Auth so user can sign up again with same email
+    const authDeleteResult = await deleteAuthUser(userId);
+    if (!authDeleteResult.success) {
+      console.error('Failed to delete user from Supabase Auth:', authDeleteResult.error);
+      return res.status(500).json({
+        success: false,
+        error: 'Auth delete failed',
+        message: 'Member removed from workspace but failed to delete from auth. User may need to be deleted manually from Supabase Dashboard (Authentication → Users).',
+        details: authDeleteResult.error
       });
     }
 
     return res.status(200).json({
       success: true,
-      message: 'Member removed from workspace and login disabled',
+      message: 'Member removed from workspace and deleted from auth',
       userId
     });
   } catch (error) {
