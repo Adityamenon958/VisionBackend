@@ -1725,20 +1725,55 @@ const listDatasetsWithTestFolders = async (req, res) => {
       testCount: { $gt: 0 }
     })
       .sort({ createdAt: -1 }) // Newest first
-      .select('_id company project version status testCount totalImages createdAt')
+      .select('_id company project version status testCount totalImages createdAt datasetType annotationStatus isAugmented labelSource backupDatasetId augmentedFromVersion')
       .lean();
 
-    // ✅ Format response
-    const formattedDatasets = datasets.map(dataset => ({
-      datasetId: dataset._id.toString(),
-      company: dataset.company,
-      project: dataset.project,
-      version: dataset.version,
-      status: dataset.status,
-      testCount: dataset.testCount,
-      totalImages: dataset.totalImages,
-      createdAt: dataset.createdAt
-    }));
+    // ✅ Format response (include datasetType, annotationStatus, is_augmented, labelSource for frontend badges)
+    const getLabelSource = (d) => {
+      if (d.isAugmented && d.labelSource) return d.labelSource;
+      const dt = d.datasetType ?? (d.status === 'ready_to_train' ? 'labeled' : null);
+      if (dt === 'unlabeled') return 'unlabeled';
+      if (d.status === 'ready_to_train') return 'manually_labeled';
+      if (d.status === 'ready' && dt === 'labeled') return 'pre_labelled';
+      return null;
+    };
+    // For augmented datasets with null labelSource (created before fix), fetch source to derive correct labelSource
+    const augmentedWithoutLabelSource = datasets.filter(
+      (d) => d.isAugmented && !d.labelSource && d.backupDatasetId
+    );
+    const sourceLabelSourceMap = new Map();
+    if (augmentedWithoutLabelSource.length > 0) {
+      const sourceIds = [...new Set(augmentedWithoutLabelSource.map((d) => d.backupDatasetId.toString()))];
+      const sources = await Dataset.find({ _id: { $in: sourceIds } })
+        .select('_id status labelSource')
+        .lean();
+      for (const src of sources) {
+        const ls = src.labelSource ?? (src.status === 'ready_to_train' ? 'manually_labeled' : 'pre_labelled');
+        sourceLabelSourceMap.set(src._id.toString(), ls);
+      }
+    }
+    const formattedDatasets = datasets.map(dataset => {
+      let labelSource = getLabelSource(dataset);
+      if (dataset.isAugmented && !labelSource && dataset.backupDatasetId) {
+        labelSource = sourceLabelSourceMap.get(dataset.backupDatasetId.toString()) ?? 'pre_labelled';
+      }
+      return {
+        datasetId: dataset._id.toString(),
+        company: dataset.company,
+        project: dataset.project,
+        version: dataset.version,
+        status: dataset.status,
+        datasetType: dataset.datasetType ?? (dataset.status === 'ready_to_train' ? 'labeled' : null),
+        annotationStatus: dataset.annotationStatus ?? null,
+        labelSource,
+        is_augmented: dataset.isAugmented ?? false,
+        backup_dataset_id: dataset.backupDatasetId ? dataset.backupDatasetId.toString() : null,
+        augmentedFromVersion: dataset.augmentedFromVersion || null,
+        testCount: dataset.testCount,
+        totalImages: dataset.totalImages,
+        createdAt: dataset.createdAt
+      };
+    });
 
     return res.status(200).json({
       datasets: formattedDatasets,

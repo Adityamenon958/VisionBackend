@@ -367,6 +367,9 @@ const processAugmentationJob = async (job) => {
 
     // Create augmented dataset document (minimal fields; will be updated after success)
     // Start as inactive; will be set to active after successful augmentation
+    // Augmented datasets always have labels (from source); set datasetType for frontend badges
+    // labelSource: inherit from source so "Manually Labelled" vs "Pre-Labelled" badge is correct
+    const labelSource = originalDataset.status === 'ready_to_train' ? 'manually_labeled' : 'pre_labelled';
     augmentedDataset = new Dataset({
       company,
       project,
@@ -375,6 +378,9 @@ const processAugmentationJob = async (job) => {
       status: 'processing',
       augmentationStatus: 'running',
       isAugmented: true,
+      datasetType: 'labeled',
+      annotationStatus: null,
+      labelSource,
       backupDatasetId: originalDataset._id,
       augmentationMultiplier: augmentationMultiplier || null,
       augmentedFromVersion: originalDataset.version,

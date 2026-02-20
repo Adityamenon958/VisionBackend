@@ -953,6 +953,7 @@ const convertAnnotationsToYOLO = async (req, res) => {
     // a labeled dataset with completed annotation flow.
     dataset.datasetType = 'labeled';
     dataset.annotationStatus = 'completed';
+    dataset.labelSource = 'manually_labeled';
     dataset.unlabeledImagesCount = 0;
     // ==============================================================
 

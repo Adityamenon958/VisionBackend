@@ -5,11 +5,54 @@ const { v4: uuidv4 } = require('uuid');
 const mongoose = require('mongoose');
 const Dataset = require('../models/Dataset');
 const Category = require('../models/Category');
+const Annotation = require('../models/Annotation');
+const Image = require('../models/Image');
 const storageAdapter = require('../services/storageAdapter');
 const { preprocessingQueue, augmentationQueue } = require('../queue');
 const { generateDataYaml } = require('../utils/yoloConverter');
 const auditService = require('../services/auditService');
 const { buildWorkspaceFilter, validateWorkspaceAccess, canAccessAllWorkspaces } = require('../utils/workspaceScoping');
+const { sanitizeString } = require('../middleware/xssSanitizer');
+
+/**
+ * Derive labelSource for frontend badges (Unlabeled, Pre-Labelled, Manually Labelled).
+ * Augmented datasets use stored labelSource; non-augmented derive from status/datasetType.
+ */
+function getLabelSource(dataset) {
+  if (dataset.isAugmented && dataset.labelSource) return dataset.labelSource;
+  const dt = dataset.datasetType ?? (dataset.status === 'ready_to_train' ? 'labeled' : null);
+  if (dt === 'unlabeled') return 'unlabeled';
+  if (dataset.status === 'ready_to_train') return 'manually_labeled';
+  if (dataset.status === 'ready' && dt === 'labeled') return 'pre_labelled';
+  return null;
+}
+
+/**
+ * Delete directory with retry on EPERM/EBUSY (Windows file-in-use).
+ * Retries up to `retries` times with increasing delay (500ms, 1s, 1.5s).
+ * @param {string} dirPath - Path to delete
+ * @param {number} retries - Number of attempts (default 3)
+ * @returns {Promise<boolean>} true if deleted, false if path doesn't exist
+ * @throws {Error} If delete fails after all retries (non-EPERM/EBUSY) or on last retry
+ */
+async function deleteDirWithRetry(dirPath, retries = 3) {
+  if (!fs.existsSync(dirPath)) return false;
+  for (let i = 0; i < retries; i++) {
+    try {
+      fs.rmSync(dirPath, { recursive: true, force: true });
+      return true;
+    } catch (err) {
+      const isRetryable = (err.code === 'EPERM' || err.code === 'EBUSY') && i < retries - 1;
+      if (isRetryable) {
+        const delay = 500 * (i + 1);
+        await new Promise((r) => setTimeout(r, delay));
+      } else {
+        throw err;
+      }
+    }
+  }
+  return false;
+}
 
 /**
  * Dataset Controller - Handles dataset upload and retrieval
@@ -232,14 +275,16 @@ const uploadDataset = async (req, res) => {
     // whether any label files (.txt) were uploaded for this dataset version.
     const hasLabelFiles = dataset.files.some((f) => f.type === 'label');
     if (hasLabelFiles) {
-      // Labeled dataset: labels are present at upload time.
+      // Labeled dataset: labels are present at upload time (pre-labelled).
       dataset.datasetType = 'labeled';
       dataset.annotationStatus = null; // Not used for labeled datasets
+      dataset.labelSource = 'pre_labelled';
       dataset.unlabeledImagesCount = 0;
     } else {
       // Unlabeled dataset: no label files yet; will go through annotation flow.
       dataset.datasetType = 'unlabeled';
       dataset.annotationStatus = 'pending';
+      dataset.labelSource = 'unlabeled';
       dataset.unlabeledImagesCount = totalImages;
     }
     // ==============================================================
@@ -369,6 +414,18 @@ const getDataset = async (req, res) => {
     const datasetObject = dataset.toObject();
     datasetObject.unlabeledImages = currentUnlabeledCount;
     datasetObject.labeledImages = currentLabeledCount;
+    // ✅ Ensure frontend badge fields (datasetType, annotationStatus, is_augmented, labelSource)
+    datasetObject.datasetType = dataset.datasetType ?? (dataset.status === 'ready_to_train' ? 'labeled' : null);
+    datasetObject.annotationStatus = dataset.annotationStatus ?? null;
+    datasetObject.is_augmented = dataset.isAugmented ?? false;
+    let labelSource = getLabelSource(dataset);
+    if (dataset.isAugmented && !labelSource && dataset.backupDatasetId) {
+      const source = await Dataset.findById(dataset.backupDatasetId).select('status labelSource').lean();
+      labelSource = source?.labelSource ?? (source?.status === 'ready_to_train' ? 'manually_labeled' : 'pre_labelled');
+    }
+    datasetObject.labelSource = labelSource;
+    datasetObject.backup_dataset_id = dataset.backupDatasetId ? dataset.backupDatasetId.toString() : null;
+    datasetObject.augmentedFromVersion = dataset.augmentedFromVersion || null;
 
     // ✅ Include folders summary in response
     res.json({ ...datasetObject, folders });
@@ -415,22 +472,50 @@ const listDatasets = async (req, res) => {
       .sort({ createdAt: -1 }) // Newest first
       .select('-files'); // Exclude files array for performance (too large)
 
-    // ✅ Return list of datasets
+    // ✅ For augmented datasets with null labelSource (created before fix), fetch source to derive correct labelSource
+    const augmentedWithoutLabelSource = datasets.filter(
+      (d) => d.isAugmented && !d.labelSource && d.backupDatasetId
+    );
+    const sourceLabelSourceMap = new Map();
+    if (augmentedWithoutLabelSource.length > 0) {
+      const sourceIds = [...new Set(augmentedWithoutLabelSource.map((d) => d.backupDatasetId.toString()))];
+      const sources = await Dataset.find({ _id: { $in: sourceIds } })
+        .select('_id status labelSource')
+        .lean();
+      for (const src of sources) {
+        const ls = src.labelSource ?? (src.status === 'ready_to_train' ? 'manually_labeled' : 'pre_labelled');
+        sourceLabelSourceMap.set(src._id.toString(), ls);
+      }
+    }
+
+    // ✅ Return list of datasets (include datasetType, annotationStatus, is_augmented, labelSource for frontend badges)
     res.json({
-      datasets: datasets.map(d => ({
-        _id: d._id,
-        company: d.company,
-        project: d.project,
-        version: d.version,
-        totalImages: d.totalImages,
-        sizeBytes: d.sizeBytes,
-        status: d.status,
-        isActive: d.isActive,
-        isAugmented: d.isAugmented,
-        augmentationStatus: d.augmentationStatus,
-        createdAt: d.createdAt,
-        updatedAt: d.updatedAt
-      })),
+      datasets: datasets.map(d => {
+        let labelSource = getLabelSource(d);
+        if (d.isAugmented && !labelSource && d.backupDatasetId) {
+          labelSource = sourceLabelSourceMap.get(d.backupDatasetId.toString()) ?? 'pre_labelled';
+        }
+        return {
+          _id: d._id,
+          company: d.company,
+          project: d.project,
+          version: d.version,
+          totalImages: d.totalImages,
+          sizeBytes: d.sizeBytes,
+          status: d.status,
+          datasetType: d.datasetType ?? (d.status === 'ready_to_train' ? 'labeled' : null),
+          annotationStatus: d.annotationStatus ?? null,
+          labelSource,
+          is_augmented: d.isAugmented ?? false,
+          isActive: d.isActive,
+          isAugmented: d.isAugmented,
+          augmentationStatus: d.augmentationStatus,
+          backup_dataset_id: d.backupDatasetId ? d.backupDatasetId.toString() : null,
+          augmentedFromVersion: d.augmentedFromVersion || null,
+          createdAt: d.createdAt,
+          updatedAt: d.updatedAt
+        };
+      }),
       count: datasets.length
     });
 
@@ -471,6 +556,13 @@ const getDatasetStatus = async (req, res) => {
       }
     }
 
+    // ✅ Derive labelSource (for augmented with null, fetch source)
+    let labelSource = getLabelSource(dataset);
+    if (dataset.isAugmented && !labelSource && dataset.backupDatasetId) {
+      const source = await Dataset.findById(dataset.backupDatasetId).select('status labelSource').lean();
+      labelSource = source?.labelSource ?? (source?.status === 'ready_to_train' ? 'manually_labeled' : 'pre_labelled');
+    }
+
     // ✅ Return minimal status info (good for frequent polling)
     res.json({
       id: dataset._id.toString(),
@@ -480,6 +572,12 @@ const getDatasetStatus = async (req, res) => {
       sizeBytes: dataset.sizeBytes,
       createdAt: dataset.createdAt,
       uploadErrors: dataset.uploadErrors.length > 0 ? dataset.uploadErrors : undefined,
+      datasetType: dataset.datasetType ?? (dataset.status === 'ready_to_train' ? 'labeled' : null),
+      annotationStatus: dataset.annotationStatus ?? null,
+      labelSource,
+      is_augmented: dataset.isAugmented ?? false,
+      backup_dataset_id: dataset.backupDatasetId ? dataset.backupDatasetId.toString() : null,
+      augmentedFromVersion: dataset.augmentedFromVersion || null,
       // Include preprocessing progress info if processing
       ...(dataset.status === 'processing' && {
         trainCount: dataset.trainCount,
@@ -487,7 +585,6 @@ const getDatasetStatus = async (req, res) => {
       }),
       // Augmentation fields for frontend polling
       augmentation_status: dataset.augmentationStatus,
-      is_augmented: dataset.isAugmented,
       backup_dataset_id: dataset.backupDatasetId || null,
       augmentation_error: dataset.augmentationError || null,
       // Active dataset flag (indicates if this is the active version for the project)
@@ -1184,21 +1281,76 @@ const deleteDataset = async (req, res) => {
       });
     }
 
-    // ✅ Delete files from storage
-    if (dataset.storagePath && fs.existsSync(dataset.storagePath)) {
-      try {
-        fs.rmSync(dataset.storagePath, { recursive: true, force: true });
-        console.log(`🗑️ [DELETE] Deleted dataset files: ${dataset.storagePath}`);
-      } catch (deleteError) {
-        console.error(`⚠️ [DELETE] Failed to delete dataset files: ${deleteError.message}`, {
-          storagePath: dataset.storagePath,
-          error: deleteError
-        });
-        // Continue with soft delete even if file deletion fails
-      }
-    } else {
-      console.warn(`[DELETE] Storage path does not exist or is missing: ${dataset.storagePath}`);
+    // ✅ Delete files from storage (use resolved path; fallback to buildDatasetPath if stored path missing/wrong)
+    const fallbackPath = path.normalize(storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version));
+    const pathsToTry = [
+      dataset.storagePath && path.normalize(path.resolve(dataset.storagePath)),
+      fallbackPath
+    ].filter(Boolean);
+    const uniquePaths = [...new Set(pathsToTry.map((p) => path.normalize(p)))];
+
+    // Debug: log paths and existsSync result before attempting deletion
+    const basePath = storageAdapter.getBasePath ? storageAdapter.getBasePath() : path.join(process.cwd(), 'datasets');
+    console.log(`[DELETE] File deletion debug:`, {
+      company: dataset.company,
+      project: dataset.project,
+      version: dataset.version,
+      storagePath_from_db: dataset.storagePath || null,
+      basePath,
+      fallbackPath,
+      pathsToTry: uniquePaths,
+      cwd: process.cwd()
+    });
+    for (const dirPath of uniquePaths) {
+      const exists = fs.existsSync(dirPath);
+      console.log(`[DELETE] fs.existsSync("${dirPath}") = ${exists}`);
     }
+
+    let filesDeleted = false;
+    let pathExists = false;
+    for (const dirPath of uniquePaths) {
+      if (fs.existsSync(dirPath)) {
+        pathExists = true;
+        try {
+          const deleted = await deleteDirWithRetry(dirPath, 3);
+          if (deleted) {
+            console.log(`🗑️ [DELETE] Deleted dataset files: ${dirPath}`);
+            filesDeleted = true;
+            break;
+          }
+        } catch (deleteError) {
+          console.error(`⚠️ [DELETE] Failed to delete dataset files: ${deleteError.message}`, {
+            dirPath,
+            error: deleteError
+          });
+        }
+      }
+    }
+    if (!filesDeleted) {
+      if (pathExists) {
+        console.warn(`[DELETE] Deletion failed (EPERM/file in use); files may remain on disk:`, {
+          storagePath: dataset.storagePath,
+          fallbackPath,
+          company: dataset.company,
+          project: dataset.project,
+          version: dataset.version
+        });
+      } else {
+        console.warn(`[DELETE] Path not found; files may remain on disk:`, {
+          storagePath: dataset.storagePath,
+          fallbackPath,
+          company: dataset.company,
+          project: dataset.project,
+          version: dataset.version
+        });
+      }
+    }
+
+    // ✅ Delete related metadata (annotations, categories, images)
+    const datasetIdObj = dataset._id;
+    await Annotation.deleteMany({ datasetId: datasetIdObj });
+    await Category.deleteMany({ datasetId: datasetIdObj });
+    await Image.deleteMany({ datasetId: datasetIdObj });
 
     // ✅ Soft delete: Mark as deleted but keep document
     dataset.deletedAt = new Date();
@@ -1330,29 +1482,78 @@ const deleteDatasetByVersion = async (req, res) => {
       });
     }
 
-    // ✅ Delete files from storage
-    if (dataset.storagePath && fs.existsSync(dataset.storagePath)) {
-      try {
-        fs.rmSync(dataset.storagePath, { recursive: true, force: true });
-        console.log(`🗑️ [DELETE] Deleted dataset files: ${dataset.storagePath}`);
-      } catch (deleteError) {
-        console.error(`⚠️ [DELETE] Failed to delete dataset files: ${deleteError.message}`, {
+    // ✅ Delete files from storage (use resolved path; fallback to buildDatasetPath if stored path missing/wrong)
+    const fallbackPath = path.normalize(storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version));
+    const pathsToTry = [
+      dataset.storagePath && path.normalize(path.resolve(dataset.storagePath)),
+      fallbackPath
+    ].filter(Boolean);
+    const uniquePaths = [...new Set(pathsToTry.map((p) => path.normalize(p)))];
+
+    // Debug: log paths and existsSync result before attempting deletion
+    const basePath = storageAdapter.getBasePath ? storageAdapter.getBasePath() : path.join(process.cwd(), 'datasets');
+    console.log(`[DELETE] File deletion debug (by version):`, {
+      company,
+      project,
+      version,
+      storagePath_from_db: dataset.storagePath || null,
+      basePath,
+      fallbackPath,
+      pathsToTry: uniquePaths,
+      cwd: process.cwd()
+    });
+    for (const dirPath of uniquePaths) {
+      const exists = fs.existsSync(dirPath);
+      console.log(`[DELETE] fs.existsSync("${dirPath}") = ${exists}`);
+    }
+
+    let filesDeleted = false;
+    let pathExists = false;
+    for (const dirPath of uniquePaths) {
+      if (fs.existsSync(dirPath)) {
+        pathExists = true;
+        try {
+          const deleted = await deleteDirWithRetry(dirPath, 3);
+          if (deleted) {
+            console.log(`🗑️ [DELETE] Deleted dataset files: ${dirPath}`);
+            filesDeleted = true;
+            break;
+          }
+        } catch (deleteError) {
+          console.error(`⚠️ [DELETE] Failed to delete dataset files: ${deleteError.message}`, {
+            dirPath,
+            company,
+            project,
+            version,
+            error: deleteError
+          });
+        }
+      }
+    }
+    if (!filesDeleted) {
+      if (pathExists) {
+        console.warn(`[DELETE] Deletion failed (EPERM/file in use); files may remain on disk:`, {
           storagePath: dataset.storagePath,
+          fallbackPath,
           company,
           project,
-          version,
-          error: deleteError
+          version
         });
-        // Continue with soft delete even if file deletion fails
+      } else {
+        console.warn(`[DELETE] Path not found; files may remain on disk:`, {
+          storagePath: dataset.storagePath,
+          fallbackPath,
+          company,
+          project,
+          version
+        });
       }
-    } else {
-      console.warn(`[DELETE] Storage path does not exist or is missing:`, {
-        storagePath: dataset.storagePath,
-        company,
-        project,
-        version
-      });
     }
+
+    // ✅ Delete related metadata (annotations, categories, images)
+    await Annotation.deleteMany({ datasetId: dataset._id });
+    await Category.deleteMany({ datasetId: dataset._id });
+    await Image.deleteMany({ datasetId: dataset._id });
 
     // ✅ Soft delete: Mark as deleted but keep document
     dataset.deletedAt = new Date();

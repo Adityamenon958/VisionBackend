@@ -178,6 +178,13 @@ const datasetSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  // Label source: where labels came from (for frontend badges: Unlabeled, Pre-Labelled, Manually Labelled)
+  // Set for augmented datasets from source; derived for non-augmented from status/datasetType
+  labelSource: {
+    type: String,
+    enum: ['unlabeled', 'pre_labelled', 'manually_labeled'],
+    default: null
+  },
 
   // Soft delete: Mark dataset as deleted without removing the document
   deletedAt: {
