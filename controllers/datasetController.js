@@ -1,7 +1,7 @@
+const crypto = require('crypto');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 const path = require('path');
-const { v4: uuidv4 } = require('uuid');
 const mongoose = require('mongoose');
 const Dataset = require('../models/Dataset');
 const Category = require('../models/Category');
@@ -173,6 +173,9 @@ const uploadDataset = async (req, res) => {
     await storageAdapter.ensureDir(imagesPath);
     await storageAdapter.ensureDir(labelsPath);
 
+    // ✅ Hash cache: same baseName (image+label pair) → same hash, compute once per pair
+    const hashCache = new Map();
+
     // ✅ Process each uploaded file
     // Note: Use uploadedFiles array (from req.files.files) instead of req.files
     for (const file of uploadedFiles) {
@@ -210,11 +213,17 @@ const uploadDataset = async (req, res) => {
       // ✅ Determine folder name from fileMeta (default: 'dataset')
       const folderName = (fileMetaMap && fileMetaMap[originalName]) ? fileMetaMap[originalName] : 'dataset';
 
-      // ✅ Generate unique filename to avoid collisions
-      // Format: {datasetId}_{uuid}_{originalName}
-      // ⚠️ CAUTION: This prevents filename collisions when multiple users
-      // upload files with the same name
-      const uniqueName = `${datasetId}_${uuidv4()}_${originalName}`;
+      // ✅ Generate unique filename using 12-char hash (avoids Windows 260-char path limit)
+      // Image+label pairs share same base name → same hash (YOLO expects matching base names)
+      // Cache hash per baseName to avoid recomputing for image+label pairs (~2x faster)
+      const baseName = path.parse(originalName).name;
+      let hash = hashCache.get(baseName);
+      if (hash === undefined) {
+        const hashInput = `${datasetId}_${baseName}`;
+        hash = crypto.createHash('sha256').update(hashInput).digest('hex').substring(0, 12);
+        hashCache.set(baseName, hash);
+      }
+      const uniqueName = `${hash}${ext}`;
       
       // ✅ Build destination paths to preserve folder grouping
       // For images: ${imagesPath}/${folderName}/${uniqueName}
@@ -403,17 +412,30 @@ const getDataset = async (req, res) => {
       });
     }
 
-    // ✅ Recalculate unlabeled images count dynamically (ensures frontend always shows annotation option if any image is unlabeled)
-    // This ensures the count is always current and not stale
-    // Training process is unaffected as it uses YOLO .txt files in labels/train folder, not hasLabels flag
-    const Image = require('../models/Image');
-    const currentUnlabeledCount = await Image.countDocuments({ datasetId, hasLabels: false });
-    const currentLabeledCount = await Image.countDocuments({ datasetId, hasLabels: true });
-    
+    // ✅ Compute labeledImages / unlabeledImages
+    // For augmented datasets (or any with train/val/test splits): use split counts (all in splits are labeled)
+    // Otherwise: use Image collection hasLabels counts
+    let currentLabeledCount;
+    let currentUnlabeledCount;
+    const splitTotal = (dataset.trainCount ?? 0) + (dataset.valCount ?? 0) + (dataset.testCount ?? 0);
+    const hasSplits = splitTotal > 0;
+    const useSplitCounts = dataset.isAugmented || hasSplits;
+
+    if (useSplitCounts) {
+      currentLabeledCount = splitTotal;
+      currentUnlabeledCount = Math.max(0, (dataset.totalImages ?? 0) - splitTotal);
+    } else {
+      const Image = require('../models/Image');
+      currentUnlabeledCount = await Image.countDocuments({ datasetId, hasLabels: false });
+      currentLabeledCount = await Image.countDocuments({ datasetId, hasLabels: true });
+    }
+
     // Create response object with updated counts
     const datasetObject = dataset.toObject();
-    datasetObject.unlabeledImages = currentUnlabeledCount;
     datasetObject.labeledImages = currentLabeledCount;
+    datasetObject.unlabeledImages = currentUnlabeledCount;
+    datasetObject.labeled_images = currentLabeledCount;
+    datasetObject.unlabeled_images = currentUnlabeledCount;
     // ✅ Ensure frontend badge fields (datasetType, annotationStatus, is_augmented, labelSource)
     datasetObject.datasetType = dataset.datasetType ?? (dataset.status === 'ready_to_train' ? 'labeled' : null);
     datasetObject.annotationStatus = dataset.annotationStatus ?? null;
@@ -762,8 +784,15 @@ const getDatasetFiles = async (req, res) => {
     const paginatedFiles = files.slice(startIndex, endIndex);
 
     // ✅ Return paginated results
+    // Include totalFiles/filesCount/firstFile for frontend compatibility (DatasetManager expects these)
+    const firstFile = paginatedFiles.find(f => f.type === 'image') || paginatedFiles[0];
     res.json({
       files: paginatedFiles,
+      totalFiles: files.length,
+      filesCount: paginatedFiles.length,
+      firstFile: firstFile || null,
+      firstFileId: firstFile ? (firstFile.storedName || firstFile._id?.toString()) : undefined,
+      firstFileThumbnailAvailable: firstFile && firstFile.type === 'image',
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -1588,10 +1617,34 @@ const deleteDatasetByVersion = async (req, res) => {
 };
 
 /**
+ * Parse YOLO label file and extract unique class IDs.
+ * Format: class_id center_x center_y width height (per line)
+ * @param {string} content - File content as string
+ * @returns {number[]} Sorted unique class IDs
+ */
+function parseYoloLabelContent(content) {
+  const classIds = new Set();
+  const lines = (content || '').trim().split('\n');
+  for (const line of lines) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length >= 5) {
+      const classId = parseInt(parts[0], 10);
+      if (!isNaN(classId) && classId >= 0) classIds.add(classId);
+    }
+  }
+  return Array.from(classIds).sort((a, b) => a - b);
+}
+
+/**
  * GET /api/dataset/:datasetId/detected-classes
  * 
  * Returns detected class IDs and default class names for labeled datasets.
  * Used by frontend to prompt user to map class IDs to meaningful names.
+ * 
+ * Sources (in order):
+ * 1. dataset.labels (populated by preprocessing when status=ready)
+ * 2. Fallback: parse label files from dataset.files (handles pre-processing or when labels not yet populated)
+ * 3. Fallback: parse labels/train, labels/val, labels/test on disk (local storage only)
  */
 const getDetectedClasses = async (req, res) => {
   try {
@@ -1614,14 +1667,13 @@ const getDetectedClasses = async (req, res) => {
       });
     }
 
-    // Extract class IDs from dataset.labels array
+    // Extract class IDs from dataset.labels array (populated by preprocessing)
     // Labels are stored as ["class_0", "class_1", "class_2", ...]
-    const classIds = [];
-    const classNames = [];
+    let classIds = [];
+    let classNames = [];
 
-    if (dataset.labels && Array.isArray(dataset.labels)) {
+    if (dataset.labels && Array.isArray(dataset.labels) && dataset.labels.length > 0) {
       for (const label of dataset.labels) {
-        // Extract class ID from "class_0" format
         const match = label.match(/^class_(\d+)$/);
         if (match) {
           const classId = parseInt(match[1], 10);
@@ -1630,6 +1682,84 @@ const getDetectedClasses = async (req, res) => {
             classNames.push(label);
           }
         }
+      }
+    }
+
+    // Fallback: parse label files when dataset.labels is empty (e.g. before processing, or Azure where preprocessing skips label extraction)
+    if (classIds.length === 0 && dataset.storagePath && dataset.files && dataset.files.length > 0) {
+      const labelFiles = dataset.files.filter((f) => f.type === 'label' && f.storedPath);
+      const allClassIds = new Set();
+      for (const file of labelFiles) {
+        try {
+          const fullPath = path.join(dataset.storagePath, file.storedPath);
+          if (await storageAdapter.exists(fullPath)) {
+            const buffer = await storageAdapter.readFile(fullPath);
+            const content = buffer.toString('utf-8');
+            const ids = parseYoloLabelContent(content);
+            ids.forEach((id) => allClassIds.add(id));
+          }
+        } catch (e) {
+          // Skip unreadable files
+        }
+      }
+      if (allClassIds.size > 0) {
+        classIds = Array.from(allClassIds).sort((a, b) => a - b);
+        classNames = classIds.map((id) => `class_${id}`);
+      }
+    }
+
+    // Fallback 2: parse labels/train, labels/val, labels/test on disk (local storage)
+    if (classIds.length === 0 && dataset.storagePath && fs.existsSync(dataset.storagePath)) {
+      const allClassIds = new Set();
+      for (const split of ['train', 'val', 'test']) {
+        const splitPath = path.join(dataset.storagePath, 'labels', split);
+        try {
+          const entries = await fsPromises.readdir(splitPath, { withFileTypes: true });
+          for (const ent of entries) {
+            if (ent.isFile() && ent.name.endsWith('.txt')) {
+              const labelPath = path.join(splitPath, ent.name);
+              const content = await fsPromises.readFile(labelPath, 'utf-8');
+              const ids = parseYoloLabelContent(content);
+              ids.forEach((id) => allClassIds.add(id));
+            }
+          }
+        } catch {
+          // Folder may not exist
+        }
+      }
+      if (allClassIds.size > 0) {
+        classIds = Array.from(allClassIds).sort((a, b) => a - b);
+        classNames = classIds.map((id) => `class_${id}`);
+      }
+    }
+
+    // Fallback 3: recursively walk labels/ folder (handles labels/good/, labels/dataset/, etc. when dataset.files empty)
+    if (classIds.length === 0 && dataset.storagePath && fs.existsSync(dataset.storagePath)) {
+      const labelsRoot = path.join(dataset.storagePath, 'labels');
+      const allClassIds = new Set();
+      async function walkLabels(dir) {
+        try {
+          const entries = await fsPromises.readdir(dir, { withFileTypes: true });
+          for (const ent of entries) {
+            const fullPath = path.join(dir, ent.name);
+            if (ent.isDirectory()) {
+              await walkLabels(fullPath);
+            } else if (ent.isFile() && ent.name.endsWith('.txt')) {
+              const content = await fsPromises.readFile(fullPath, 'utf-8');
+              const ids = parseYoloLabelContent(content);
+              ids.forEach((id) => allClassIds.add(id));
+            }
+          }
+        } catch {
+          // Ignore
+        }
+      }
+      if (fs.existsSync(labelsRoot)) {
+        await walkLabels(labelsRoot);
+      }
+      if (allClassIds.size > 0) {
+        classIds = Array.from(allClassIds).sort((a, b) => a - b);
+        classNames = classIds.map((id) => `class_${id}`);
       }
     }
 
@@ -1642,6 +1772,20 @@ const getDetectedClasses = async (req, res) => {
 
     // Check if categories already exist
     const existingCategories = await Category.countDocuments({ datasetId });
+
+    // Debug: log when no classes found (helps diagnose empty detected-classes)
+    if (sortedClassIds.length === 0) {
+      const labelsRoot = dataset.storagePath ? path.join(dataset.storagePath, 'labels') : null;
+      console.warn(`[getDetectedClasses] No classes found for dataset ${datasetId}:`, {
+        status: dataset.status,
+        isAugmented: dataset.isAugmented,
+        filesCount: dataset.files?.length ?? 0,
+        labelFilesCount: dataset.files?.filter(f => f.type === 'label').length ?? 0,
+        storagePathExists: dataset.storagePath ? fs.existsSync(dataset.storagePath) : false,
+        labelsFolderExists: labelsRoot ? fs.existsSync(labelsRoot) : false,
+        datasetLabelsLength: dataset.labels?.length ?? 0
+      });
+    }
 
     // ✅ Build samples array: find one representative image per class ID
     const Image = require('../models/Image');
@@ -2275,6 +2419,124 @@ const cancelAugmentation = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/dataset/:datasetId/download
+ *
+ * Streams the dataset as a ZIP file. Files are named using originalName for usability.
+ * Includes images, labels, data.yaml, and class-mapping.json when present.
+ *
+ * Query params:
+ *   - flat=true  → All images in images/, all labels in labels/ (no train/val/test subdirs)
+ *   - flat=false (default) → Full structure: images/train/, images/val/, labels/train/, etc.
+ */
+const downloadDataset = async (req, res) => {
+  const archiver = require('archiver');
+  try {
+    const { datasetId } = req.params;
+    const flat = req.query.flat === 'true' || req.query.flat === '1';
+
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return res.status(404).json({ error: 'Dataset not found' });
+    }
+
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, dataset.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this dataset',
+        });
+      }
+    }
+
+    const storagePath = dataset.storagePath;
+    const exists = await storageAdapter.exists(storagePath);
+    if (!exists) {
+      return res.status(404).json({
+        error: 'Dataset files not found',
+        message: 'The dataset storage path does not exist.',
+      });
+    }
+
+    const safeVersion = (dataset.version || 'dataset').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const zipFilename = `${dataset.company}_${dataset.project}_${safeVersion}${flat ? '_flat' : ''}.zip`;
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipFilename}"`);
+
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    archive.on('error', (err) => {
+      console.error('[downloadDataset] Archiver error:', err);
+      if (!res.headersSent) res.status(500).json({ error: 'Failed to create archive' });
+    });
+    archive.pipe(res);
+
+    // Build map: storedName (basename) -> originalName (files may be in train/val/test after preprocessing)
+    const storedNameToOriginal = new Map();
+    if (dataset.files && dataset.files.length > 0) {
+      for (const f of dataset.files) {
+        const storedName = f.storedName || path.basename(f.storedPath || '');
+        if (storedName && f.originalName) storedNameToOriginal.set(storedName, f.originalName);
+      }
+    }
+
+    // Recursively collect or add files
+    async function addDirToArchive(dirPath, zipPrefix, currentSplit) {
+      const entries = await fsPromises.readdir(dirPath, { withFileTypes: true });
+      for (const e of entries) {
+        const full = path.join(dirPath, e.name);
+        const split = ['train', 'val', 'test'].includes(e.name) ? e.name : currentSplit;
+        if (e.isDirectory()) {
+          const nextPrefix = flat ? zipPrefix : (zipPrefix ? `${zipPrefix}/${e.name}` : e.name);
+          await addDirToArchive(full, nextPrefix, split);
+        } else {
+          const originalName = storedNameToOriginal.get(e.name) || e.name;
+          let zipName;
+          if (flat) {
+            zipName = split ? `${zipPrefix}/${split}_${originalName}` : `${zipPrefix}/${originalName}`;
+          } else {
+            zipName = zipPrefix ? `${zipPrefix}/${originalName}` : originalName;
+          }
+          const exists = await storageAdapter.exists(full);
+          if (exists) {
+            const buffer = await storageAdapter.readFile(full);
+            archive.append(buffer, { name: zipName.replace(/\\/g, '/') });
+          }
+        }
+      }
+    }
+
+    const imagesDir = path.join(storagePath, 'images');
+    const labelsDir = path.join(storagePath, 'labels');
+    if (await storageAdapter.exists(imagesDir)) {
+      await addDirToArchive(imagesDir, 'images', null);
+    }
+    if (await storageAdapter.exists(labelsDir)) {
+      await addDirToArchive(labelsDir, 'labels', null);
+    }
+
+    // Add root metadata files
+    for (const name of ['data.yaml', 'class-mapping.json']) {
+      const fullPath = path.join(storagePath, name);
+      if (await storageAdapter.exists(fullPath)) {
+        const buffer = await storageAdapter.readFile(fullPath);
+        archive.append(buffer, { name });
+      }
+    }
+
+    await archive.finalize();
+  } catch (error) {
+    console.error('[downloadDataset] Error:', error);
+    if (!res.headersSent) {
+      return res.status(500).json({
+        error: 'Internal server error',
+        message: error.message,
+      });
+    }
+  }
+};
+
 module.exports = {
   uploadDataset,
   listDatasets,
@@ -2293,5 +2555,6 @@ module.exports = {
   getDetectedClasses,
   createCategoriesFromClasses,
   startAugmentation,
-  cancelAugmentation
+  cancelAugmentation,
+  downloadDataset
 };

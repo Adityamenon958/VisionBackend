@@ -23,7 +23,8 @@ const {
   deleteDataset,
   deleteDatasetByVersion,
   getDetectedClasses,
-  createCategoriesFromClasses
+  createCategoriesFromClasses,
+  downloadDataset
 } = require('../controllers/datasetController');
 
 /**
@@ -222,11 +223,19 @@ router.get('/:datasetId/file/:fileId', authenticateToken, requirePermission('vie
 
 /**
  * GET /api/dataset/:datasetId/dependencies
- * 
+ *
  * Get dependencies (training jobs, models, inference jobs) that use this dataset
  * Used for showing confirmation dialog before deletion
  */
 router.get('/:datasetId/dependencies', authenticateToken, requirePermission('viewDatasets'), getDatasetDependencies);
+
+/**
+ * GET /api/dataset/:datasetId/download
+ *
+ * Streams the dataset as a ZIP file. Files use originalName for user-friendly download.
+ * Includes images, labels, data.yaml, and class-mapping.json.
+ */
+router.get('/:datasetId/download', authenticateToken, requirePermission('viewDatasets'), downloadDataset);
 
 /**
  * PATCH /api/dataset/:datasetId

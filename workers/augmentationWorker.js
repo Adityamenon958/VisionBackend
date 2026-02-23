@@ -700,6 +700,34 @@ const processAugmentationJob = async (job) => {
       augmentedDataset.files = filesManifest;
     }
 
+    // Extract labels (class_0, class_1, ...) from label files for detected-classes endpoint
+    const labelsSet = new Set();
+    for (const split of ['train', 'val', 'test']) {
+      const splitLabelsDir = path.join(labelRoot, split);
+      try {
+        const entries = await fs.readdir(splitLabelsDir, { withFileTypes: true });
+        for (const ent of entries) {
+          if (ent.isFile() && ent.name.endsWith('.txt')) {
+            const labelPath = path.join(splitLabelsDir, ent.name);
+            const content = await fs.readFile(labelPath, 'utf-8');
+            const lines = content.trim().split('\n');
+            for (const line of lines) {
+              const parts = line.trim().split(/\s+/);
+              if (parts.length >= 5) {
+                const classId = parseInt(parts[0], 10);
+                if (!isNaN(classId) && classId >= 0) labelsSet.add(`class_${classId}`);
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+    augmentedDataset.labels = Array.from(labelsSet).sort((a, b) => {
+      const idA = parseInt(a.replace('class_', ''), 10);
+      const idB = parseInt(b.replace('class_', ''), 10);
+      return idA - idB;
+    });
+
     // Final cancellation check before activation (race condition safety)
     const latestDataset = await Dataset.findById(datasetId);
     if (latestDataset?.augmentationStatus === 'cancelled') {
