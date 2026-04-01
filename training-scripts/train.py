@@ -362,6 +362,12 @@ def train_yolo(config):
             'exist_ok': exist_ok,
             'verbose': True,  # Enable verbose output for log parsing
             'device': device,  # ✅ Explicitly set device (GPU if available)
+            'hsv_h': config.get('hsv_h', 0.0),
+            'hsv_s': config.get('hsv_s', 0.7),
+            'hsv_v': config.get('hsv_v', 0.4),
+            'fliplr': config.get('fliplr', 0.5),
+            'mosaic': config.get('mosaic', 1.0),
+            'mixup': config.get('mixup', 0.0),
         }
         
         # Start training

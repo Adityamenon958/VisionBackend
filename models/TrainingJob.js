@@ -60,6 +60,13 @@ const trainingJobSchema = new mongoose.Schema({
     default: null
   },
 
+  // Optional training augmentation strategy preset selected by frontend.
+  augmentationPreset: {
+    type: String,
+    enum: ['none', 'color_invariant', 'small_defect', 'low_light', 'robust'],
+    default: 'none'
+  },
+
   // Training status
   // States: 'queued' → 'running' → 'completed' / 'failed' / 'cancelled'
   status: {

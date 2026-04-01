@@ -46,6 +46,13 @@ function normalizeModelSize(input) {
 
 /** Max length for optional modelVersion / display name (matches typical frontend limit). */
 const MODEL_VERSION_MAX_LENGTH = 120;
+const ALLOWED_AUGMENTATION_PRESETS = new Set([
+  'none',
+  'color_invariant',
+  'small_defect',
+  'low_light',
+  'robust'
+]);
 
 /**
  * Parse optional `modelVersion` from training start body.
@@ -348,7 +355,16 @@ const getDefaultHyperparameters = async (req, res) => {
  */
 const startTraining = async (req, res) => {
   try {
-    const { datasetId, modelId, modelType, modelSize, modelKey, hyperparameters, modelVersion } =
+    const {
+      datasetId,
+      modelId,
+      modelType,
+      modelSize,
+      modelKey,
+      hyperparameters,
+      modelVersion,
+      augmentationPreset
+    } =
       req.body;
     const normalizedModelSize = normalizeModelSize(modelSize);
     const normalizedModelKey = modelKey ? String(modelKey).trim() : null;
@@ -358,6 +374,15 @@ const startTraining = async (req, res) => {
       return res.status(400).json({ error: parsedVersion.error });
     }
     const requestedModelVersion = parsedVersion.value;
+    const normalizedAugmentationPreset = augmentationPreset
+      ? String(augmentationPreset).trim()
+      : 'none';
+    if (!ALLOWED_AUGMENTATION_PRESETS.has(normalizedAugmentationPreset)) {
+      return res.status(400).json({
+        error:
+          'Invalid augmentationPreset. Allowed values: none, color_invariant, small_defect, low_light, robust'
+      });
+    }
 
     // Validate required fields
     if (!datasetId) {
@@ -497,6 +522,7 @@ const startTraining = async (req, res) => {
       modelSize: finalModelSize,
       modelKey: finalModelKey,
       requestedModelVersion: requestedModelVersion || null,
+      augmentationPreset: normalizedAugmentationPreset,
       status: 'queued',
       hyperparameters: mergedHyperparameters
     });
@@ -514,6 +540,7 @@ const startTraining = async (req, res) => {
       modelKey: finalModelKey,
       modelId: modelId || null, // ✅ Pass modelId if provided (for trained model)
       requestedModelVersion: requestedModelVersion || null,
+      augmentationPreset: normalizedAugmentationPreset,
       hyperparameters: mergedHyperparameters
     }, {
       attempts: 1,
@@ -545,6 +572,7 @@ const startTraining = async (req, res) => {
       modelType,
       modelSize: finalModelSize,
       ...(requestedModelVersion && { modelVersion: requestedModelVersion }),
+      augmentationPreset: normalizedAugmentationPreset,
       hyperparameters: mergedHyperparameters
     });
 
@@ -596,6 +624,7 @@ const getTrainingStatus = async (req, res) => {
       hyperparameters: trainingJob.hyperparameters, // ✅ Include hyperparameters used
       modelType: trainingJob.modelType,
       modelSize: trainingJob.modelSize,
+      augmentationPreset: trainingJob.augmentationPreset || 'none',
       /** Display / storage folder name if client sent modelVersion at train start; mirrors registered Model.modelVersion when complete */
       requestedModelVersion: trainingJob.requestedModelVersion || null,
       startedAt: trainingJob.startedAt,
@@ -774,6 +803,7 @@ const retryTraining = async (req, res) => {
       modelType: originalJob.modelType,
       modelSize: originalJob.modelSize || 'n',
       requestedModelVersion: originalJob.requestedModelVersion || null,
+      augmentationPreset: originalJob.augmentationPreset || 'none',
       status: 'queued',
       hyperparameters: originalJob.hyperparameters
     });
@@ -789,6 +819,7 @@ const retryTraining = async (req, res) => {
       modelType: originalJob.modelType,
       modelSize: originalJob.modelSize || 'n',
       requestedModelVersion: originalJob.requestedModelVersion || null,
+      augmentationPreset: originalJob.augmentationPreset || 'none',
       hyperparameters: originalJob.hyperparameters
     }, {
       attempts: 1,

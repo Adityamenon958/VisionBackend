@@ -48,6 +48,31 @@ const Model = require('../models/Model');
 const storageAdapter = require('../services/storageAdapter');
 const trainingService = require('../services/trainingService');
 
+const AUGMENTATION_PRESETS = {
+  none: {},
+  color_invariant: {
+    hsv_h: 0.0,
+    hsv_s: 0.0,
+    hsv_v: 0.6,
+    mixup: 0.1
+  },
+  small_defect: {
+    mosaic: 1.0,
+    mixup: 0.2,
+    scale: 0.5
+  },
+  low_light: {
+    hsv_v: 0.8
+  },
+  robust: {
+    hsv_s: 0.5,
+    hsv_v: 0.5,
+    fliplr: 0.5,
+    mosaic: 1.0,
+    mixup: 0.2
+  }
+};
+
 /**
  * Training Worker - Background Job Processor
  * 
@@ -280,7 +305,16 @@ async function downloadBaseModelForJob({ jobId, modelSize, modelKey = null, logg
  * @param {string} modelSize - Optional model size (n, s, m, l) - defaults to 'n'
  * @returns {Promise<string>} Path to generated config file
  */
-async function generateTrainingConfig(hyperparameters, datasetPath, outputPath, modelType, modelSize = 'n', modelPath = null) {
+async function generateTrainingConfig(
+  hyperparameters,
+  datasetPath,
+  outputPath,
+  modelType,
+  modelSize = 'n',
+  modelPath = null,
+  modelKey = null,
+  augmentationPreset = 'none'
+) {
   const dataYamlPath = path.join(datasetPath, 'data.yaml');
   
   // ✅ Check if data.yaml already exists with category names (from convertAnnotationsToYOLO)
@@ -320,6 +354,7 @@ names: []
 
   // ✅ Use provided modelPath (trained model checkpoint) or get base model path
   const finalModelPath = modelPath || getBaseModelPath(modelType, modelSize, modelKey);
+  const augmentation = AUGMENTATION_PRESETS[augmentationPreset] || {};
 
   // Create training config
   const config = {
@@ -331,7 +366,8 @@ names: []
     data: dataYamlPath,
     project: path.join(path.dirname(outputPath), 'runs'),
     name: 'train',
-    exist_ok: true
+    exist_ok: true,
+    ...augmentation
   };
 
   // Add model path if available (for YOLO)
@@ -448,7 +484,8 @@ const processTrainingJob = async (job) => {
     modelKey = null,
     modelId,
     hyperparameters,
-    requestedModelVersion: queueRequestedVersion = null
+    requestedModelVersion: queueRequestedVersion = null,
+    augmentationPreset = 'none'
   } = job.data;
 
   console.log(`🚀 Starting training job ${jobId}...`);
@@ -562,7 +599,16 @@ const processTrainingJob = async (job) => {
     // ✅ Generate training config
     // Use modelSize from job data (defaults to 'n' if not provided)
     const configPath = path.join(modelStoragePath, 'training-config.json');
-    await generateTrainingConfig(hyperparameters, datasetPath, configPath, modelType, modelSize, modelPath);
+    await generateTrainingConfig(
+      hyperparameters,
+      datasetPath,
+      configPath,
+      modelType,
+      modelSize,
+      modelPath,
+      modelKey,
+      augmentationPreset
+    );
 
     // ✅ Spawn Python training process
     // Note: This assumes you have a Python training script at training-scripts/train.py
