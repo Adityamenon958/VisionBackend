@@ -28,33 +28,6 @@ function getLabelSource(dataset) {
 }
 
 /**
- * Delete directory with retry on EPERM/EBUSY (Windows file-in-use).
- * Retries up to `retries` times with increasing delay (500ms, 1s, 1.5s).
- * @param {string} dirPath - Path to delete
- * @param {number} retries - Number of attempts (default 3)
- * @returns {Promise<boolean>} true if deleted, false if path doesn't exist
- * @throws {Error} If delete fails after all retries (non-EPERM/EBUSY) or on last retry
- */
-async function deleteDirWithRetry(dirPath, retries = 3) {
-  if (!fs.existsSync(dirPath)) return false;
-  for (let i = 0; i < retries; i++) {
-    try {
-      fs.rmSync(dirPath, { recursive: true, force: true });
-      return true;
-    } catch (err) {
-      const isRetryable = (err.code === 'EPERM' || err.code === 'EBUSY') && i < retries - 1;
-      if (isRetryable) {
-        const delay = 500 * (i + 1);
-        await new Promise((r) => setTimeout(r, delay));
-      } else {
-        throw err;
-      }
-    }
-  }
-  return false;
-}
-
-/**
  * Dataset Controller - Handles dataset upload and retrieval
  * 
  * Key Concepts:
@@ -413,18 +386,33 @@ const getDataset = async (req, res) => {
     }
 
     // ✅ Compute labeledImages / unlabeledImages
-    // For augmented datasets (or any with train/val/test splits): use split counts (all in splits are labeled)
-    // Otherwise: use Image collection hasLabels counts
+    // IMPORTANT: split folders (train/val/test) exist for both labeled and unlabeled datasets after preprocessing.
+    // Do not infer "labeled" from split presence. Use dataset lifecycle metadata first.
     let currentLabeledCount;
     let currentUnlabeledCount;
-    const splitTotal = (dataset.trainCount ?? 0) + (dataset.valCount ?? 0) + (dataset.testCount ?? 0);
-    const hasSplits = splitTotal > 0;
-    const useSplitCounts = dataset.isAugmented || hasSplits;
 
-    if (useSplitCounts) {
-      currentLabeledCount = splitTotal;
-      currentUnlabeledCount = Math.max(0, (dataset.totalImages ?? 0) - splitTotal);
+    const derivedLabelSource = getLabelSource(dataset);
+    const totalImages = dataset.totalImages ?? 0;
+    const splitTotal = (dataset.trainCount ?? 0) + (dataset.valCount ?? 0) + (dataset.testCount ?? 0);
+
+    if (derivedLabelSource === 'unlabeled' || dataset.datasetType === 'unlabeled') {
+      // Unlabeled uploads should remain annotatable regardless of split folders.
+      currentLabeledCount = 0;
+      currentUnlabeledCount = totalImages;
+    } else if (
+      derivedLabelSource === 'pre_labelled' ||
+      derivedLabelSource === 'manually_labeled' ||
+      dataset.datasetType === 'labeled'
+    ) {
+      // Labeled datasets are fully labeled at dataset level.
+      currentLabeledCount = totalImages;
+      currentUnlabeledCount = 0;
+    } else if (dataset.isAugmented) {
+      // Augmented datasets inherit labels from source and are treated as labeled.
+      currentLabeledCount = splitTotal > 0 ? splitTotal : totalImages;
+      currentUnlabeledCount = 0;
     } else {
+      // Fallback for legacy records with missing lifecycle metadata.
       const Image = require('../models/Image');
       currentUnlabeledCount = await Image.countDocuments({ datasetId, hasLabels: false });
       currentLabeledCount = await Image.countDocuments({ datasetId, hasLabels: true });
@@ -1280,6 +1268,17 @@ const deleteDataset = async (req, res) => {
       });
     }
 
+    // ✅ Validate workspace access (same as delete by version)
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, dataset.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this dataset'
+        });
+      }
+    }
+
     // ✅ Log deletion attempt
     console.log(`[DELETE] Attempting to delete dataset:`, {
       datasetId: dataset._id.toString(),
@@ -1310,70 +1309,27 @@ const deleteDataset = async (req, res) => {
       });
     }
 
-    // ✅ Delete files from storage (use resolved path; fallback to buildDatasetPath if stored path missing/wrong)
-    const fallbackPath = path.normalize(storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version));
-    const pathsToTry = [
-      dataset.storagePath && path.normalize(path.resolve(dataset.storagePath)),
-      fallbackPath
-    ].filter(Boolean);
-    const uniquePaths = [...new Set(pathsToTry.map((p) => path.normalize(p)))];
-
-    // Debug: log paths and existsSync result before attempting deletion
-    const basePath = storageAdapter.getBasePath ? storageAdapter.getBasePath() : path.join(process.cwd(), 'datasets');
-    console.log(`[DELETE] File deletion debug:`, {
-      company: dataset.company,
-      project: dataset.project,
-      version: dataset.version,
-      storagePath_from_db: dataset.storagePath || null,
-      basePath,
-      fallbackPath,
-      pathsToTry: uniquePaths,
-      cwd: process.cwd()
-    });
-    for (const dirPath of uniquePaths) {
-      const exists = fs.existsSync(dirPath);
-      console.log(`[DELETE] fs.existsSync("${dirPath}") = ${exists}`);
+    // ✅ Block delete when augmentation is running (source dataset is in use)
+    if (dataset.augmentationStatus === 'running') {
+      console.warn(`[DELETE] Cannot delete dataset while augmentation is running: ${dataset._id.toString()}`);
+      return res.status(400).json({
+        error: 'Cannot delete dataset while augmentation is running',
+        message: 'Wait for augmentation to finish or cancel it before deleting this dataset'
+      });
     }
 
-    let filesDeleted = false;
-    let pathExists = false;
-    for (const dirPath of uniquePaths) {
-      if (fs.existsSync(dirPath)) {
-        pathExists = true;
-        try {
-          const deleted = await deleteDirWithRetry(dirPath, 3);
-          if (deleted) {
-            console.log(`🗑️ [DELETE] Deleted dataset files: ${dirPath}`);
-            filesDeleted = true;
-            break;
-          }
-        } catch (deleteError) {
-          console.error(`⚠️ [DELETE] Failed to delete dataset files: ${deleteError.message}`, {
-            dirPath,
-            error: deleteError
-          });
-        }
-      }
+    // ✅ Delete files from storage (local or Azure via adapter)
+    const dirPathToDelete = path.normalize(storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version));
+    const deleteResult = await storageAdapter.deleteDirectory(dirPathToDelete);
+
+    if (!deleteResult.deleted) {
+      console.error(`[DELETE] Failed to delete dataset files: ${deleteResult.error}`, { dirPath: dirPathToDelete });
+      return res.status(500).json({
+        error: 'Failed to delete dataset files',
+        message: deleteResult.error || 'Storage deletion failed. Dataset was not deleted.'
+      });
     }
-    if (!filesDeleted) {
-      if (pathExists) {
-        console.warn(`[DELETE] Deletion failed (EPERM/file in use); files may remain on disk:`, {
-          storagePath: dataset.storagePath,
-          fallbackPath,
-          company: dataset.company,
-          project: dataset.project,
-          version: dataset.version
-        });
-      } else {
-        console.warn(`[DELETE] Path not found; files may remain on disk:`, {
-          storagePath: dataset.storagePath,
-          fallbackPath,
-          company: dataset.company,
-          project: dataset.project,
-          version: dataset.version
-        });
-      }
-    }
+    console.log(`🗑️ [DELETE] Deleted dataset files: ${dirPathToDelete}`);
 
     // ✅ Delete related metadata (annotations, categories, images)
     const datasetIdObj = dataset._id;
@@ -1452,13 +1408,9 @@ const deleteDatasetByVersion = async (req, res) => {
       version
     });
 
-    // ✅ Find dataset by company/project/version
-    const dataset = await Dataset.findOne({ 
-      company, 
-      project, 
-      version,
-      deletedAt: null // Only find non-deleted datasets
-    });
+    // ✅ Find dataset by company/project/version (case-insensitive)
+    const dataset = await Dataset.findOne({ company, project, version, deletedAt: null })
+      .collation({ locale: 'en', strength: 2 });
 
     if (!dataset) {
       console.warn(`[DELETE] Dataset version not found:`, { company, project, version });
@@ -1511,73 +1463,33 @@ const deleteDatasetByVersion = async (req, res) => {
       });
     }
 
-    // ✅ Delete files from storage (use resolved path; fallback to buildDatasetPath if stored path missing/wrong)
-    const fallbackPath = path.normalize(storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version));
-    const pathsToTry = [
-      dataset.storagePath && path.normalize(path.resolve(dataset.storagePath)),
-      fallbackPath
-    ].filter(Boolean);
-    const uniquePaths = [...new Set(pathsToTry.map((p) => path.normalize(p)))];
-
-    // Debug: log paths and existsSync result before attempting deletion
-    const basePath = storageAdapter.getBasePath ? storageAdapter.getBasePath() : path.join(process.cwd(), 'datasets');
-    console.log(`[DELETE] File deletion debug (by version):`, {
-      company,
-      project,
-      version,
-      storagePath_from_db: dataset.storagePath || null,
-      basePath,
-      fallbackPath,
-      pathsToTry: uniquePaths,
-      cwd: process.cwd()
-    });
-    for (const dirPath of uniquePaths) {
-      const exists = fs.existsSync(dirPath);
-      console.log(`[DELETE] fs.existsSync("${dirPath}") = ${exists}`);
+    // ✅ Block delete when augmentation is running
+    if (dataset.augmentationStatus === 'running') {
+      console.warn(`[DELETE] Cannot delete dataset while augmentation is running:`, { company, project, version });
+      return res.status(400).json({
+        error: 'Cannot delete dataset while augmentation is running',
+        message: 'Wait for augmentation to finish or cancel it before deleting this dataset',
+        company,
+        project,
+        version
+      });
     }
 
-    let filesDeleted = false;
-    let pathExists = false;
-    for (const dirPath of uniquePaths) {
-      if (fs.existsSync(dirPath)) {
-        pathExists = true;
-        try {
-          const deleted = await deleteDirWithRetry(dirPath, 3);
-          if (deleted) {
-            console.log(`🗑️ [DELETE] Deleted dataset files: ${dirPath}`);
-            filesDeleted = true;
-            break;
-          }
-        } catch (deleteError) {
-          console.error(`⚠️ [DELETE] Failed to delete dataset files: ${deleteError.message}`, {
-            dirPath,
-            company,
-            project,
-            version,
-            error: deleteError
-          });
-        }
-      }
+    // ✅ Delete files from storage (local or Azure via adapter)
+    const dirPathToDelete = path.normalize(storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version));
+    const deleteResult = await storageAdapter.deleteDirectory(dirPathToDelete);
+
+    if (!deleteResult.deleted) {
+      console.error(`[DELETE] Failed to delete dataset files (by version): ${deleteResult.error}`, { dirPath: dirPathToDelete });
+      return res.status(500).json({
+        error: 'Failed to delete dataset files',
+        message: deleteResult.error || 'Storage deletion failed. Dataset was not deleted.',
+        company,
+        project,
+        version
+      });
     }
-    if (!filesDeleted) {
-      if (pathExists) {
-        console.warn(`[DELETE] Deletion failed (EPERM/file in use); files may remain on disk:`, {
-          storagePath: dataset.storagePath,
-          fallbackPath,
-          company,
-          project,
-          version
-        });
-      } else {
-        console.warn(`[DELETE] Path not found; files may remain on disk:`, {
-          storagePath: dataset.storagePath,
-          fallbackPath,
-          company,
-          project,
-          version
-        });
-      }
-    }
+    console.log(`🗑️ [DELETE] Deleted dataset files: ${dirPathToDelete}`);
 
     // ✅ Delete related metadata (annotations, categories, images)
     await Annotation.deleteMany({ datasetId: dataset._id });

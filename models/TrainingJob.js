@@ -53,6 +53,13 @@ const trainingJobSchema = new mongoose.Schema({
     default: 'n' // Default to nano
   },
 
+  // Optional display / storage folder name for the trained model (set from POST /api/train body.modelVersion)
+  // When null, worker auto-assigns v1, v2, ...
+  requestedModelVersion: {
+    type: String,
+    default: null
+  },
+
   // Training status
   // States: 'queued' → 'running' → 'completed' / 'failed' / 'cancelled'
   status: {

@@ -44,6 +44,44 @@ function normalizeModelSize(input) {
   return value;
 }
 
+/** Max length for optional modelVersion / display name (matches typical frontend limit). */
+const MODEL_VERSION_MAX_LENGTH = 120;
+
+/**
+ * Parse optional `modelVersion` from training start body.
+ * - Omitted / null → { value: null } (use auto v1, v2, … in worker)
+ * - Whitespace-only → 400-level error message
+ * @returns {{ value: string | null } | { error: string }}
+ */
+function parseOptionalModelVersion(raw) {
+  if (raw === undefined || raw === null) {
+    return { value: null };
+  }
+  const s = String(raw).trim();
+  if (s.length === 0) {
+    return {
+      error:
+        'modelVersion must not be empty or whitespace-only if provided'
+    };
+  }
+  if (s.length > MODEL_VERSION_MAX_LENGTH) {
+    return {
+      error: `modelVersion must be at most ${MODEL_VERSION_MAX_LENGTH} characters`
+    };
+  }
+  if (s === '.' || s === '..') {
+    return { error: 'modelVersion must not be "." or ".."' };
+  }
+  // Windows / path-unsafe and control characters
+  if (/[\x00-\x1F<>:"/\\|?*]/.test(s)) {
+    return {
+      error:
+        'modelVersion contains illegal characters (path reserved: \\ / : * ? " < > | or control characters)'
+    };
+  }
+  return { value: s };
+}
+
 /**
  * Training Controller - Handles training job management
  * 
@@ -310,9 +348,16 @@ const getDefaultHyperparameters = async (req, res) => {
  */
 const startTraining = async (req, res) => {
   try {
-    const { datasetId, modelId, modelType, modelSize, modelKey, hyperparameters } = req.body;
+    const { datasetId, modelId, modelType, modelSize, modelKey, hyperparameters, modelVersion } =
+      req.body;
     const normalizedModelSize = normalizeModelSize(modelSize);
     const normalizedModelKey = modelKey ? String(modelKey).trim() : null;
+
+    const parsedVersion = parseOptionalModelVersion(modelVersion);
+    if (parsedVersion.error) {
+      return res.status(400).json({ error: parsedVersion.error });
+    }
+    const requestedModelVersion = parsedVersion.value;
 
     // Validate required fields
     if (!datasetId) {
@@ -422,6 +467,23 @@ const startTraining = async (req, res) => {
       });
     }
 
+    if (requestedModelVersion) {
+      const duplicate = await Model.findOne({
+        company: dataset.company,
+        project: dataset.project,
+        modelVersion: requestedModelVersion
+      })
+        .select('_id modelVersion')
+        .lean();
+      if (duplicate) {
+        return res.status(409).json({
+          error:
+            'A model with this modelVersion already exists for this company and project. Choose a different name.',
+          modelVersion: requestedModelVersion
+        });
+      }
+    }
+
     // Generate job ID
     const jobId = trainingService.generateJobId();
 
@@ -434,6 +496,7 @@ const startTraining = async (req, res) => {
       modelType: finalModelType,
       modelSize: finalModelSize,
       modelKey: finalModelKey,
+      requestedModelVersion: requestedModelVersion || null,
       status: 'queued',
       hyperparameters: mergedHyperparameters
     });
@@ -450,6 +513,7 @@ const startTraining = async (req, res) => {
       modelSize: finalModelSize,
       modelKey: finalModelKey,
       modelId: modelId || null, // ✅ Pass modelId if provided (for trained model)
+      requestedModelVersion: requestedModelVersion || null,
       hyperparameters: mergedHyperparameters
     }, {
       attempts: 1,
@@ -480,6 +544,7 @@ const startTraining = async (req, res) => {
       datasetId: dataset._id.toString(),
       modelType,
       modelSize: finalModelSize,
+      ...(requestedModelVersion && { modelVersion: requestedModelVersion }),
       hyperparameters: mergedHyperparameters
     });
 
@@ -531,6 +596,8 @@ const getTrainingStatus = async (req, res) => {
       hyperparameters: trainingJob.hyperparameters, // ✅ Include hyperparameters used
       modelType: trainingJob.modelType,
       modelSize: trainingJob.modelSize,
+      /** Display / storage folder name if client sent modelVersion at train start; mirrors registered Model.modelVersion when complete */
+      requestedModelVersion: trainingJob.requestedModelVersion || null,
       startedAt: trainingJob.startedAt,
       completedAt: trainingJob.completedAt,
       cancelledAt: trainingJob.cancelledAt,
@@ -706,6 +773,7 @@ const retryTraining = async (req, res) => {
       project: originalJob.project,
       modelType: originalJob.modelType,
       modelSize: originalJob.modelSize || 'n',
+      requestedModelVersion: originalJob.requestedModelVersion || null,
       status: 'queued',
       hyperparameters: originalJob.hyperparameters
     });
@@ -720,6 +788,7 @@ const retryTraining = async (req, res) => {
       project: originalJob.project,
       modelType: originalJob.modelType,
       modelSize: originalJob.modelSize || 'n',
+      requestedModelVersion: originalJob.requestedModelVersion || null,
       hyperparameters: originalJob.hyperparameters
     }, {
       attempts: 1,

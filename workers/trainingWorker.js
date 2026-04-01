@@ -438,7 +438,18 @@ function parseLogLine(logLine) {
  * Process a single training job
  */
 const processTrainingJob = async (job) => {
-  const { jobId, datasetId, company, project, modelType, modelSize = 'n', modelKey = null, modelId, hyperparameters } = job.data;
+  const {
+    jobId,
+    datasetId,
+    company,
+    project,
+    modelType,
+    modelSize = 'n',
+    modelKey = null,
+    modelId,
+    hyperparameters,
+    requestedModelVersion: queueRequestedVersion = null
+  } = job.data;
 
   console.log(`🚀 Starting training job ${jobId}...`);
 
@@ -475,12 +486,19 @@ const processTrainingJob = async (job) => {
     const datasetPath = storageAdapter.buildDatasetPath(company, project, dataset.version);
     console.log(`📁 Dataset path: ${datasetPath}`);
 
-    // ✅ Create model storage directory
-    // Determine model version (increment if models exist)
-    const existingModels = await Model.find({ company, project }).sort({ createdAt: -1 });
-    const modelVersion = existingModels.length > 0 
-      ? `v${existingModels.length + 1}` 
-      : 'v1';
+    // ✅ Create model storage directory — use client display name or auto v1, v2, …
+    let modelVersion;
+    const fromJob =
+      (trainingJob.requestedModelVersion && String(trainingJob.requestedModelVersion).trim()) ||
+      (queueRequestedVersion && String(queueRequestedVersion).trim()) ||
+      null;
+    if (fromJob) {
+      modelVersion = fromJob;
+    } else {
+      const existingModels = await Model.find({ company, project }).sort({ createdAt: -1 });
+      modelVersion =
+        existingModels.length > 0 ? `v${existingModels.length + 1}` : 'v1';
+    }
 
     const modelStoragePath = path.join(
       process.cwd(),
@@ -559,7 +577,7 @@ const processTrainingJob = async (job) => {
       console.log(`⚠️ Simulating training for demonstration...`);
       
       // Simulate training (for testing without Python script)
-      await simulateTraining(trainingJob, hyperparameters, modelStoragePath);
+      await simulateTraining(trainingJob, hyperparameters, modelStoragePath, modelVersion);
       return;
     }
 
@@ -864,7 +882,7 @@ const processTrainingJob = async (job) => {
 /**
  * Simulate training (for testing without Python script)
  */
-async function simulateTraining(trainingJob, hyperparameters, modelStoragePath) {
+async function simulateTraining(trainingJob, hyperparameters, modelStoragePath, modelVersion) {
   console.log(`🎭 Simulating training for job ${trainingJob.jobId}...`);
 
   const totalEpochs = hyperparameters.epochs;
@@ -910,7 +928,7 @@ async function simulateTraining(trainingJob, hyperparameters, modelStoragePath) 
     trainingJob,
     await Dataset.findById(trainingJob.datasetId),
     modelStoragePath,
-    'v1',
+    modelVersion,
     trainingJob.company,
     trainingJob.project
   );

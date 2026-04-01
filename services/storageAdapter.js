@@ -553,8 +553,53 @@ class StorageAdapter {
   }
 
   /**
+   * Delete a directory and all its contents (dataset folder).
+   * Local: removes files from disk. Azure: deletes all blobs under the path prefix.
+   * @param {string} dirPath - Full path to dataset root (e.g. .../datasets/company/project/version)
+   * @returns {Promise<{ deleted: boolean, error?: string }>} deleted true if deleted or path did not exist; error set if deletion failed
+   */
+  async deleteDirectory(dirPath) {
+    if (this.mode === 'local') {
+      const { existsSync, rmSync } = require('fs');
+      if (!existsSync(dirPath)) return { deleted: true };
+      const maxRetries = 3;
+      for (let i = 0; i < maxRetries; i++) {
+        try {
+          rmSync(dirPath, { recursive: true, force: true });
+          return { deleted: true };
+        } catch (err) {
+          const isRetryable = (err.code === 'EPERM' || err.code === 'EBUSY') && i < maxRetries - 1;
+          if (isRetryable) {
+            await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+          } else {
+            return { deleted: false, error: err.message };
+          }
+        }
+      }
+      return { deleted: false, error: 'Delete failed after retries' };
+    }
+    if (this.mode === 'azure') {
+      try {
+        const normalized = dirPath.replace(/\\/g, '/');
+        const { containerName, blobName } = this._parseAzurePath(normalized);
+        const prefix = blobName.endsWith('/') ? blobName : `${blobName}/`;
+        const containerClient = this.blobServiceClient.getContainerClient(containerName);
+        let deletedCount = 0;
+        for await (const blob of containerClient.listBlobsFlat({ prefix })) {
+          await containerClient.deleteBlob(blob.name);
+          deletedCount++;
+        }
+        return { deleted: true };
+      } catch (err) {
+        return { deleted: false, error: err.message };
+      }
+    }
+    return { deleted: false, error: `Unsupported storage mode: ${this.mode}` };
+  }
+
+  /**
    * Generate a signed URL for a file
-   * 
+   *
    * For local storage: Returns an API endpoint with token and expiration
    * For Azure: Returns a SAS URL (not yet fully implemented)
    * 

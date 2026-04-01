@@ -51,7 +51,9 @@ const listModels = async (req, res) => {
     }
 
     // ✅ Find all models for company/project
+    // Use collation for case-insensitive match (e.g. "Innovura" vs "innovura")
     const models = await Model.find({ company, project })
+      .collation({ locale: 'en', strength: 2 })
       .sort({ createdAt: -1 }) // Newest first
       .select('modelId modelVersion modelType status metrics insights createdAt')
       .lean();

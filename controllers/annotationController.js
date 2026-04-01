@@ -648,37 +648,23 @@ const batchSaveAnnotations = async (req, res) => {
 
     // Process valid annotations in transaction
     let saved = 0;
+    let skippedDuplicates = 0;
     const session = await mongoose.startSession();
     session.startTransaction();
 
     try {
       if (validAnnotations.length > 0) {
-        // ✅ Option 1 behavior: Replace all annotations per image on batch save
-        // For each imageId in this batch, soft-delete existing annotations
+        // Keep hasAnnotations true for affected images.
+        // IMPORTANT: Do NOT soft-delete existing annotations here.
+        // Batch save is used during navigation autosave; replacing can drop boxes
+        // when frontend sends only a subset of annotations for an image.
         const uniqueImageIds = [
           ...new Set(validAnnotations.map(ann => ann.imageId.toString()))
         ].map(id => new mongoose.Types.ObjectId(id));
 
-        await Annotation.updateMany(
-          {
-            datasetId,
-            imageId: { $in: uniqueImageIds },
-            deletedAt: null
-          },
-          {
-            $set: { deletedAt: new Date() }
-          },
-          { session }
-        );
-
-        // After soft-deleting, ensure hasAnnotations is true for all affected images
         await Image.updateMany(
-          {
-            _id: { $in: uniqueImageIds }
-          },
-          {
-            $set: { hasAnnotations: true }
-          },
+          { _id: { $in: uniqueImageIds } },
+          { $set: { hasAnnotations: true } },
           { session }
         );
       }
@@ -688,9 +674,22 @@ const batchSaveAnnotations = async (req, res) => {
         const image = await Image.findById(ann.imageId).session(session);
         const category = await Category.findById(ann.categoryId).session(session);
 
-        // ✅ Always create new annotation (batch save is for creating new annotations only)
-        // Updates should use PUT /api/dataset/:datasetId/annotations/:annotationId endpoint
-        // This prevents overwriting annotations with the same category on the same image
+        // Avoid inserting exact duplicate annotation rows on repeated autosaves.
+        const duplicate = await Annotation.findOne({
+          datasetId,
+          imageId: ann.imageId,
+          categoryId: ann.categoryId,
+          bbox: ann.bbox,
+          deletedAt: null
+        }).session(session);
+
+        if (duplicate) {
+          skippedDuplicates++;
+          continue;
+        }
+
+        // ✅ Create new annotation record (append behavior).
+        // Updates should use PUT /api/dataset/:datasetId/annotations/:annotationId endpoint.
         const annotation = new Annotation({
           datasetId,
           imageId: ann.imageId,
@@ -715,6 +714,7 @@ const batchSaveAnnotations = async (req, res) => {
 
     return res.status(200).json({
       saved,
+      skippedDuplicates,
       failed: validationErrors.length,
       errors: validationErrors
     });

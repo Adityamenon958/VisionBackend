@@ -85,7 +85,7 @@ const upload = multer({
   fileFilter: fileFilter,
   limits: {
     fileSize: 50 * 1024 * 1024, // ⚠️ CAUTION: 50MB per file limit
-    files: 5000 // Maximum 5000 files per request
+    files: 10000 // Maximum 10000 files per request
   }
 });
 
@@ -108,7 +108,7 @@ router.post('/upload',
   authenticateToken,
   requirePermission('uploadDatasets'),
   upload.fields([
-    { name: 'files', maxCount: 5000 }, // ✅ Accept up to 5000 files (controller validates)
+    { name: 'files', maxCount: 10000 }, // ✅ Accept up to 10000 files (controller validates)
     { name: 'fileMeta', maxCount: 1 } // ✅ Accept optional fileMeta (JSON file, validated by fileFilter)
   ]),
   // ✅ Error handler for Multer errors (e.g., fileMeta validation fails)
