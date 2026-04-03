@@ -3,6 +3,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const { initQueues } = require('./queue');
 const datasetRoutes = require('./routes/datasets');
+const annotationRoutes = require('./routes/annotations');
 const trainingRoutes = require('./routes/training');
 const modelRoutes = require('./routes/models');
 const inferenceRoutes = require('./routes/inference');
@@ -80,6 +81,12 @@ app.use((req, res, next) => {
   next();
 });
 
+// ✅ Register annotation routes FIRST
+// All routes in routes/annotations.js will be prefixed with /api/dataset
+// IMPORTANT: Mount before datasetRoutes so /:datasetId/annotations/:annotationId
+// cannot be swallowed by generic dataset version delete routes.
+app.use('/api/dataset', annotationRoutes);
+
 // ✅ Register dataset routes
 // All routes in routes/datasets.js will be prefixed with /api/dataset
 app.use('/api/dataset', datasetRoutes);
@@ -116,11 +123,6 @@ app.use('/api/audit', auditRoutes);
 // All routes in routes/users.js will be prefixed with /api/users
 const userRoutes = require('./routes/users');
 app.use('/api/users', userRoutes);
-
-// ✅ Register annotation routes
-// All routes in routes/annotations.js will be prefixed with /api/dataset
-const annotationRoutes = require('./routes/annotations');
-app.use('/api/dataset', annotationRoutes);
 
 // ✅ Register list datasets endpoint (plural) - separate route for clarity
 // GET /api/datasets - List all datasets

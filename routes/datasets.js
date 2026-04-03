@@ -265,7 +265,19 @@ router.patch('/:datasetId', authenticateToken, requirePermission('uploadDatasets
  *   - Dataset is processing or queued
  *   - Dataset is already deleted
  */
-router.delete('/:company/:project/:version', authenticateToken, requirePermission('deleteDatasets'), deleteDatasetByVersion);
+router.delete(
+  '/:company/:project/:version',
+  authenticateToken,
+  requirePermission('deleteDatasets'),
+  // Guard: never treat /:datasetId/annotations/:annotationId as version-delete route.
+  (req, res, next) => {
+    if (String(req.params.project).toLowerCase() === 'annotations') {
+      return next('route');
+    }
+    return next();
+  },
+  deleteDatasetByVersion
+);
 
 /**
  * DELETE /api/dataset/:datasetId
