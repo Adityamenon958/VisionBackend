@@ -6,6 +6,19 @@ from tqdm import tqdm
 import math
 from typing import List, Tuple
 
+_IMAGE_GLOBS = ("*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG")
+
+
+def list_image_files(img_dir: str) -> List[str]:
+    """List image paths under img_dir; matches Node augmentation pool (.jpg / .jpeg / .png)."""
+    if not os.path.isdir(img_dir):
+        return []
+    paths: List[str] = []
+    for pat in _IMAGE_GLOBS:
+        paths.extend(glob.glob(os.path.join(img_dir, pat)))
+    return sorted(set(paths))
+
+
 # NOTE:
 # This module was originally written as a standalone script with hard‑coded
 # INPUT_ROOT_DIR / OUTPUT_ROOT_DIR / TARGET_TRAIN_TOTAL / VAL_TEST_MULTIPLIER.
@@ -93,10 +106,9 @@ def process_subset(
     os.makedirs(output_img_dir, exist_ok=True)
     os.makedirs(output_lbl_dir, exist_ok=True)
     
-    # Get List of Images
-    image_files = glob.glob(os.path.join(input_img_dir, "*.jpg"))
-    # Add other extensions if needed: + glob.glob(os.path.join(input_img_dir, "*.png"))
-    
+    # Get list of images (.jpg / .jpeg / .png — must match workers/augmentationWorker.js pool)
+    image_files = list_image_files(input_img_dir)
+
     if not image_files:
         print(f"No images found in {subset_name}. Skipping.")
         return
@@ -145,13 +157,16 @@ def process_subset(
                 if len(bboxes) > 0 and len(aug_bboxes) == 0:
                     continue 
 
-                # 4. Save Image
-                save_name = f"{base_name}_aug_{i}.jpg"
+                # 4. Save Image (keep source extension so .jpeg datasets stay consistent)
+                src_ext = os.path.splitext(img_path)[1].lower()
+                if src_ext not in (".jpg", ".jpeg", ".png"):
+                    src_ext = ".jpg"
+                save_name = f"{base_name}_aug_{i}{src_ext}"
                 cv2.imwrite(
-                    os.path.join(output_img_dir, save_name), 
-                    cv2.cvtColor(aug_image, cv2.COLOR_RGB2BGR)
+                    os.path.join(output_img_dir, save_name),
+                    cv2.cvtColor(aug_image, cv2.COLOR_RGB2BGR),
                 )
-                
+
                 # 5. Save Label
                 save_yolo_label(
                     os.path.join(output_lbl_dir, f"{base_name}_aug_{i}.txt"),

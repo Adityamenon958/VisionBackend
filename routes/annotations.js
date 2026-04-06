@@ -12,6 +12,7 @@ const {
   updateAnnotation,
   deleteAnnotation,
   batchSaveAnnotations,
+  importLabelsToAnnotations,
   convertAnnotationsToYOLO,
   serveSignedImage
 } = require('../controllers/annotationController');
@@ -61,6 +62,10 @@ router.delete('/:datasetId/annotations/:annotationId', authenticateToken, requir
 
 // POST /api/dataset/:datasetId/annotations/batch
 router.post('/:datasetId/annotations/batch', authenticateToken, requirePermission('uploadDatasets'), batchSaveAnnotations);
+
+// Import existing YOLO .txt files into Annotation documents (edit pre-labeled data)
+// POST /api/dataset/:datasetId/import-labels-to-annotations
+router.post('/:datasetId/import-labels-to-annotations', authenticateToken, requirePermission('uploadDatasets'), importLabelsToAnnotations);
 
 // YOLO Conversion
 // POST /api/dataset/:datasetId/convert-annotations-to-labels

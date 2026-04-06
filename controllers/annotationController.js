@@ -8,7 +8,12 @@ const Dataset = require('../models/Dataset');
 const storageAdapter = require('../services/storageAdapter');
 const { validateBbox } = require('../utils/bboxValidator');
 const { sendError, sendValidationError, sendNotFoundError } = require('../utils/errors');
-const { generateLabelFileContent, generateDataYaml, getLabelFilePath } = require('../utils/yoloConverter');
+const {
+  generateLabelFileContent,
+  generateDataYaml,
+  getLabelFilePath,
+  convertYOLOValuesToBbox
+} = require('../utils/yoloConverter');
 const { splitDataset } = require('../utils/splitDataset');
 
 /**
@@ -370,11 +375,6 @@ const createAnnotation = async (req, res) => {
       return sendNotFoundError(res, 'Image', imageId);
     }
 
-    // CRITICAL: Reject if image already has labels
-    if (image.hasLabels === true) {
-      return sendError(res, 400, 'Validation Error', 'Image already has labels. Reset labels to re-annotate this image.');
-    }
-
     // Validate categoryId
     if (!mongoose.Types.ObjectId.isValid(categoryId)) {
       return sendNotFoundError(res, 'Category', categoryId);
@@ -457,11 +457,6 @@ const updateAnnotation = async (req, res) => {
     const image = await Image.findById(annotation.imageId);
     if (!image) {
       return sendNotFoundError(res, 'Image', annotation.imageId);
-    }
-
-    // CRITICAL: Reject if image already has labels
-    if (image.hasLabels === true) {
-      return sendError(res, 400, 'Validation Error', 'Image already has labels. Reset labels to re-annotate this image.');
     }
 
     // Update bbox if provided
@@ -615,11 +610,6 @@ const batchSaveAnnotations = async (req, res) => {
           const image = await Image.findOne({ _id: ann.imageId, datasetId });
           if (!image) {
             errors.push(`Image not found: ${ann.imageId}`);
-          } else {
-            // CRITICAL: Reject if image already has labels
-            if (image.hasLabels === true) {
-              errors.push('Image already has labels');
-            }
           }
         } else {
           errors.push(`Invalid imageId: ${ann.imageId}`);
@@ -721,6 +711,226 @@ const batchSaveAnnotations = async (req, res) => {
 
   } catch (error) {
     console.error('Error batch saving annotations:', error);
+    return sendError(res, 500, 'Internal Server Error', error.message);
+  }
+};
+
+/**
+ * POST /api/dataset/:datasetId/import-labels-to-annotations
+ *
+ * Reads YOLO bbox .txt files on disk and creates Annotation rows so pre-labeled
+ * images can be edited in the annotation UI. Polygon / segmentation lines (>5 values) are skipped.
+ *
+ * Body:
+ * - imageIds?: string[] — if omitted, all images with hasLabels === true are considered
+ * - replace?: boolean — default false; if false, skips images that already have active annotations
+ */
+const importLabelsToAnnotations = async (req, res) => {
+  try {
+    const { datasetId } = req.params;
+    const { imageIds: rawImageIds, replace = false } = req.body || {};
+
+    if (!mongoose.Types.ObjectId.isValid(datasetId)) {
+      return sendNotFoundError(res, 'Dataset', datasetId);
+    }
+
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return sendNotFoundError(res, 'Dataset', datasetId);
+    }
+
+    const categories = await Category.getOrderedCategories(datasetId);
+    if (categories.length === 0) {
+      return sendError(res, 400, 'Validation Error', 'No categories found. Create categories before importing labels.');
+    }
+
+    let images;
+    if (Array.isArray(rawImageIds) && rawImageIds.length > 0) {
+      const ids = rawImageIds
+        .filter(id => mongoose.Types.ObjectId.isValid(id))
+        .map(id => new mongoose.Types.ObjectId(id));
+      images = await Image.find({ _id: { $in: ids }, datasetId });
+    } else {
+      images = await Image.find({ datasetId, hasLabels: true });
+    }
+
+    if (images.length === 0) {
+      return res.status(200).json({
+        imported: 0,
+        skipped: 0,
+        imagesProcessed: 0,
+        details: [],
+        message: 'No images matched import criteria'
+      });
+    }
+
+    const datasetPath = storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version);
+    const details = [];
+    let imported = 0;
+    let skipped = 0;
+
+    const session = await mongoose.startSession();
+
+    try {
+      for (let idx = 0; idx < images.length; idx++) {
+        const image = images[idx];
+        const labelRel = getLabelFilePath(image.storedPath);
+        const fullLabelPath = path.join(datasetPath, labelRel);
+
+        const imageSummary = {
+          imageId: image._id.toString(),
+          filename: image.filename,
+          status: 'pending',
+          annotationsCreated: 0,
+          warnings: []
+        };
+
+        if (!(await storageAdapter.exists(fullLabelPath))) {
+          imageSummary.status = 'skipped';
+          imageSummary.reason = 'Label file not found';
+          details.push(imageSummary);
+          skipped++;
+          continue;
+        }
+
+        const existingCount = await Annotation.countDocuments({
+          datasetId,
+          imageId: image._id,
+          deletedAt: null
+        });
+
+        if (!replace && existingCount > 0) {
+          imageSummary.status = 'skipped';
+          imageSummary.reason = 'Image already has annotations; pass replace=true to replace from file';
+          details.push(imageSummary);
+          skipped++;
+          continue;
+        }
+
+        let fileContent;
+        try {
+          const buf = await storageAdapter.readFile(fullLabelPath);
+          fileContent = buf.toString('utf8');
+        } catch (readErr) {
+          imageSummary.status = 'error';
+          imageSummary.reason = readErr.message || 'Failed to read label file';
+          details.push(imageSummary);
+          continue;
+        }
+
+        const lines = fileContent.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        const annotationsToInsert = [];
+        const classIdsInFile = new Set();
+
+        for (let li = 0; li < lines.length; li++) {
+          const parts = lines[li].split(/\s+/);
+          if (parts.length !== 5) {
+            imageSummary.warnings.push(
+              `line ${li + 1}: expected 5 values (YOLO bbox), got ${parts.length} — skipped`
+            );
+            continue;
+          }
+
+          const classNum = parseInt(parts[0], 10);
+          const cx = parseFloat(parts[1]);
+          const cy = parseFloat(parts[2]);
+          const bw = parseFloat(parts[3]);
+          const bh = parseFloat(parts[4]);
+
+          if (
+            !Number.isInteger(classNum) ||
+            classNum < 0 ||
+            classNum >= categories.length
+          ) {
+            imageSummary.warnings.push(
+              `line ${li + 1}: invalid class_id ${parts[0]} (must be 0..${categories.length - 1})`
+            );
+            continue;
+          }
+
+          if (![cx, cy, bw, bh].every(n => Number.isFinite(n))) {
+            imageSummary.warnings.push(`line ${li + 1}: non-numeric bbox values`);
+            continue;
+          }
+
+          const bbox = convertYOLOValuesToBbox(cx, cy, bw, bh);
+          if (!bbox) {
+            imageSummary.warnings.push(`line ${li + 1}: bbox unusable after normalization`);
+            continue;
+          }
+
+          const v = validateBbox(bbox);
+          if (!v.valid) {
+            imageSummary.warnings.push(`line ${li + 1}: ${v.error}`);
+            continue;
+          }
+
+          const category = categories[classNum];
+          annotationsToInsert.push({
+            datasetId,
+            imageId: image._id,
+            categoryId: category._id,
+            categoryName: category.name,
+            bbox,
+            state: 'draft',
+            createdBy: SYSTEM_USER_ID
+          });
+          classIdsInFile.add(classNum);
+        }
+
+        session.startTransaction();
+        try {
+          if (replace && existingCount > 0) {
+            await Annotation.updateMany(
+              { datasetId, imageId: image._id, deletedAt: null },
+              { $set: { deletedAt: new Date() } },
+              { session }
+            );
+          }
+
+          for (const payload of annotationsToInsert) {
+            const ann = new Annotation(payload);
+            await ann.save({ session });
+          }
+
+          image.hasAnnotations = annotationsToInsert.length > 0;
+          if (annotationsToInsert.length > 0) {
+            image.classes = Array.from(classIdsInFile).sort((a, b) => a - b);
+          } else {
+            image.classes = undefined;
+          }
+          await image.save({ session });
+
+          await session.commitTransaction();
+        } catch (txErr) {
+          await session.abortTransaction();
+          imageSummary.status = 'error';
+          imageSummary.reason = txErr.message || 'Transaction failed';
+          details.push(imageSummary);
+          continue;
+        }
+
+        imageSummary.status = 'imported';
+        imageSummary.annotationsCreated = annotationsToInsert.length;
+        details.push(imageSummary);
+        imported++;
+      }
+    } finally {
+      session.endSession();
+    }
+
+    return res.status(200).json({
+      imported,
+      skipped,
+      imagesProcessed: details.length,
+      details,
+      message:
+        imported > 0
+          ? 'Label files imported into annotations where applicable'
+          : 'No images imported (see details)'
+    });
+  } catch (error) {
+    console.error('Error importing labels to annotations:', error);
     return sendError(res, 500, 'Internal Server Error', error.message);
   }
 };
@@ -1080,6 +1290,7 @@ module.exports = {
   updateAnnotation,
   deleteAnnotation,
   batchSaveAnnotations,
+  importLabelsToAnnotations,
   convertAnnotationsToYOLO,
   serveSignedImage
 };

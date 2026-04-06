@@ -28,6 +28,30 @@ function convertBboxToYOLO(bbox) {
 }
 
 /**
+ * Convert YOLO line values (center_x, center_y, w, h) to annotation bbox [x, y, w, h].
+ * Clamps to [0,1] so slightly out-of-range exports still validate.
+ *
+ * @param {Number} center_x
+ * @param {Number} center_y
+ * @param {Number} width
+ * @param {Number} height
+ * @returns {Array<Number>|null} Bbox or null if box is unusable after clamp
+ */
+function convertYOLOValuesToBbox(center_x, center_y, width, height) {
+  let x = center_x - width / 2;
+  let y = center_y - height / 2;
+  x = Math.max(0, Math.min(1, x));
+  y = Math.max(0, Math.min(1, y));
+  const w = Math.min(width, 1 - x);
+  const h = Math.min(height, 1 - y);
+  const minSide = 1e-6;
+  if (w <= minSide || h <= minSide || !isFinite(w) || !isFinite(h)) {
+    return null;
+  }
+  return [x, y, w, h];
+}
+
+/**
  * Get class_id for a category based on category order
  * 
  * @param {ObjectId|String} categoryId - Category ID
@@ -130,6 +154,7 @@ function getLabelFilePath(imageStoredPath) {
 
 module.exports = {
   convertBboxToYOLO,
+  convertYOLOValuesToBbox,
   getClassId,
   generateLabelFileContent,
   generateDataYaml,
