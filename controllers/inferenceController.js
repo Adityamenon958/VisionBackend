@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const InferenceJob = require('../models/InferenceJob');
 const Model = require('../models/Model');
 const Dataset = require('../models/Dataset');
+const { getClassNamesForTrainedModel } = require('../services/yoloClassNamesService');
 const { inferenceQueue } = require('../queue');
 const storageAdapter = require('../services/storageAdapter');
 const auditService = require('../services/auditService');
@@ -1539,7 +1540,9 @@ const listAvailableModels = async (req, res) => {
     // ✅ Find all models for company/project
     const models = await Model.find({ company, project })
       .sort({ createdAt: -1 }) // Newest first
-      .select('modelId modelVersion modelType metrics bestCheckpointPath createdAt')
+      .select(
+        'modelId modelVersion modelType metrics bestCheckpointPath storagePath datasetVersion createdAt'
+      )
       .lean();
 
     // ✅ Filter models that have valid checkpoint files
@@ -1547,24 +1550,28 @@ const listAvailableModels = async (req, res) => {
       return model.bestCheckpointPath && fs.existsSync(model.bestCheckpointPath);
     });
 
-    // ✅ Format response
-    const formattedModels = validModels.map(model => {
-      const mAP50 = model.metrics?.mAP50 || 0;
-      const mAP50Percent = (mAP50 * 100).toFixed(0);
+    // ✅ Format response (classNames: ordered label strings matching inference detection `class`)
+    const formattedModels = await Promise.all(
+      validModels.map(async (model) => {
+        const mAP50 = model.metrics?.mAP50 || 0;
+        const mAP50Percent = (mAP50 * 100).toFixed(0);
+        const classNames = await getClassNamesForTrainedModel(model);
 
-      return {
-        modelId: model.modelId,
-        modelVersion: model.modelVersion,
-        modelType: model.modelType,
-        name: `${model.modelType} - ${model.modelVersion} (mAP: ${mAP50Percent}%)`,
-        metrics: {
-          mAP50: model.metrics?.mAP50,
-          precision: model.metrics?.precision,
-          recall: model.metrics?.recall
-        },
-        createdAt: model.createdAt
-      };
-    });
+        return {
+          modelId: model.modelId,
+          modelVersion: model.modelVersion,
+          modelType: model.modelType,
+          name: `${model.modelType} - ${model.modelVersion} (mAP: ${mAP50Percent}%)`,
+          metrics: {
+            mAP50: model.metrics?.mAP50,
+            precision: model.metrics?.precision,
+            recall: model.metrics?.recall
+          },
+          createdAt: model.createdAt,
+          classNames
+        };
+      })
+    );
 
     return res.status(200).json({
       models: formattedModels,

@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const storageAdapter = require('../services/storageAdapter');
 const onnxConverter = require('../services/onnxConverter');
+const { getClassNamesForTrainedModel } = require('../services/yoloClassNamesService');
 
 /**
  * Model Controller - Handles model registry operations
@@ -136,6 +137,8 @@ const getModel = async (req, res) => {
       }
     }
 
+    const classNames = await getClassNamesForTrainedModel(model);
+
     // ✅ Format response
     const response = {
       modelId: model.modelId,
@@ -150,7 +153,8 @@ const getModel = async (req, res) => {
       insights: model.insights,
       storagePath: model.storagePath,
       bestCheckpointPath: model.bestCheckpointPath,
-      createdAt: model.createdAt
+      createdAt: model.createdAt,
+      classNames
     };
 
     // ✅ Check if dataset is deleted
