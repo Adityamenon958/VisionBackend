@@ -11,6 +11,7 @@ const aiRoutes = require('./routes/ai');
 const dashboardRoutes = require('./routes/dashboard');
 const analyticsRoutes = require('./routes/analytics');
 const auditRoutes = require('./routes/audit');
+const demoExtinguisherRoutes = require('./routes/demoExtinguisherRoutes');
 const { authenticateToken } = require('./middleware/authMiddleware');
 
 /**
@@ -118,6 +119,10 @@ app.use('/api/analytics', analyticsRoutes);
 // ✅ Register audit routes
 // All routes in routes/audit.js will be prefixed with /api/audit
 app.use('/api/audit', auditRoutes);
+
+// ✅ Register temporary extinguisher OCR demo routes
+// All routes in routes/demoExtinguisherRoutes.js will be prefixed with /api/demo/extinguisher
+app.use('/api/demo/extinguisher', demoExtinguisherRoutes);
 
 // ✅ Register user management routes
 // All routes in routes/users.js will be prefixed with /api/users
