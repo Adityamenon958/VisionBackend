@@ -52,6 +52,13 @@ const inferenceJobSchema = new mongoose.Schema({
     required: true
   },
 
+  // Exclude ephemeral/live jobs from /inference/history responses
+  excludeFromHistory: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+
   // Reference to dataset (only for test_folder sourceType)
   datasetId: {
     type: mongoose.Schema.Types.ObjectId,

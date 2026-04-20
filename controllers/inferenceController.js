@@ -409,6 +409,7 @@ const startLiveInference = async (req, res) => {
       company: model.company,
       project: model.project,
       sourceType: 'live_camera',
+      excludeFromHistory: true,
       status: 'running',
       createdBy: req.user ? req.user.id : null, // Store user ID for ownership verification
       startedAt: new Date(),
@@ -1618,7 +1619,12 @@ const listInferenceJobs = async (req, res) => {
     }
 
     // ✅ Build query filter
-    const filter = { company, project };
+    const filter = {
+      company,
+      project,
+      sourceType: { $nin: ['live_camera', 'live'] },
+      excludeFromHistory: { $ne: true }
+    };
     if (status) {
       filter.status = status;
     }
