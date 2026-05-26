@@ -3,6 +3,7 @@ const InferenceJob = require('../models/InferenceJob');
 const Model = require('../models/Model');
 const Dataset = require('../models/Dataset');
 const { getClassNamesForTrainedModel } = require('../services/yoloClassNamesService');
+const { resolveModelCheckpointPath } = require('../services/resolveModelCheckpoint');
 const { inferenceQueue } = require('../queue');
 const storageAdapter = require('../services/storageAdapter');
 const auditService = require('../services/auditService');
@@ -129,8 +130,8 @@ const startBatchInference = async (req, res) => {
       });
     }
 
-    // ✅ Validate model file exists
-    if (!model.bestCheckpointPath || !fs.existsSync(model.bestCheckpointPath)) {
+    const checkpointPath = resolveModelCheckpointPath(model);
+    if (!checkpointPath || !fs.existsSync(checkpointPath)) {
       return res.status(404).json({
         error: 'Model checkpoint file not found',
         modelId: modelId,
@@ -387,11 +388,12 @@ const startLiveInference = async (req, res) => {
       });
     }
 
-    // ✅ Validate model file exists
-    if (!model.bestCheckpointPath || !fs.existsSync(model.bestCheckpointPath)) {
+    const checkpointPath = resolveModelCheckpointPath(model);
+    if (!checkpointPath || !fs.existsSync(checkpointPath)) {
       return res.status(404).json({
         error: 'Model checkpoint file not found',
-        modelId: modelId
+        modelId: modelId,
+        path: model.bestCheckpointPath
       });
     }
 
@@ -420,8 +422,14 @@ const startLiveInference = async (req, res) => {
 
     await inferenceJob.save();
 
-    // ✅ Spawn long-lived Python process for this inference session
-    const pythonScriptPath = path.join(__dirname, '../inference-scripts/process_frame_stream.py');
+    const isRfdetr = model.modelType === 'RF_DETR';
+    // #region agent log
+    fetch('http://127.0.0.1:7270/ingest/edea3d81-57c5-49df-82fe-4c3da06c6ef5',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'aa4502'},body:JSON.stringify({sessionId:'aa4502',location:'inferenceController.js:startLiveInference',message:'live_start_model',data:{modelId:model.modelId,modelType:model.modelType,bestCheckpointPath:model.bestCheckpointPath,resolvedCheckpointPath:checkpointPath,checkpointExists:fs.existsSync(checkpointPath||'')},timestamp:Date.now(),hypothesisId:'A,D',runId:'post-fix'})}).catch(()=>{});
+    // #endregion
+    const streamScriptName = isRfdetr
+      ? 'process_frame_stream_rfdetr.py'
+      : 'process_frame_stream.py';
+    const pythonScriptPath = path.join(__dirname, '../inference-scripts', streamScriptName);
     const scriptExists = await fsPromises.access(pythonScriptPath).then(() => true).catch(() => false);
     
     if (!scriptExists) {
@@ -448,7 +456,7 @@ const startLiveInference = async (req, res) => {
     const pythonProcess = spawn('python', [
       '-u', // Unbuffered output
       pythonScriptPath,
-      '--model', model.bestCheckpointPath,
+      '--model', checkpointPath,
       '--conf', defaultConf.toString()
     ], {
       cwd: path.join(__dirname, '../inference-scripts'),
@@ -488,6 +496,9 @@ const startLiveInference = async (req, res) => {
 
     // ✅ Check if process failed to start
     if (processError) {
+      // #region agent log
+      fetch('http://127.0.0.1:7270/ingest/edea3d81-57c5-49df-82fe-4c3da06c6ef5',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'aa4502'},body:JSON.stringify({sessionId:'aa4502',location:'inferenceController.js:startLiveInference',message:'live_start_process_error',data:{processError:String(processError).slice(0,500),processReady},timestamp:Date.now(),hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
       pythonProcess.kill();
       return res.status(500).json({
         error: 'Failed to start inference process',
@@ -505,7 +516,7 @@ const startLiveInference = async (req, res) => {
     // ✅ Store process and cache model/inference job data
     liveInferenceProcesses.set(inferenceId, {
       process: pythonProcess,
-      modelPath: model.bestCheckpointPath,
+      modelPath: checkpointPath,
       defaultConf: defaultConf,
       model: model,  // ✅ Cache model to avoid DB query per frame
       inferenceJob: inferenceJob  // ✅ Cache inference job to avoid DB query per frame
@@ -718,6 +729,9 @@ const processLiveFrame = async (req, res) => {
     try {
       detectionData = await responsePromise;
     } catch (error) {
+      // #region agent log
+      fetch('http://127.0.0.1:7270/ingest/edea3d81-57c5-49df-82fe-4c3da06c6ef5',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'aa4502'},body:JSON.stringify({sessionId:'aa4502',location:'inferenceController.js:processLiveFrame',message:'live_frame_timeout',data:{inferenceId,error:error.message,processKilled:!!processInfo.process?.killed},timestamp:Date.now(),hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
       // ✅ Clean up pending request on error
       const requestKey = `${inferenceId}_${requestId}`;
       pendingFrameRequests.delete(requestKey);
@@ -755,6 +769,9 @@ const processLiveFrame = async (req, res) => {
       await inferenceJob.save();
     }
 
+    // #region agent log
+    fetch('http://127.0.0.1:7270/ingest/edea3d81-57c5-49df-82fe-4c3da06c6ef5',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'aa4502'},body:JSON.stringify({sessionId:'aa4502',location:'inferenceController.js:processLiveFrame',message:'live_frame_ok',data:{totalDetections:detectionData?.totalDetections||0,detectionError:detectionData?.error||null,processingTime:Date.now()-startTime,imageW:detectionData?.imageWidth,imageH:detectionData?.imageHeight},timestamp:Date.now(),hypothesisId:'C,E'})}).catch(()=>{});
+    // #endregion
     // ✅ Return detection data with image dimensions
     const response = {
       detections: detectionData?.detections || [],

@@ -51,6 +51,27 @@ function convertYOLOValuesToBbox(center_x, center_y, width, height) {
   return [x, y, w, h];
 }
 
+function bboxToPolygon(bbox) {
+  const [x, y, width, height] = bbox;
+  return [
+    [x, y],
+    [x + width, y],
+    [x + width, y + height],
+    [x, y + height]
+  ];
+}
+
+function clamp01(v) {
+  return Math.max(0, Math.min(1, Number(v)));
+}
+
+function normalizePolygonPoints(polygon) {
+  if (!Array.isArray(polygon)) return [];
+  return polygon
+    .filter(pt => Array.isArray(pt) && pt.length >= 2)
+    .map(pt => [clamp01(pt[0]), clamp01(pt[1])]);
+}
+
 /**
  * Get class_id for a category based on category order
  * 
@@ -80,20 +101,31 @@ function getClassId(categoryId, categoryOrder) {
  * @param {Array<ObjectId|String>} categoryOrder - Ordered array of category IDs
  * @returns {String} Label file content
  */
-function generateLabelFileContent(annotations, categoryOrder) {
+function generateLabelFileContent(annotations, categoryOrder, options = {}) {
   if (!annotations || annotations.length === 0) {
     // Return empty string for images with no annotations (negative samples)
     return '';
   }
 
+  const mode = options.mode === 'segment' ? 'segment' : 'detect';
   const lines = annotations.map(ann => {
-    // Convert bbox to YOLO format
-    const [center_x, center_y, width, height] = convertBboxToYOLO(ann.bbox);
-    
     // Get class_id from category order
     const class_id = getClassId(ann.categoryId, categoryOrder);
-    
-    // Format: class_id center_x center_y width height
+
+    if (mode === 'segment') {
+      let polygon = normalizePolygonPoints(ann.polygon);
+      if (polygon.length < 3 && Array.isArray(ann.bbox) && ann.bbox.length === 4) {
+        polygon = bboxToPolygon(ann.bbox);
+      }
+      if (polygon.length < 3) {
+        throw new Error(`Annotation ${ann._id || ''} missing polygon for segmentation export`);
+      }
+      const flat = polygon.flat().map(v => Number(v).toFixed(6)).join(' ');
+      return `${class_id} ${flat}`;
+    }
+
+    // Convert bbox to YOLO format
+    const [center_x, center_y, width, height] = convertBboxToYOLO(ann.bbox);
     return `${class_id} ${center_x} ${center_y} ${width} ${height}`;
   });
 
@@ -155,6 +187,8 @@ function getLabelFilePath(imageStoredPath) {
 module.exports = {
   convertBboxToYOLO,
   convertYOLOValuesToBbox,
+  bboxToPolygon,
+  normalizePolygonPoints,
   getClassId,
   generateLabelFileContent,
   generateDataYaml,

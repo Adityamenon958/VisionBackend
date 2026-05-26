@@ -26,7 +26,7 @@ function normalizeModelSize(input) {
     value = value.slice('base-'.length);
   }
 
-  const fileMatch = value.match(/yolov?(\d+)([nsmlx])\.pt/i);
+  const fileMatch = value.match(/yolov?(\d+)([nsmlx])(?:-seg)?\.pt/i);
   if (fileMatch) {
     return `v${fileMatch[1]}${fileMatch[2].toLowerCase()}`;
   }
@@ -42,6 +42,17 @@ function normalizeModelSize(input) {
   }
 
   return value;
+}
+
+function parseModelKeyInfo(modelKey) {
+  if (!modelKey) return null;
+  const match = String(modelKey).trim().match(/^base-v(5|8|11|26)([nsmlx])(-seg)?$/i);
+  if (!match) return null;
+  return {
+    version: match[1],
+    size: match[2].toLowerCase(),
+    isSeg: Boolean(match[3])
+  };
 }
 
 /** Max length for optional modelVersion / display name (matches typical frontend limit). */
@@ -178,10 +189,11 @@ const getAvailableBaseModels = async (req, res) => {
           }
           
           // Extract model size from filename (yolov8n.pt -> 'n', yolov11s.pt -> 's')
-          const v5Match = filename.match(/yolov5([nsmlx])\.pt/);
-          const v8Match = filename.match(/yolov8([nsmlx])\.pt/);
-          const v11Match = filename.match(/yolov11([nsmlx])\.pt/);
-          const v26Match = filename.match(/yolov?26([nsmlx])\.pt/);
+          const isSeg = /-seg\.pt$/i.test(filename);
+          const v5Match = filename.match(/yolov5([nsmlx])(?:-seg)?\.pt/i);
+          const v8Match = filename.match(/yolov8([nsmlx])(?:-seg)?\.pt/i);
+          const v11Match = filename.match(/yolov11([nsmlx])(?:-seg)?\.pt/i);
+          const v26Match = filename.match(/yolov?26([nsmlx])(?:-seg)?\.pt/i);
           const size = v5Match ? v5Match[1] : (v8Match ? v8Match[1] : (v11Match ? v11Match[1] : (v26Match ? v26Match[1] : null)));
           const version = v5Match ? 'v5' : (v8Match ? 'v8' : (v11Match ? 'v11' : (v26Match ? 'v26' : null)));
           
@@ -206,10 +218,11 @@ const getAvailableBaseModels = async (req, res) => {
           baseModelsList.push({
             type: 'base',
             filename: filename,
+            modelType: isSeg ? 'YOLO_SEG' : 'YOLO',
             size: size,
             version: version,
-            key: `base-${version}${size}`,
-            name: `YOLO${version} ${sizeNames[size]}`,
+            key: `base-${version}${size}${isSeg ? '-seg' : ''}`,
+            name: `${isSeg ? 'YOLO_SEG' : 'YOLO'} ${version} ${sizeNames[size]}`,
             sizeMB: parseFloat(sizeMB),
             path: `/models/${blob.name}` // Logical path for Azure mode
           });
@@ -241,10 +254,11 @@ const getAvailableBaseModels = async (req, res) => {
           const sizeMB = (stats.size / (1024 * 1024)).toFixed(2);
 
           // Extract model size from filename (yolov8n.pt -> 'n', yolov11s.pt -> 's')
-          const v5Match = file.match(/yolov5([nsmlx])\.pt/);
-          const v8Match = file.match(/yolov8([nsmlx])\.pt/);
-          const v11Match = file.match(/yolov11([nsmlx])\.pt/);
-          const v26Match = file.match(/yolov?26([nsmlx])\.pt/);
+          const isSeg = /-seg\.pt$/i.test(file);
+          const v5Match = file.match(/yolov5([nsmlx])(?:-seg)?\.pt/i);
+          const v8Match = file.match(/yolov8([nsmlx])(?:-seg)?\.pt/i);
+          const v11Match = file.match(/yolov11([nsmlx])(?:-seg)?\.pt/i);
+          const v26Match = file.match(/yolov?26([nsmlx])(?:-seg)?\.pt/i);
           const size = v5Match ? v5Match[1] : (v8Match ? v8Match[1] : (v11Match ? v11Match[1] : (v26Match ? v26Match[1] : null)));
           const version = v5Match ? 'v5' : (v8Match ? 'v8' : (v11Match ? 'v11' : (v26Match ? 'v26' : null)));
 
@@ -260,10 +274,11 @@ const getAvailableBaseModels = async (req, res) => {
           return {
             type: 'base',
             filename: file,
+            modelType: isSeg ? 'YOLO_SEG' : 'YOLO',
             size: size,
             version: version,
-            key: `base-${version}${size}`,
-            name: size && version ? `YOLO${version} ${sizeNames[size]}` : file.replace('.pt', ''),
+            key: `base-${version}${size}${isSeg ? '-seg' : ''}`,
+            name: size && version ? `${isSeg ? 'YOLO_SEG' : 'YOLO'} ${version} ${sizeNames[size]}` : file.replace('.pt', ''),
             sizeMB: parseFloat(sizeMB),
             path: filePath
           };
@@ -277,6 +292,19 @@ const getAvailableBaseModels = async (req, res) => {
         console.log(`[getAvailableBaseModels] Found ${baseModelsList.length} base models in local filesystem`);
       }
     }
+
+    // Virtual RF-DETR-N base (weights downloaded by rfdetr package on first train)
+    models.push({
+      type: 'base',
+      filename: null,
+      modelType: 'RF_DETR',
+      size: 'n',
+      version: 'rfdetr',
+      key: 'base-rfdetr-n',
+      name: 'RF-DETR Nano (detection)',
+      sizeMB: null,
+      path: null
+    });
 
     return res.status(200).json({
       baseModels: models,
@@ -299,7 +327,7 @@ const getAvailableBaseModels = async (req, res) => {
  * Get default hyperparameters for a model type
  * 
  * Query params:
- * - modelType: 'YOLO'
+ * - modelType: 'YOLO' | 'YOLO_SEG'
  * 
  * Response:
  * {
@@ -320,11 +348,11 @@ const getDefaultHyperparameters = async (req, res) => {
     if (!modelType) {
       return res.status(400).json({
         error: 'modelType query parameter is required',
-        validTypes: ['YOLO']
+        validTypes: ['YOLO', 'YOLO_SEG', 'RF_DETR']
       });
     }
 
-    const validTypes = ['YOLO'];
+    const validTypes = ['YOLO', 'YOLO_SEG', 'RF_DETR'];
     if (!validTypes.includes(modelType)) {
       return res.status(400).json({
         error: `Invalid modelType: ${modelType}`,
@@ -447,14 +475,31 @@ const startTraining = async (req, res) => {
       }
 
       // Validate modelType
-      if (!['YOLO'].includes(modelType)) {
+      if (!['YOLO', 'YOLO_SEG', 'RF_DETR'].includes(modelType)) {
         return res.status(400).json({
-          error: 'Invalid modelType. Must be: YOLO'
+          error: 'Invalid modelType. Must be: YOLO, YOLO_SEG, or RF_DETR'
         });
       }
 
+      if (modelType === 'RF_DETR') {
+        finalModelSize = 'n';
+        if (normalizedModelSize && normalizedModelSize !== 'n') {
+          return res.status(400).json({
+            error: 'RF_DETR only supports modelSize n (Nano) in v1'
+          });
+        }
+        if (normalizedModelKey && normalizedModelKey !== 'base-rfdetr-n') {
+          return res.status(400).json({
+            error: 'Invalid modelKey for RF_DETR. Must be base-rfdetr-n'
+          });
+        }
+        if (!normalizedModelKey) {
+          finalModelKey = 'base-rfdetr-n';
+        }
+      }
+
       // Validate modelSize for YOLO (optional, defaults to 'n')
-      if (modelType === 'YOLO' && normalizedModelSize) {
+      if ((modelType === 'YOLO' || modelType === 'YOLO_SEG') && normalizedModelSize) {
         const validSizePattern = /^(?:[nsmlx]|v(?:5|8|11|26)[nsmlx])$/i;
         if (!validSizePattern.test(normalizedModelSize)) {
           return res.status(400).json({
@@ -463,14 +508,34 @@ const startTraining = async (req, res) => {
         }
       }
 
-      if (modelType === 'YOLO' && normalizedModelKey) {
-        const validKeyPattern = /^base-v(?:5|8|11|26)[nsmlx]$/i;
+      if ((modelType === 'YOLO' || modelType === 'YOLO_SEG') && normalizedModelKey) {
+        const validKeyPattern = /^base-v(?:5|8|11|26)[nsmlx](?:-seg)?$/i;
         if (!validKeyPattern.test(normalizedModelKey)) {
           return res.status(400).json({
-            error: 'Invalid modelKey. Must be like base-v5n/base-v8n/base-v11n/base-v26n'
+            error: 'Invalid modelKey. Must be like base-v5n/base-v8n/base-v11n/base-v26n with optional -seg'
+          });
+        }
+        const keyInfo = parseModelKeyInfo(normalizedModelKey);
+        if (keyInfo && keyInfo.isSeg && modelType !== 'YOLO_SEG') {
+          return res.status(400).json({
+            error: 'modelKey with -seg requires modelType=YOLO_SEG'
+          });
+        }
+        if (keyInfo && !keyInfo.isSeg && modelType === 'YOLO_SEG') {
+          return res.status(400).json({
+            error: 'modelType=YOLO_SEG requires modelKey ending with -seg'
           });
         }
       }
+    }
+
+    if (
+      finalModelType === 'RF_DETR' &&
+      normalizedAugmentationPreset !== 'none'
+    ) {
+      console.warn(
+        `[startTraining] augmentationPreset "${normalizedAugmentationPreset}" ignored for RF_DETR (YOLO-only presets)`
+      );
     }
 
     // Validate dataset is ready for training

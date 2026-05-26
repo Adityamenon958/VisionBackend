@@ -128,9 +128,12 @@ function parseModelSize(modelSize = 'n') {
 function parseModelKey(modelKey) {
   if (!modelKey) return null;
   const raw = String(modelKey).trim();
-  const match = raw.match(/^base-v(5|8|11|26)([nsmlx])$/i);
+  const match = raw.match(/^base-v(5|8|11|26)([nsmlx])(-seg)?$/i);
   if (!match) return null;
-  return `v${match[1]}${match[2].toLowerCase()}`;
+  return {
+    sizeToken: `v${match[1]}${match[2].toLowerCase()}`,
+    isSeg: Boolean(match[3])
+  };
 }
 
 /**
@@ -140,30 +143,33 @@ function parseModelKey(modelKey) {
  * @returns {string} Path to base model file
  */
 function getBaseModelPath(modelType, modelSize = 'n', modelKey = null) {
-  if (modelType === 'YOLO') {
+  if (modelType === 'YOLO' || modelType === 'YOLO_SEG') {
     const baseModelsDir = path.join(process.cwd(), 'models', 'base');
+    const isSegModel = modelType === 'YOLO_SEG';
 
-    const keyResolvedSize = parseModelKey(modelKey);
+    const keyInfo = parseModelKey(modelKey);
+    const keyResolvedSize = keyInfo?.sizeToken || null;
     const resolvedModelSize = keyResolvedSize || modelSize;
     const { version, size, explicitVersion } = parseModelSize(resolvedModelSize);
+    const suffix = isSegModel ? '-seg' : '';
 
     const makePath = (name) => path.join(baseModelsDir, name);
     const candidates = [];
 
     if (explicitVersion && version) {
       if (version === '26') {
-        candidates.push(makePath(`yolov26${size}.pt`), makePath(`yolo26${size}.pt`));
+        candidates.push(makePath(`yolov26${size}${suffix}.pt`), makePath(`yolo26${size}${suffix}.pt`));
       } else {
-        candidates.push(makePath(`yolov${version}${size}.pt`));
+        candidates.push(makePath(`yolov${version}${size}${suffix}.pt`));
       }
     } else {
       // Prefer YOLOv26 (newest), then YOLOv11, then YOLOv8, then YOLOv5
       candidates.push(
-        makePath(`yolov26${size}.pt`),
-        makePath(`yolo26${size}.pt`),
-        makePath(`yolov11${size}.pt`),
-        makePath(`yolov8${size}.pt`),
-        makePath(`yolov5${size}.pt`)
+        makePath(`yolov26${size}${suffix}.pt`),
+        makePath(`yolo26${size}${suffix}.pt`),
+        makePath(`yolov11${size}${suffix}.pt`),
+        makePath(`yolov8${size}${suffix}.pt`),
+        makePath(`yolov5${size}${suffix}.pt`)
       );
     }
 
@@ -176,7 +182,7 @@ function getBaseModelPath(modelType, modelSize = 'n', modelKey = null) {
     // Fallback: return model name (YOLO will download if not found)
     console.warn(`⚠️  Base model not found locally: ${candidates.join(', ')}`);
     console.warn(`⚠️  YOLO will download it automatically (slower). Run: npm run download-models`);
-    return `yolov8${size}.pt`; // YOLO will download from internet (default to v8)
+    return `yolov8${size}${suffix}.pt`; // YOLO will download from internet (default to v8)
   }
 
   // For other model types, return null (let Python script handle it)
@@ -190,7 +196,7 @@ function getBaseModelPath(modelType, modelSize = 'n', modelKey = null) {
  * @param {object} logger - Logger object (defaults to console)
  * @returns {Promise<{localModelPath: string, jobTempDir: string}>} Local model path and temp directory
  */
-async function downloadBaseModelForJob({ jobId, modelSize, modelKey = null, logger = console }) {
+async function downloadBaseModelForJob({ jobId, modelType = 'YOLO', modelSize, modelKey = null, logger = console }) {
   // Validate inputs
   if (!jobId) {
     throw new Error('jobId is required');
@@ -208,20 +214,23 @@ async function downloadBaseModelForJob({ jobId, modelSize, modelKey = null, logg
   // Initialize Blob Service Client
   const blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
   const containerName = 'models';
-  const keyResolvedSize = parseModelKey(modelKey);
+  const isSegModel = modelType === 'YOLO_SEG';
+  const suffix = isSegModel ? '-seg' : '';
+  const keyInfo = parseModelKey(modelKey);
+  const keyResolvedSize = keyInfo?.sizeToken || null;
   const resolvedModelSize = keyResolvedSize || modelSize;
   const { version, size, explicitVersion } = parseModelSize(resolvedModelSize);
   const blobCandidates = explicitVersion && version
     ? (version === '26'
-      ? [`base/yolov26${size}.pt`, `base/yolo26${size}.pt`]
-      : [`base/yolov${version}${size}.pt`]
+      ? [`base/yolov26${size}${suffix}.pt`, `base/yolo26${size}${suffix}.pt`]
+      : [`base/yolov${version}${size}${suffix}.pt`]
     )
     : [
-      `base/yolov26${size}.pt`,
-      `base/yolo26${size}.pt`,
-      `base/yolov11${size}.pt`,
-      `base/yolov8${size}.pt`,
-      `base/yolov5${size}.pt`
+      `base/yolov26${size}${suffix}.pt`,
+      `base/yolo26${size}${suffix}.pt`,
+      `base/yolov11${size}${suffix}.pt`,
+      `base/yolov8${size}${suffix}.pt`,
+      `base/yolov5${size}${suffix}.pt`
     ];
 
   // Create job-specific temp directory
@@ -367,6 +376,7 @@ names: []
     project: path.join(path.dirname(outputPath), 'runs'),
     name: 'train',
     exist_ok: true,
+    task: modelType === 'YOLO_SEG' ? 'segment' : 'detect',
     ...augmentation
   };
 
@@ -387,6 +397,91 @@ names: []
       console.log(`✅ Using local base model: ${finalModelPath}`);
     }
   }
+  return outputPath;
+}
+
+/**
+ * Run a Python helper script and wait for exit code 0.
+ */
+function runPythonScript(scriptPath, args, cwd) {
+  const pythonBin = process.env.TRAIN_PYTHON_BIN || process.env.PYTHON || 'python';
+  return new Promise((resolve, reject) => {
+    const child = spawn(pythonBin, ['-u', scriptPath, ...args], {
+      cwd: cwd || path.dirname(scriptPath),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, PYTHONUNBUFFERED: '1' }
+    });
+    let stderr = '';
+    child.stderr.on('data', (d) => {
+      stderr += d.toString();
+      process.stderr.write(d);
+    });
+    child.stdout.on('data', (d) => process.stdout.write(d));
+    child.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(stderr.trim() || `Python exited with code ${code}`));
+    });
+    child.on('error', reject);
+  });
+}
+
+/**
+ * Convert Ultralytics dataset layout to RF-DETR layout in job temp dir.
+ */
+async function prepareRfdetrDatasetForJob(datasetPath, jobId) {
+  const jobTempDir = path.join(process.cwd(), 'uploads', 'training-temp', jobId);
+  const rfdetrDatasetPath = path.join(jobTempDir, 'rfdetr-dataset');
+  const scriptPath = path.join(__dirname, '../training-scripts/prepare_rfdetr_dataset.py');
+  await fsPromises.mkdir(jobTempDir, { recursive: true });
+  console.log(`📂 Preparing RF-DETR dataset adapter: ${rfdetrDatasetPath}`);
+  await runPythonScript(
+    scriptPath,
+    ['--source', datasetPath, '--output', rfdetrDatasetPath],
+    path.join(__dirname, '../training-scripts')
+  );
+  return rfdetrDatasetPath;
+}
+
+/**
+ * Generate RF-DETR training config JSON.
+ */
+async function generateRfdetrTrainingConfig(
+  hyperparameters,
+  rfdetrDatasetPath,
+  outputPath,
+  modelStoragePath,
+  modelPath = null
+) {
+  const outputDir = path.join(modelStoragePath, 'rfdetr-output');
+  await fsPromises.mkdir(outputDir, { recursive: true });
+
+  let resume = null;
+  let pretrain_weights = null;
+  if (modelPath && fs.existsSync(modelPath)) {
+    const checkpointPth = path.join(path.dirname(modelPath), 'checkpoint.pth');
+    if (fs.existsSync(checkpointPth)) {
+      resume = checkpointPth;
+    } else {
+      pretrain_weights = modelPath;
+    }
+  }
+
+  const config = {
+    dataset_dir: rfdetrDatasetPath,
+    output_dir: outputDir,
+    epochs: hyperparameters.epochs,
+    batch_size: hyperparameters.batchSize,
+    grad_accum_steps: 4,
+    lr: hyperparameters.learningRate,
+    resolution: hyperparameters.imgSize,
+    skip_best_epochs: 3,
+    device: process.env.RFDETR_DEVICE || 'cuda',
+    resume,
+    pretrain_weights
+  };
+
+  await fsPromises.writeFile(outputPath, JSON.stringify(config, null, 2), 'utf8');
+  console.log(`✅ Generated RF-DETR training config at: ${outputPath}`);
   return outputPath;
 }
 
@@ -551,6 +646,15 @@ const processTrainingJob = async (job) => {
 
     console.log(`📦 Model storage: ${modelStoragePath}`);
 
+    const isRfdetr = modelType === 'RF_DETR';
+
+    if (isRfdetr && augmentationPreset && augmentationPreset !== 'none') {
+      const warnMsg =
+        `⚠️ augmentationPreset "${augmentationPreset}" is ignored for RF_DETR (YOLO-only presets)`;
+      console.warn(warnMsg);
+      trainingJob.logs.push(warnMsg);
+    }
+
     // ✅ Determine which model to use for training (base model or trained model checkpoint)
     let modelPath = null;
     if (modelId) {
@@ -558,6 +662,13 @@ const processTrainingJob = async (job) => {
       const trainedModel = await Model.findOne({ modelId });
       if (!trainedModel) {
         throw new Error(`Trained model ${modelId} not found`);
+      }
+
+      if (trainedModel.modelType !== 'RF_DETR' && isRfdetr) {
+        throw new Error(`Trained model ${modelId} is not RF_DETR`);
+      }
+      if (trainedModel.modelType === 'RF_DETR' && !isRfdetr) {
+        throw new Error(`Cannot use RF_DETR checkpoint for ${modelType} training`);
       }
       
       // Validate model belongs to same company/project
@@ -569,12 +680,13 @@ const processTrainingJob = async (job) => {
       modelPath = trainedModel.bestCheckpointPath;
       console.log(`✅ Using trained model checkpoint: ${modelPath}`);
       console.log(`📊 Previous model metrics - mAP50: ${(trainedModel.metrics?.mAP50 || 0).toFixed(4)}, Precision: ${(trainedModel.metrics?.precision || 0).toFixed(4)}`);
-    } else {
+    } else if (!isRfdetr) {
       // ✅ Download base model from Azure Blob Storage (if Azure connection string exists)
       if (process.env.AZURE_STORAGE_CONNECTION_STRING) {
         try {
           const { localModelPath, jobTempDir } = await downloadBaseModelForJob({
             jobId,
+            modelType,
             modelSize,
             modelKey,
             logger: console
@@ -594,26 +706,39 @@ const processTrainingJob = async (job) => {
         modelPath = getBaseModelPath(modelType, modelSize, modelKey);
         console.log(`✅ Using base model: ${modelPath}`);
       }
+    } else {
+      console.log('✅ RF-DETR base: using COCO pretrained weights from rfdetr package');
     }
 
-    // ✅ Generate training config
-    // Use modelSize from job data (defaults to 'n' if not provided)
+    let rfdetrDatasetPath = null;
     const configPath = path.join(modelStoragePath, 'training-config.json');
-    await generateTrainingConfig(
-      hyperparameters,
-      datasetPath,
-      configPath,
-      modelType,
-      modelSize,
-      modelPath,
-      modelKey,
-      augmentationPreset
-    );
+
+    if (isRfdetr) {
+      rfdetrDatasetPath = await prepareRfdetrDatasetForJob(datasetPath, jobId);
+      await generateRfdetrTrainingConfig(
+        hyperparameters,
+        rfdetrDatasetPath,
+        configPath,
+        modelStoragePath,
+        modelPath
+      );
+    } else {
+      await generateTrainingConfig(
+        hyperparameters,
+        datasetPath,
+        configPath,
+        modelType,
+        modelSize,
+        modelPath,
+        modelKey,
+        augmentationPreset
+      );
+    }
 
     // ✅ Spawn Python training process
-    // Note: This assumes you have a Python training script at training-scripts/train.py
-    // For now, we'll create a placeholder that logs progress
-    const pythonScriptPath = path.join(__dirname, '../training-scripts/train.py');
+    const pythonScriptPath = isRfdetr
+      ? path.join(__dirname, '../training-scripts/train_rfdetr.py')
+      : path.join(__dirname, '../training-scripts/train.py');
     
     // Check if Python script exists, if not, we'll simulate training for now
     const scriptExists = await fsPromises.access(pythonScriptPath).then(() => true).catch(() => false);
@@ -636,7 +761,12 @@ const processTrainingJob = async (job) => {
     pythonProcess = spawn('python', ['-u', pythonScriptPath, '--config', configPath], {
       cwd: path.join(__dirname, '../training-scripts'),
       stdio: ['ignore', 'pipe', 'pipe'], // stdin ignored, stdout/stderr piped
-      env: { ...process.env, PYTHONUNBUFFERED: '1' }, // ✅ Force unbuffered output
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: '1',
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1'
+      },
       // Note: We keep process attached to capture logs, but training worker
       // runs independently, so Python process survives dev server restarts
     });
@@ -987,24 +1117,63 @@ async function finalizeTraining(trainingJob, dataset, modelStoragePath, modelVer
   try {
     console.log(`📊 Finalizing training job ${trainingJob.jobId}...`);
 
-    // ✅ Copy best checkpoint from YOLO runs directory to model storage
-    // YOLO saves checkpoints in: {project}/train/weights/best.pt
-    // project is set to: modelStoragePath/runs (see generateTrainingConfig)
-    const runsDir = path.join(modelStoragePath, 'runs', 'train');
-    const yoloBestPath = path.join(runsDir, 'weights', 'best.pt');
-    const bestCheckpointPath = path.join(modelStoragePath, 'best.pt');
-    
-    // Check if YOLO checkpoint exists
-    if (await storageAdapter.exists(yoloBestPath)) {
-      console.log(`✅ Found YOLO checkpoint: ${yoloBestPath}`);
-      // Copy the actual trained model
-      await storageAdapter.copyFile(yoloBestPath, bestCheckpointPath);
-      console.log(`✅ Copied best.pt to: ${bestCheckpointPath}`);
+    const isRfdetr = trainingJob.modelType === 'RF_DETR';
+    const bestCheckpointPath = path.join(
+      modelStoragePath,
+      isRfdetr ? 'best.pth' : 'best.pt',
+    );
+
+    if (isRfdetr) {
+      const outputDir = path.join(modelStoragePath, 'rfdetr-output');
+      const candidates = [
+        path.join(outputDir, 'checkpoint_best_total.pth'),
+        path.join(outputDir, 'checkpoint_best_ema.pth'),
+        path.join(outputDir, 'checkpoint_best_regular.pth'),
+        path.join(outputDir, 'checkpoint.pth')
+      ];
+      let found = null;
+      for (const c of candidates) {
+        if (await storageAdapter.exists(c)) {
+          found = c;
+          break;
+        }
+      }
+      if (found) {
+        console.log(`✅ Found RF-DETR checkpoint: ${found}`);
+        await storageAdapter.copyFile(found, bestCheckpointPath);
+        console.log(`✅ Copied to: ${bestCheckpointPath}`);
+      } else {
+        console.warn(`⚠️  RF-DETR checkpoint not found under: ${outputDir}`);
+        await fsPromises.writeFile(
+          bestCheckpointPath,
+          'placeholder checkpoint file - training may have failed',
+          'utf8'
+        );
+      }
+
+      const datasetPath = storageAdapter.buildDatasetPath(company, project, dataset.version);
+      const datasetYaml = path.join(datasetPath, 'data.yaml');
+      const modelYaml = path.join(modelStoragePath, 'data.yaml');
+      if (fs.existsSync(datasetYaml)) {
+        await storageAdapter.copyFile(datasetYaml, modelYaml);
+        console.log(`✅ Copied class names data.yaml to model storage`);
+      }
     } else {
-      console.warn(`⚠️  YOLO checkpoint not found at: ${yoloBestPath}`);
-      console.warn(`⚠️  Creating placeholder file. Training may have failed.`);
-      // Fallback: create placeholder if checkpoint not found
-      await fsPromises.writeFile(bestCheckpointPath, 'placeholder checkpoint file - training may have failed', 'utf8');
+      const runsDir = path.join(modelStoragePath, 'runs', 'train');
+      const yoloBestPath = path.join(runsDir, 'weights', 'best.pt');
+
+      if (await storageAdapter.exists(yoloBestPath)) {
+        console.log(`✅ Found YOLO checkpoint: ${yoloBestPath}`);
+        await storageAdapter.copyFile(yoloBestPath, bestCheckpointPath);
+        console.log(`✅ Copied best.pt to: ${bestCheckpointPath}`);
+      } else {
+        console.warn(`⚠️  YOLO checkpoint not found at: ${yoloBestPath}`);
+        await fsPromises.writeFile(
+          bestCheckpointPath,
+          'placeholder checkpoint file - training may have failed',
+          'utf8'
+        );
+      }
     }
 
     // ✅ Compute final metrics (copy from current metrics)

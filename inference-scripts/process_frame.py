@@ -114,10 +114,13 @@ def process_frame(model_path, image_path_or_base64, output_path, conf=0.25, is_b
 
         # ✅ Get detections
         boxes = result.boxes
+        mask_polygons = []
+        if hasattr(result, 'masks') and result.masks is not None and hasattr(result.masks, 'xy'):
+            mask_polygons = result.masks.xy or []
         detections = []
         total_detections = len(boxes)
 
-        for box in boxes:
+        for idx, box in enumerate(boxes):
             cls = int(box.cls[0])
             conf_score = float(box.conf[0])
             xyxy = box.xyxy[0].tolist()  # [x1, y1, x2, y2]
@@ -125,11 +128,16 @@ def process_frame(model_path, image_path_or_base64, output_path, conf=0.25, is_b
             # Get class name
             class_name = result.names[cls] if hasattr(result, 'names') else f'class_{cls}'
 
-            detections.append({
+            detection = {
                 'class': class_name,
                 'confidence': conf_score,
                 'bbox': xyxy
-            })
+            }
+            if idx < len(mask_polygons):
+                polygon = mask_polygons[idx]
+                if polygon is not None and len(polygon) > 0:
+                    detection['polygon'] = polygon.tolist()
+            detections.append(detection)
 
         # ✅ Draw annotations on image (only if not in annotations-only mode)
         if not annotations_only:

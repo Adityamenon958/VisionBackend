@@ -49,7 +49,7 @@ const modelSchema = new mongoose.Schema({
   // Model type
   modelType: {
     type: String,
-    enum: ['YOLO'],
+    enum: ['YOLO', 'YOLO_SEG', 'RF_DETR'],
     required: true
   },
 

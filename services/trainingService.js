@@ -105,6 +105,20 @@ function getDefaultHyperparameters(modelType) {
       imgSize: 416,
       learningRate: 0.01,
       workers: 2
+    },
+    YOLO_SEG: {
+      epochs: 20,
+      batchSize: 8,
+      imgSize: 416,
+      learningRate: 0.01,
+      workers: 2
+    },
+    RF_DETR: {
+      epochs: 50,
+      batchSize: 4,
+      imgSize: 384,
+      learningRate: 0.0001,
+      workers: 2
     }
   };
 

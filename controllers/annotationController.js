@@ -12,7 +12,9 @@ const {
   generateLabelFileContent,
   generateDataYaml,
   getLabelFilePath,
-  convertYOLOValuesToBbox
+  convertYOLOValuesToBbox,
+  normalizePolygonPoints,
+  bboxToPolygon
 } = require('../utils/yoloConverter');
 const { splitDataset } = require('../utils/splitDataset');
 
@@ -25,6 +27,39 @@ const { splitDataset } = require('../utils/splitDataset');
 
 // System user ID for createdBy (since auth is skipped)
 const SYSTEM_USER_ID = new mongoose.Types.ObjectId('000000000000000000000000');
+
+function validatePolygon(polygon) {
+  if (!Array.isArray(polygon)) {
+    return { valid: false, error: 'polygon must be an array of points [[x,y], ...]' };
+  }
+  if (polygon.length < 3) {
+    return { valid: false, error: 'polygon must have at least 3 points' };
+  }
+  for (let i = 0; i < polygon.length; i++) {
+    const pt = polygon[i];
+    if (!Array.isArray(pt) || pt.length !== 2) {
+      return { valid: false, error: `polygon[${i}] must be [x, y]` };
+    }
+    const [x, y] = pt;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return { valid: false, error: `polygon[${i}] must contain numeric x and y` };
+    }
+    if (x < 0 || x > 1 || y < 0 || y > 1) {
+      return { valid: false, error: `polygon[${i}] values must be normalized between 0 and 1` };
+    }
+  }
+  return { valid: true };
+}
+
+function polygonToBbox(polygon) {
+  const xs = polygon.map(pt => pt[0]);
+  const ys = polygon.map(pt => pt[1]);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  return [minX, minY, maxX - minX, maxY - minY];
+}
 
 /**
  * GET /api/dataset/:datasetId/images/unannotated
@@ -301,6 +336,7 @@ const getAnnotations = async (req, res) => {
       id: ann._id,
       imageId: ann.imageId,
       bbox: ann.bbox,
+      polygon: ann.polygon,
       categoryId: ann.categoryId,
       categoryName: ann.categoryName,
       state: ann.state,
@@ -340,11 +376,11 @@ const getAnnotations = async (req, res) => {
 const createAnnotation = async (req, res) => {
   try {
     const { datasetId } = req.params;
-    const { imageId, bbox, categoryId } = req.body;
+    const { imageId, bbox, polygon, categoryId } = req.body;
 
     // Validate required fields
-    if (!imageId || !bbox || !categoryId) {
-      return sendValidationError(res, 'body', 'Missing required fields: imageId, bbox, categoryId');
+    if (!imageId || (!bbox && !polygon) || !categoryId) {
+      return sendValidationError(res, 'body', 'Missing required fields: imageId, categoryId, and either bbox or polygon');
     }
 
     // Validate datasetId
@@ -358,8 +394,17 @@ const createAnnotation = async (req, res) => {
       return sendNotFoundError(res, 'Dataset', datasetId);
     }
 
-    // Validate bbox
-    const bboxValidation = validateBbox(bbox);
+    let finalBbox = bbox;
+    let finalPolygon = polygon;
+    if (finalPolygon !== undefined) {
+      const polygonValidation = validatePolygon(finalPolygon);
+      if (!polygonValidation.valid) {
+        return sendValidationError(res, 'polygon', polygonValidation.error);
+      }
+      finalPolygon = normalizePolygonPoints(finalPolygon);
+      finalBbox = polygonToBbox(finalPolygon);
+    }
+    const bboxValidation = validateBbox(finalBbox);
     if (!bboxValidation.valid) {
       return sendValidationError(res, 'bbox', bboxValidation.error);
     }
@@ -390,7 +435,8 @@ const createAnnotation = async (req, res) => {
     const annotation = new Annotation({
       datasetId,
       imageId,
-      bbox,
+      bbox: finalBbox,
+      polygon: finalPolygon,
       categoryId,
       categoryName: category.name, // Denormalize category name
       state: 'draft',
@@ -417,6 +463,7 @@ const createAnnotation = async (req, res) => {
         id: annotation._id,
         imageId: annotation.imageId,
         bbox: annotation.bbox,
+        polygon: annotation.polygon,
         categoryId: annotation.categoryId,
         categoryName: annotation.categoryName,
         state: annotation.state,
@@ -440,7 +487,7 @@ const createAnnotation = async (req, res) => {
 const updateAnnotation = async (req, res) => {
   try {
     const { datasetId, annotationId } = req.params;
-    const { bbox, categoryId } = req.body;
+    const { bbox, polygon, categoryId } = req.body;
 
     // Validate annotationId
     if (!mongoose.Types.ObjectId.isValid(annotationId)) {
@@ -466,6 +513,19 @@ const updateAnnotation = async (req, res) => {
         return sendValidationError(res, 'bbox', bboxValidation.error);
       }
       annotation.bbox = bbox;
+      if (!annotation.polygon || annotation.polygon.length < 3) {
+        annotation.polygon = bboxToPolygon(bbox);
+      }
+    }
+
+    if (polygon !== undefined) {
+      const polygonValidation = validatePolygon(polygon);
+      if (!polygonValidation.valid) {
+        return sendValidationError(res, 'polygon', polygonValidation.error);
+      }
+      const normalizedPolygon = normalizePolygonPoints(polygon);
+      annotation.polygon = normalizedPolygon;
+      annotation.bbox = polygonToBbox(normalizedPolygon);
     }
 
     // Update category if provided
@@ -494,6 +554,7 @@ const updateAnnotation = async (req, res) => {
         id: annotation._id,
         imageId: annotation.imageId,
         bbox: annotation.bbox,
+        polygon: annotation.polygon,
         categoryId: annotation.categoryId,
         categoryName: annotation.categoryName,
         updatedAt: annotation.updatedAt,
@@ -596,13 +657,25 @@ const batchSaveAnnotations = async (req, res) => {
       const errors = [];
 
       // Check required fields
-      if (!ann.imageId || !ann.bbox || !ann.categoryId) {
-        errors.push('Missing required fields: imageId, bbox, categoryId');
+      if (!ann.imageId || (!ann.bbox && !ann.polygon) || !ann.categoryId) {
+        errors.push('Missing required fields: imageId, categoryId, and either bbox or polygon');
       } else {
+        let candidateBbox = ann.bbox;
+        if (ann.polygon !== undefined) {
+          const polygonValidation = validatePolygon(ann.polygon);
+          if (!polygonValidation.valid) {
+            errors.push(`polygon: ${polygonValidation.error}`);
+          } else {
+            ann.polygon = normalizePolygonPoints(ann.polygon);
+            candidateBbox = polygonToBbox(ann.polygon);
+          }
+        }
         // Validate bbox
-        const bboxValidation = validateBbox(ann.bbox);
+        const bboxValidation = validateBbox(candidateBbox);
         if (!bboxValidation.valid) {
           errors.push(`bbox: ${bboxValidation.error}`);
+        } else {
+          ann.bbox = candidateBbox;
         }
 
         // Validate imageId
@@ -670,6 +743,7 @@ const batchSaveAnnotations = async (req, res) => {
           imageId: ann.imageId,
           categoryId: ann.categoryId,
           bbox: ann.bbox,
+          ...(ann.polygon ? { polygon: ann.polygon } : {}),
           deletedAt: null
         }).session(session);
 
@@ -684,6 +758,7 @@ const batchSaveAnnotations = async (req, res) => {
           datasetId,
           imageId: ann.imageId,
           bbox: ann.bbox,
+          polygon: ann.polygon,
           categoryId: ann.categoryId,
           categoryName: category.name,
           state: 'draft',
@@ -718,8 +793,8 @@ const batchSaveAnnotations = async (req, res) => {
 /**
  * POST /api/dataset/:datasetId/import-labels-to-annotations
  *
- * Reads YOLO bbox .txt files on disk and creates Annotation rows so pre-labeled
- * images can be edited in the annotation UI. Polygon / segmentation lines (>5 values) are skipped.
+ * Reads YOLO bbox/segmentation .txt files on disk and creates Annotation rows so pre-labeled
+ * images can be edited in the annotation UI.
  *
  * Body:
  * - imageIds?: string[] — if omitted, all images with hasLabels === true are considered
@@ -824,18 +899,9 @@ const importLabelsToAnnotations = async (req, res) => {
 
         for (let li = 0; li < lines.length; li++) {
           const parts = lines[li].split(/\s+/);
-          if (parts.length !== 5) {
-            imageSummary.warnings.push(
-              `line ${li + 1}: expected 5 values (YOLO bbox), got ${parts.length} — skipped`
-            );
-            continue;
-          }
-
           const classNum = parseInt(parts[0], 10);
-          const cx = parseFloat(parts[1]);
-          const cy = parseFloat(parts[2]);
-          const bw = parseFloat(parts[3]);
-          const bh = parseFloat(parts[4]);
+          let bbox = null;
+          let polygon = undefined;
 
           if (
             !Number.isInteger(classNum) ||
@@ -848,14 +914,42 @@ const importLabelsToAnnotations = async (req, res) => {
             continue;
           }
 
-          if (![cx, cy, bw, bh].every(n => Number.isFinite(n))) {
-            imageSummary.warnings.push(`line ${li + 1}: non-numeric bbox values`);
-            continue;
-          }
-
-          const bbox = convertYOLOValuesToBbox(cx, cy, bw, bh);
-          if (!bbox) {
-            imageSummary.warnings.push(`line ${li + 1}: bbox unusable after normalization`);
+          if (parts.length === 5) {
+            const cx = parseFloat(parts[1]);
+            const cy = parseFloat(parts[2]);
+            const bw = parseFloat(parts[3]);
+            const bh = parseFloat(parts[4]);
+            if (![cx, cy, bw, bh].every(n => Number.isFinite(n))) {
+              imageSummary.warnings.push(`line ${li + 1}: non-numeric bbox values`);
+              continue;
+            }
+            bbox = convertYOLOValuesToBbox(cx, cy, bw, bh);
+            if (!bbox) {
+              imageSummary.warnings.push(`line ${li + 1}: bbox unusable after normalization`);
+              continue;
+            }
+            polygon = bboxToPolygon(bbox);
+          } else if (parts.length >= 7 && parts.length % 2 === 1) {
+            const coords = parts.slice(1).map(v => parseFloat(v));
+            if (!coords.every(n => Number.isFinite(n))) {
+              imageSummary.warnings.push(`line ${li + 1}: non-numeric polygon values`);
+              continue;
+            }
+            const rawPolygon = [];
+            for (let pi = 0; pi < coords.length; pi += 2) {
+              rawPolygon.push([coords[pi], coords[pi + 1]]);
+            }
+            const polygonValidation = validatePolygon(rawPolygon);
+            if (!polygonValidation.valid) {
+              imageSummary.warnings.push(`line ${li + 1}: ${polygonValidation.error}`);
+              continue;
+            }
+            polygon = normalizePolygonPoints(rawPolygon);
+            bbox = polygonToBbox(polygon);
+          } else {
+            imageSummary.warnings.push(
+              `line ${li + 1}: expected YOLO bbox (5 values) or segmentation polygon (odd values >= 7), got ${parts.length}`
+            );
             continue;
           }
 
@@ -872,6 +966,7 @@ const importLabelsToAnnotations = async (req, res) => {
             categoryId: category._id,
             categoryName: category.name,
             bbox,
+            polygon,
             state: 'draft',
             createdBy: SYSTEM_USER_ID
           });
@@ -945,7 +1040,8 @@ const importLabelsToAnnotations = async (req, res) => {
 const convertAnnotationsToYOLO = async (req, res) => {
   try {
     const { datasetId } = req.params;
-    const { imageIds, createEmptyLabels = false } = req.body; // Optional: if provided, convert only those images. createEmptyLabels: create empty .txt for unannotated images
+    const { imageIds, createEmptyLabels = false, modelType = 'YOLO' } = req.body; // Optional: if provided, convert only those images. createEmptyLabels: create empty .txt for unannotated images
+    const exportMode = modelType === 'YOLO_SEG' ? 'segment' : 'detect';
 
     // Validate datasetId
     if (!mongoose.Types.ObjectId.isValid(datasetId)) {
@@ -1032,7 +1128,7 @@ const convertAnnotationsToYOLO = async (req, res) => {
       }
 
       // Generate label file content
-      const labelContent = generateLabelFileContent(annotations, categoryOrder);
+      const labelContent = generateLabelFileContent(annotations, categoryOrder, { mode: exportMode });
 
       // Write label file (only for images with annotations)
       await fs.writeFile(fullLabelPath, labelContent, 'utf8');

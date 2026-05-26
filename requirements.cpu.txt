@@ -5,6 +5,8 @@
 #
 # Install (recommended inside a venv):
 #   python -m pip install -r requirements.cpu.txt
+#   python -m pip install -r requirements.txt
+# (cpu/gpu files pin PyTorch wheels; requirements.txt adds rfdetr, supervision, etc.)
 #
 
 --extra-index-url https://download.pytorch.org/whl/cpu

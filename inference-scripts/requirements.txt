@@ -1,14 +1,2 @@
-ultralytics
-torch
-torchvision
-pillow
-numpy
-opencv-python
-moviepy
-
-
-
-
-
-
-
+# Use the unified list at repo root (kept here for backward-compatible paths).
+-r ../requirements.txt

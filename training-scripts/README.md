@@ -4,24 +4,29 @@ This directory contains Python training scripts for model training.
 
 ## Current Status
 
-**✅ Python training script implemented!**
+**✅ YOLO and RF-DETR-N training scripts implemented**
 
-The training worker (`workers/trainingWorker.js`) will look for a script at:
-```
-training-scripts/train.py
-```
+The training worker (`workers/trainingWorker.js`) runs:
+
+| modelType | Script |
+|-----------|--------|
+| `YOLO`, `YOLO_SEG` | `training-scripts/train.py` |
+| `RF_DETR` | `training-scripts/train_rfdetr.py` (after `prepare_rfdetr_dataset.py`) |
 
 ## Setup
 
 ### 1. Install Python Dependencies
 
+From the **repo root** (recommended):
+
 ```bash
 pip install -r requirements.txt
 ```
 
-Or install manually:
+Or from this folder (same packages via `-r ../requirements.txt`):
+
 ```bash
-pip install ultralytics torch torchvision
+pip install -r requirements.txt
 ```
 
 ### 2. Verify Installation

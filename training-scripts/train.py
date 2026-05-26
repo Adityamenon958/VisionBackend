@@ -37,13 +37,13 @@ def load_config(config_path):
         sys.exit(1)
 
 
-def update_data_yaml(data_yaml_path, dataset_path):
+def update_data_yaml(data_yaml_path, dataset_path, task='detect'):
     """
     Update data.yaml with actual class count and names from dataset.
     
     This function:
     - Scans labels/train/*.txt files to detect all class IDs
-    - Validates YOLO format (5 values per line: class_id x y w h)
+    - Validates YOLO format based on task
     - Fails loudly if labels are unreadable or invalid
     - Never defaults to 1 class unless labels are truly single-class
     
@@ -116,13 +116,22 @@ def update_data_yaml(data_yaml_path, dataset_path):
                     if not line:
                         continue
                     
-                    # ✅ Validate YOLO format: must have exactly 5 values
                     parts = line.split()
-                    if len(parts) != 5:
-                        print(f"ERROR: Invalid YOLO format in {label_filename}:{line_num}", file=sys.stderr)
-                        print(f"ERROR: Expected 5 values, got {len(parts)}: {line}", file=sys.stderr)
-                        print(f"ERROR: Format should be: class_id center_x center_y width height", file=sys.stderr)
-                        sys.exit(1)
+                    if task == 'segment':
+                        # YOLO segmentation format: class_id x1 y1 x2 y2 ... xn yn
+                        # total tokens must be odd and >= 7 (class + >= 3 points)
+                        if len(parts) < 7 or len(parts) % 2 == 0:
+                            print(f"ERROR: Invalid YOLO segmentation format in {label_filename}:{line_num}", file=sys.stderr)
+                            print(f"ERROR: Expected odd number of values >= 7, got {len(parts)}: {line}", file=sys.stderr)
+                            print(f"ERROR: Format should be: class_id x1 y1 x2 y2 ... xn yn", file=sys.stderr)
+                            sys.exit(1)
+                    else:
+                        # YOLO detection format: class_id cx cy w h
+                        if len(parts) != 5:
+                            print(f"ERROR: Invalid YOLO format in {label_filename}:{line_num}", file=sys.stderr)
+                            print(f"ERROR: Expected 5 values, got {len(parts)}: {line}", file=sys.stderr)
+                            print(f"ERROR: Format should be: class_id center_x center_y width height", file=sys.stderr)
+                            sys.exit(1)
                     
                     # ✅ Validate and extract class ID
                     try:
@@ -139,20 +148,16 @@ def update_data_yaml(data_yaml_path, dataset_path):
                     
                     # ✅ Validate coordinates are numeric and in valid range [0, 1]
                     try:
-                        center_x = float(parts[1])
-                        center_y = float(parts[2])
-                        width = float(parts[3])
-                        height = float(parts[4])
+                        coords = [float(v) for v in parts[1:]]
                     except ValueError as e:
                         print(f"ERROR: Invalid coordinates in {label_filename}:{line_num}", file=sys.stderr)
                         print(f"ERROR: {e}", file=sys.stderr)
                         sys.exit(1)
                     
                     # ✅ Validate normalized coordinates (YOLO format uses 0-1 range)
-                    if not (0.0 <= center_x <= 1.0 and 0.0 <= center_y <= 1.0 and 
-                            0.0 <= width <= 1.0 and 0.0 <= height <= 1.0):
+                    if not all(0.0 <= v <= 1.0 for v in coords):
                         print(f"WARNING: Coordinates out of [0,1] range in {label_filename}:{line_num}", file=sys.stderr)
-                        print(f"WARNING: center_x={center_x}, center_y={center_y}, width={width}, height={height}", file=sys.stderr)
+                        print(f"WARNING: values={coords}", file=sys.stderr)
                         # Don't exit - YOLO might handle this, but log the warning
                     
                     # ✅ Collect class ID
@@ -305,6 +310,7 @@ def train_yolo(config):
         project = config.get('project')
         name = config.get('name', 'train')
         model_path = config.get('model')  # Base model path (optional)
+        task = config.get('task', 'detect')
         exist_ok = config.get('exist_ok', True)
         
         # Validate required fields
@@ -319,7 +325,7 @@ def train_yolo(config):
         # Update data.yaml with actual class information
         # ✅ This will exit with error code 1 if labels are invalid or unreadable
         dataset_path = os.path.dirname(data_yaml)
-        num_classes, class_names = update_data_yaml(data_yaml, dataset_path)
+        num_classes, class_names = update_data_yaml(data_yaml, dataset_path, task=task)
         
         # ✅ Validate that data.yaml was updated correctly
         if num_classes == 0:
@@ -338,9 +344,10 @@ def train_yolo(config):
             sys.stdout.flush()
         else:
             # Use default YOLOv8n if no model specified
-            print("Using default YOLOv8n model")
+            default_model = 'yolov8n-seg.pt' if task == 'segment' else 'yolov8n.pt'
+            print(f"Using default {default_model} model")
             sys.stdout.flush()
-            model = YOLO('yolov8n.pt')
+            model = YOLO(default_model)
             print("✅ Model loaded successfully")
             sys.stdout.flush()
         
@@ -409,13 +416,21 @@ def train_yolo(config):
             metrics = results.results_dict
             print(f"Final metrics:")
             if 'metrics/mAP50(B)' in metrics:
-                print(f"  mAP50: {metrics['metrics/mAP50(B)']:.4f}")
+                print(f"  mAP50(B): {metrics['metrics/mAP50(B)']:.4f}")
             if 'metrics/mAP50-95(B)' in metrics:
-                print(f"  mAP50-95: {metrics['metrics/mAP50-95(B)']:.4f}")
+                print(f"  mAP50-95(B): {metrics['metrics/mAP50-95(B)']:.4f}")
             if 'metrics/precision(B)' in metrics:
-                print(f"  Precision: {metrics['metrics/precision(B)']:.4f}")
+                print(f"  Precision(B): {metrics['metrics/precision(B)']:.4f}")
             if 'metrics/recall(B)' in metrics:
-                print(f"  Recall: {metrics['metrics/recall(B)']:.4f}")
+                print(f"  Recall(B): {metrics['metrics/recall(B)']:.4f}")
+            if 'metrics/mAP50(M)' in metrics:
+                print(f"  mAP50(M): {metrics['metrics/mAP50(M)']:.4f}")
+            if 'metrics/mAP50-95(M)' in metrics:
+                print(f"  mAP50-95(M): {metrics['metrics/mAP50-95(M)']:.4f}")
+            if 'metrics/precision(M)' in metrics:
+                print(f"  Precision(M): {metrics['metrics/precision(M)']:.4f}")
+            if 'metrics/recall(M)' in metrics:
+                print(f"  Recall(M): {metrics['metrics/recall(M)']:.4f}")
         
         return 0
         

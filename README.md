@@ -104,21 +104,19 @@ You should see:
 ✅ Server running on http://localhost:3000
 ```
 
-### Step 5: Install Python Dependencies (Required for Training)
+### Step 5: Install Python Dependencies (training, inference, augmentation)
 
-**For actual YOLO training**, install Python dependencies:
+From the **repo root** (one venv for all Python workers):
 
 ```bash
-cd training-scripts
 pip install -r requirements.txt
 ```
 
-Or install manually:
-```bash
-pip install ultralytics torch torchvision
-```
+Includes YOLO, RF-DETR (`rfdetr`), inference, and augmentation. For a pinned CPU or CUDA PyTorch stack, use `requirements.cpu.txt` or `requirements.gpu.txt` first, then install any missing packages from `requirements.txt`.
 
-**Note:** The training worker will use simulation mode if Python dependencies are not installed.
+Legacy paths (`training-scripts/requirements.txt`, etc.) redirect to the root file.
+
+**Note:** Training fails if Python dependencies are not installed in the environment used by the workers.
 
 ### Step 6: Download Base YOLO Models (Optional but Recommended)
 

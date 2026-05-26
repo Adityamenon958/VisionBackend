@@ -138,6 +138,9 @@ const getModel = async (req, res) => {
     }
 
     const classNames = await getClassNamesForTrainedModel(model);
+    // #region agent log
+    fetch('http://127.0.0.1:7270/ingest/edea3d81-57c5-49df-82fe-4c3da06c6ef5',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'aa4502'},body:JSON.stringify({sessionId:'aa4502',location:'modelController.js:getModel',message:'model_class_names',data:{modelId:model.modelId,modelType:model.modelType,classNamesCount:classNames?.length||0,bestCheckpointPath:model.bestCheckpointPath},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
 
     // ✅ Format response
     const response = {

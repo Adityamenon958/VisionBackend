@@ -1,5 +1,2 @@
-opencv-python
-albumentations
-tqdm
-matplotlib
-numpy
+# Use the unified list at repo root (kept here for backward-compatible paths).
+-r ../requirements.txt

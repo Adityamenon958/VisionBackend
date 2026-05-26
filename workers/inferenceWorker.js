@@ -253,8 +253,9 @@ const processInferenceJob = async (job) => {
       throw new Error(`Model ${modelId} not found`);
     }
 
-    // ✅ Validate model checkpoint exists
-    if (!model.bestCheckpointPath || !fs.existsSync(model.bestCheckpointPath)) {
+    const { resolveModelCheckpointPath } = require('../services/resolveModelCheckpoint');
+    const checkpointPath = resolveModelCheckpointPath(model);
+    if (!checkpointPath || !fs.existsSync(checkpointPath)) {
       throw new Error(`Model checkpoint not found: ${model.bestCheckpointPath}`);
     }
 
@@ -341,28 +342,34 @@ const processInferenceJob = async (job) => {
 
       console.log(`📦 Results path: ${resultsPath}`);
 
-      // ✅ Run Python inference script
-      const pythonScriptPath = path.join(__dirname, '../inference-scripts/run_inference.py');
-      
-      // Check if Python script exists
+      const isRfdetr = model.modelType === 'RF_DETR';
+      const pythonScriptPath = isRfdetr
+        ? path.join(__dirname, '../inference-scripts/run_inference_rfdetr.py')
+        : path.join(__dirname, '../inference-scripts/run_inference.py');
+
       const scriptExists = await fsPromises.access(pythonScriptPath).then(() => true).catch(() => false);
 
       if (!scriptExists) {
         throw new Error(`Python inference script not found at ${pythonScriptPath}`);
       }
 
-      // ✅ Prepare Python script arguments
-      // Get confidence threshold from job data (default 0.25)
-      const confidenceThreshold = job.data.confidenceThreshold !== undefined 
-        ? parseFloat(job.data.confidenceThreshold) 
+      const confidenceThreshold = job.data.confidenceThreshold !== undefined
+        ? parseFloat(job.data.confidenceThreshold)
         : 0.25;
-      
+
+      const { getClassNamesForTrainedModel } = require('../services/yoloClassNamesService');
+      const classNames = await getClassNamesForTrainedModel(model);
+
       const config = {
-        model: model.bestCheckpointPath,
-      source: sourceFolderPath,
+        model: checkpointPath,
+        source: sourceFolderPath,
         output: resultsPath,
-        conf: confidenceThreshold
+        conf: confidenceThreshold,
+        modelType: model.modelType
       };
+      if (classNames.length > 0) {
+        config.class_names = classNames;
+      }
 
       const configPath = path.join(resultsPath, 'inference-config.json');
       await fsPromises.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');

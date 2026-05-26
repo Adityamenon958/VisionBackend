@@ -6,6 +6,8 @@
 #
 # Install (recommended inside a venv):
 #   python -m pip install -r requirements.gpu.txt
+#   python -m pip install -r requirements.txt
+# (cpu/gpu files pin PyTorch wheels; requirements.txt adds rfdetr, supervision, etc.)
 #
 # If your environment uses a different CUDA wheel set (e.g., cu124),
 # change the URL below accordingly.

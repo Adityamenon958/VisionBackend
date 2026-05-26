@@ -1,11 +1,2 @@
-ultralytics>=8.0.0
-torch>=2.0.0
-torchvision>=0.15.0
-
-
-
-
-
-
-
-
+# Use the unified list at repo root (kept here for backward-compatible paths).
+-r ../requirements.txt

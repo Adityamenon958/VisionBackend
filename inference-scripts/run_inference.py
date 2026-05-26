@@ -264,13 +264,16 @@ def run_inference(config):
             # result.boxes contains detections from all frames combined
             # For images, result.boxes contains detections from that image
             boxes = result.boxes
+            mask_polygons = []
+            if hasattr(result, 'masks') and result.masks is not None and hasattr(result.masks, 'xy'):
+                mask_polygons = result.masks.xy or []
             num_detections = len(boxes) if boxes is not None else 0
 
             total_detections += num_detections
 
             file_detections = []
             if boxes is not None:
-                for box in boxes:
+                for idx, box in enumerate(boxes):
                     # Get class, confidence, and bounding box
                     cls = int(box.cls[0])
                     conf = float(box.conf[0])
@@ -284,6 +287,10 @@ def run_inference(config):
                         'confidence': conf,
                         'bbox': xyxy
                     }
+                    if idx < len(mask_polygons):
+                        polygon = mask_polygons[idx]
+                        if polygon is not None and len(polygon) > 0:
+                            detection['polygon'] = polygon.tolist()
                     file_detections.append(detection)
 
                     # ✅ Track detections by class

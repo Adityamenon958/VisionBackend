@@ -47,6 +47,23 @@ const annotationSchema = new mongoose.Schema({
     }
   },
 
+  // Optional polygon coordinates for segmentation (normalized 0-1)
+  // Format: [[x1, y1], [x2, y2], ...]
+  polygon: {
+    type: [[Number]],
+    default: undefined,
+    validate: {
+      validator: function(polygon) {
+        if (polygon === undefined || polygon === null) return true;
+        if (!Array.isArray(polygon) || polygon.length < 3) return false;
+        return polygon.every(
+          pt => Array.isArray(pt) && pt.length === 2 && pt.every(v => typeof v === 'number' && !isNaN(v))
+        );
+      },
+      message: 'Polygon must be an array of at least 3 points [[x,y], ...]'
+    }
+  },
+
   // Denormalized category name (for performance)
   // Must be kept in sync with Category.name
   categoryName: {

@@ -1,0 +1,28 @@
+#
+# VisionBackend — unified Python dependencies (training, inference, augmentation)
+#
+# Install once per machine/venv (from repo root):
+#   python -m pip install -r requirements.txt
+#
+# For PyTorch CPU vs CUDA wheels, use requirements.cpu.txt or requirements.gpu.txt
+# instead of the torch lines below if you need a pinned GPU/CPU stack.
+#
+
+# --- Training (YOLO + RF-DETR) & inference ---
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+# [train] pulls pytorch_lightning etc. required by model.train() — plain rfdetr is inference-only
+rfdetr[train]>=1.6.0
+supervision
+
+# --- Inference (batch + live camera) ---
+opencv-python
+pillow
+numpy
+moviepy
+
+# --- Dataset augmentation worker ---
+albumentations
+tqdm
+matplotlib
