@@ -160,16 +160,6 @@ async function parseNamesFromDataYaml(filePath) {
 async function getClassNamesForTrainedModel(model) {
   if (!model || typeof model !== 'object') return [];
 
-  // #region agent log
-  const _dbg = (message, data, hypothesisId) => {
-    fetch('http://127.0.0.1:7270/ingest/edea3d81-57c5-49df-82fe-4c3da06c6ef5', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'aa4502' },
-      body: JSON.stringify({ sessionId: 'aa4502', location: 'yoloClassNamesService.js', message, data, timestamp: Date.now(), hypothesisId })
-    }).catch(() => {});
-  };
-  // #endregion
-
   if (model.modelType === 'RF_DETR' && model.storagePath) {
     const modelRoot = path.resolve(model.storagePath);
     const mapped = await parseClassMappingJson(path.join(modelRoot, 'class-mapping.json'));
@@ -181,15 +171,6 @@ async function getClassNamesForTrainedModel(model) {
   const best = resolveModelCheckpointPath(model);
 
   const usable = best && fs.existsSync(best) ? await isUsableCheckpoint(best) : false;
-  // #region agent log
-  _dbg('class_names_checkpoint_check', {
-    modelId: model.modelId,
-    modelType: model.modelType,
-    best,
-    usable,
-    bestSize: best && fs.existsSync(best) ? (await fsPromises.stat(best).catch(() => ({ size: 0 }))).size : 0
-  }, 'B,D');
-  // #endregion
   if (
     model.modelType !== 'RF_DETR' &&
     best &&
@@ -198,9 +179,6 @@ async function getClassNamesForTrainedModel(model) {
   ) {
     const fromPt = await classNamesFromCheckpoint(best);
     if (fromPt && fromPt.length > 0) {
-      // #region agent log
-      _dbg('class_names_from_pt', { count: fromPt.length, names: fromPt.slice(0, 5) }, 'B');
-      // #endregion
       return fromPt;
     }
   }
@@ -229,9 +207,6 @@ async function getClassNamesForTrainedModel(model) {
     if (fromYaml2 && fromYaml2.length > 0) return fromYaml2;
   }
 
-  // #region agent log
-  _dbg('class_names_empty', { modelId: model.modelId, modelType: model.modelType }, 'B');
-  // #endregion
   return [];
 }
 

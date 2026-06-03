@@ -146,24 +146,6 @@ def process_frame(model, image_base64, conf_threshold):
         }
 
 
-def _agent_log(message, data, hypothesis_id):
-    try:
-        import time
-        payload = {
-            'sessionId': 'aa4502',
-            'location': 'process_frame_stream.py',
-            'message': message,
-            'data': data,
-            'timestamp': int(time.time() * 1000),
-            'hypothesisId': hypothesis_id,
-        }
-        log_path = os.path.join(os.path.dirname(__file__), '..', 'debug-aa4502.log')
-        with open(log_path, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(payload) + '\n')
-    except Exception:
-        pass
-
-
 def main():
     """Main entry point - long-lived process."""
     parser = argparse.ArgumentParser(description='Long-lived YOLO inference process for live camera')
@@ -184,11 +166,9 @@ def main():
     
     try:
         model = YOLO(args.model)
-        _agent_log('yolo_model_loaded', {'model': args.model, 'names': list(getattr(model, 'names', {}).values()) if isinstance(getattr(model, 'names', None), dict) else str(getattr(model, 'names', None))}, 'A')
         print("Model loaded successfully", file=sys.stderr)
         sys.stderr.flush()
     except Exception as e:
-        _agent_log('yolo_model_load_failed', {'model': args.model, 'error': str(e)}, 'A')
         print(f"ERROR: Failed to load model: {e}", file=sys.stderr)
         sys.exit(1)
     
@@ -221,12 +201,6 @@ def main():
                 else:
                     # Process frame
                     frame_result = process_frame(model, image_base64, conf_threshold)
-                    _agent_log('frame_processed', {
-                        'requestId': request_id,
-                        'totalDetections': frame_result.get('totalDetections', 0),
-                        'error': frame_result.get('error'),
-                        'conf': conf_threshold,
-                    }, 'C')
                     # ✅ Add request ID to response for matching
                     response = {
                         'requestId': request_id,

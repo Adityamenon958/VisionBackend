@@ -659,7 +659,7 @@ const getTrainingStatus = async (req, res) => {
   try {
     const { jobId } = req.params;
 
-    const trainingJob = await TrainingJob.findOne({ jobId });
+    const trainingJob = await TrainingJob.findOne({ jobId }).select('-logs');
 
     if (!trainingJob) {
       return res.status(404).json({
@@ -740,7 +740,7 @@ const getTrainingLogs = async (req, res) => {
     const { jobId } = req.params;
     const limit = parseInt(req.query.limit) || 100;
 
-    const trainingJob = await TrainingJob.findOne({ jobId });
+    const trainingJob = await TrainingJob.findOne({ jobId }).select('jobId company logs');
 
     if (!trainingJob) {
       return res.status(404).json({
@@ -787,7 +787,7 @@ const cancelTraining = async (req, res) => {
   try {
     const { jobId } = req.params;
 
-    const trainingJob = await TrainingJob.findOne({ jobId });
+    const trainingJob = await TrainingJob.findOne({ jobId }).select('-logs');
 
     if (!trainingJob) {
       return res.status(404).json({
@@ -831,7 +831,7 @@ const retryTraining = async (req, res) => {
   try {
     const { jobId } = req.params;
 
-    const originalJob = await TrainingJob.findOne({ jobId });
+    const originalJob = await TrainingJob.findOne({ jobId }).select('-logs');
 
     if (!originalJob) {
       return res.status(404).json({

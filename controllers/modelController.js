@@ -56,7 +56,7 @@ const listModels = async (req, res) => {
     const models = await Model.find({ company, project })
       .collation({ locale: 'en', strength: 2 })
       .sort({ createdAt: -1 }) // Newest first
-      .select('modelId modelVersion modelType status metrics insights createdAt')
+      .select('modelId modelVersion modelType status metrics insights createdAt datasetVersion datasetId')
       .lean();
 
     // ✅ Format response with all metrics and insights
@@ -81,7 +81,9 @@ const listModels = async (req, res) => {
         classImbalanceWarnings: [],
         recommendations: []
       },
-      createdAt: model.createdAt
+      createdAt: model.createdAt,
+      datasetVersion: model.datasetVersion,
+      datasetId: model.datasetId ? model.datasetId.toString() : null
     }));
 
     return res.status(200).json({
@@ -138,9 +140,6 @@ const getModel = async (req, res) => {
     }
 
     const classNames = await getClassNamesForTrainedModel(model);
-    // #region agent log
-    fetch('http://127.0.0.1:7270/ingest/edea3d81-57c5-49df-82fe-4c3da06c6ef5',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'aa4502'},body:JSON.stringify({sessionId:'aa4502',location:'modelController.js:getModel',message:'model_class_names',data:{modelId:model.modelId,modelType:model.modelType,classNamesCount:classNames?.length||0,bestCheckpointPath:model.bestCheckpointPath},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
 
     // ✅ Format response
     const response = {
@@ -566,7 +565,7 @@ const listCheckpoints = async (req, res) => {
     }
 
     // ✅ Get checkpoints from training job
-    const trainingJob = await TrainingJob.findById(model.jobId).lean();
+    const trainingJob = await TrainingJob.findById(model.jobId).select('checkpoints').lean();
 
     if (!trainingJob) {
       return res.status(404).json({

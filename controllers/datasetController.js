@@ -1098,7 +1098,7 @@ const getDatasetDependencies = async (req, res) => {
     const InferenceJob = require('../models/InferenceJob');
 
     // ✅ Find all training jobs using this dataset
-    const trainingJobs = await TrainingJob.find({ datasetId });
+    const trainingJobs = await TrainingJob.find({ datasetId }).select('jobId status createdAt');
 
     // ✅ Find all models trained from this dataset
     const models = await Model.find({ datasetId });

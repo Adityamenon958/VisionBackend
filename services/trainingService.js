@@ -157,6 +157,20 @@ function computeProgressPercent(currentEpoch, totalEpochs) {
 }
 
 /**
+ * Progress for PyTorch Lightning / RF-DETR tqdm lines (0-based epoch + batch step).
+ * @param {number} epochIndex - 0-based epoch from log (Epoch 0, Epoch 1, ...)
+ * @param {number} totalEpochs - Total training epochs from hyperparameters
+ * @param {number} currentStep - Current batch step within epoch
+ * @param {number} totalSteps - Total batch steps within epoch
+ */
+function computeProgressPercentWithBatch(epochIndex, totalEpochs, currentStep, totalSteps) {
+  if (!totalEpochs || totalEpochs <= 0) return 0;
+  const stepsInEpoch = totalSteps > 0 ? Math.min(1, currentStep / totalSteps) : 0;
+  const fraction = (epochIndex + stepsInEpoch) / totalEpochs;
+  return Math.min(100, Math.max(0, Math.round(fraction * 100)));
+}
+
+/**
  * Validate hyperparameters
  * @param {object} hyperparameters - Hyperparameters to validate
  * @returns {{valid: boolean, error?: string}}
@@ -229,6 +243,7 @@ module.exports = {
   getDefaultHyperparameters,
   mergeHyperparameters,
   computeProgressPercent,
+  computeProgressPercentWithBatch,
   validateHyperparameters,
   canCancelJob,
   canRetryJob

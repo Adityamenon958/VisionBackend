@@ -47,6 +47,12 @@ const Dataset = require('../models/Dataset');
 const Model = require('../models/Model');
 const storageAdapter = require('../services/storageAdapter');
 const trainingService = require('../services/trainingService');
+const {
+  ingestTrainingStreamChunk,
+  flushTrainingStreamBuffer,
+  appendTrainingLog: appendNormalizedTrainingLog,
+  appendTrainingLogText
+} = require('../services/trainingLogIngestion');
 
 const AUGMENTATION_PRESETS = {
   none: {},
@@ -72,6 +78,77 @@ const AUGMENTATION_PRESETS = {
     mixup: 0.2
   }
 };
+
+/** Max log lines retained in MongoDB per training job */
+const MAX_STORED_TRAINING_LOG_LINES = 300;
+
+/** Append via shared ingestion (normalize, truncate, 300-line cap). */
+function appendTrainingLog(logs, line, persistedLogIndexRef, options = {}) {
+  appendNormalizedTrainingLog(logs, line, persistedLogIndexRef, MAX_STORED_TRAINING_LOG_LINES, options);
+}
+
+function estimatePersistPayloadBytes(newLogLines, fieldsToSet) {
+  const logBytes = newLogLines.reduce(
+    (sum, entry) => sum + Buffer.byteLength(String(entry), 'utf8'),
+    0
+  );
+  const metaBytes = Buffer.byteLength(JSON.stringify(fieldsToSet), 'utf8');
+  return logBytes + metaBytes;
+}
+
+/**
+ * Persist progress/metrics/status via $set and new log lines via $push (not full-document rewrite).
+ */
+async function persistTrainingJobState({
+  jobId,
+  jobObjectId,
+  logs,
+  persistedLogIndexRef,
+  progress,
+  metrics,
+  status,
+  extraSet = {}
+}) {
+  const newLogLines = logs.slice(persistedLogIndexRef.value);
+  const fieldsToSet = {
+    progress,
+    metrics,
+    status,
+    ...extraSet
+  };
+
+  const update = { $set: fieldsToSet };
+  if (newLogLines.length > 0) {
+    update.$push = {
+      logs: {
+        $each: newLogLines,
+        $slice: -MAX_STORED_TRAINING_LOG_LINES
+      }
+    };
+  }
+
+  const payloadBytes = estimatePersistPayloadBytes(newLogLines, fieldsToSet);
+  const saveStarted = Date.now();
+
+  const result = await TrainingJob.updateOne({ _id: jobObjectId }, update);
+  const durationMs = Date.now() - saveStarted;
+
+  if (result.matchedCount === 0) {
+    console.warn(`⚠️  Training job ${jobId} not found in DB (persist skipped)`);
+    return { ok: false, durationMs, payloadBytes, newLogLineCount: newLogLines.length };
+  }
+
+  if (newLogLines.length > 0) {
+    persistedLogIndexRef.value = logs.length;
+  }
+
+  console.log(
+    `💾 Training job ${jobId} persisted in ${durationMs}ms ` +
+      `(newLogLines=${newLogLines.length}, payload≈${payloadBytes} bytes, matched=${result.matchedCount})`
+  );
+
+  return { ok: true, durationMs, payloadBytes, newLogLineCount: newLogLines.length };
+}
 
 /**
  * Training Worker - Background Job Processor
@@ -506,23 +583,48 @@ function parseLogLine(logLine) {
     const dflLoss = parseFloat(yoloEpochLineMatch[5]);
     metrics.currentLoss = boxLoss + clsLoss + dflLoss; // Total loss
   } else {
-    // ✅ Fallback: Parse epoch: "Epoch 25/100" (with "Epoch" word - more specific)
-    // Only match if "Epoch" word is present to avoid matching batch numbers like "1/17"
-    const epochMatch = logLine.match(/Epoch\s+(\d+)\/(\d+)/i);
-    if (epochMatch) {
-      metrics.currentEpoch = parseInt(epochMatch[1]);
-      metrics.totalEpochs = parseInt(epochMatch[2]);
+    // ✅ RF-DETR / PyTorch Lightning tqdm: "Epoch 0: 66%|...| 142/216 [..., train/lr=0.0001]"
+    const ptlEpochColonMatch = logLine.match(/Epoch\s+(\d+)\s*:/i);
+    if (ptlEpochColonMatch) {
+      const epochIndex = parseInt(ptlEpochColonMatch[1], 10);
+      metrics.ptlEpochIndex = epochIndex;
+      // 1-based epoch for UI parity with YOLO "1/50" style displays
+      metrics.currentEpoch = epochIndex + 1;
+
+      const ptlStepMatch = logLine.match(/(\d+)\/(\d+)\s*\[/);
+      if (ptlStepMatch) {
+        metrics.currentStep = parseInt(ptlStepMatch[1], 10);
+        metrics.totalSteps = parseInt(ptlStepMatch[2], 10);
+      }
+
+      const ptlPercentMatch = logLine.match(/Epoch\s+\d+\s*:\s*(\d+)%/i);
+      if (ptlPercentMatch) {
+        metrics.epochProgressPercent = parseInt(ptlPercentMatch[1], 10);
+      }
+    } else {
+      // ✅ Fallback: Parse epoch: "Epoch 25/100" (with "Epoch" word - more specific)
+      const epochMatch = logLine.match(/Epoch\s+(\d+)\/(\d+)/i);
+      if (epochMatch) {
+        metrics.currentEpoch = parseInt(epochMatch[1]);
+        metrics.totalEpochs = parseInt(epochMatch[2]);
+      }
     }
   }
 
+  // ✅ PyTorch Lightning: train/loss=0.42, val/loss=0.38
+  const trainLossMatch = logLine.match(/train\/loss=([\d.e+-]+)/i);
+  if (trainLossMatch) {
+    metrics.currentLoss = parseFloat(trainLossMatch[1]);
+  }
+
   // ✅ Parse loss: "loss=0.45" or "train_loss=0.45" (fallback for other formats)
-  const lossMatch = logLine.match(/(?:train_)?loss[:\s=]+([\d.]+)/i);
-  if (lossMatch && !metrics.currentLoss) {
+  const lossMatch = logLine.match(/(?:^|,\s*)(?:train_)?loss[:\s=]+([\d.e+-]+)/i);
+  if (lossMatch && metrics.currentLoss === undefined) {
     metrics.currentLoss = parseFloat(lossMatch[1]);
   }
 
-  // ✅ Parse learning rate: "lr=0.01" or "lr: 0.01" or from optimizer line
-  const lrMatch = logLine.match(/lr[:\s=]+([\d.e-]+)/i);
+  // ✅ Parse learning rate: lr=, train/lr=, etc.
+  const lrMatch = logLine.match(/(?:train\/|val\/)?lr[:\s=]+([\d.e+-]+)/i);
   if (lrMatch) {
     metrics.currentLR = parseFloat(lrMatch[1]);
   }
@@ -607,9 +709,15 @@ const processTrainingJob = async (job) => {
       throw new Error(`Dataset ${datasetId} not found`);
     }
 
-    // ✅ Update status to 'running'
+    // ✅ Update status to 'running' and seed progress/metrics for live status API
     trainingJob.status = 'running';
     trainingJob.startedAt = new Date();
+    trainingJob.progress.totalEpochs = hyperparameters.epochs || 0;
+    trainingJob.progress.currentEpoch = 0;
+    trainingJob.progress.progressPercent = 0;
+    if (hyperparameters.learningRate !== undefined) {
+      trainingJob.metrics.currentLR = hyperparameters.learningRate;
+    }
     await trainingJob.save();
 
     console.log(`✅ Training job ${jobId} status updated to 'running'`);
@@ -648,11 +756,13 @@ const processTrainingJob = async (job) => {
 
     const isRfdetr = modelType === 'RF_DETR';
 
+    const persistedLogIndexRef = { value: trainingJob.logs?.length || 0 };
+
     if (isRfdetr && augmentationPreset && augmentationPreset !== 'none') {
       const warnMsg =
         `⚠️ augmentationPreset "${augmentationPreset}" is ignored for RF_DETR (YOLO-only presets)`;
       console.warn(warnMsg);
-      trainingJob.logs.push(warnMsg);
+      appendTrainingLogText(trainingJob.logs, warnMsg, persistedLogIndexRef, MAX_STORED_TRAINING_LOG_LINES);
     }
 
     // ✅ Determine which model to use for training (base model or trained model checkpoint)
@@ -697,8 +807,21 @@ const processTrainingJob = async (job) => {
           // Update training job status to failed
           trainingJob.status = 'failed';
           trainingJob.error = downloadError.message;
-          trainingJob.logs.push(`❌ Failed to download base model: ${downloadError.message}`);
-          await trainingJob.save();
+          appendTrainingLog(
+            trainingJob.logs,
+            `❌ Failed to download base model: ${downloadError.message}`,
+            persistedLogIndexRef
+          );
+          await persistTrainingJobState({
+            jobId: trainingJob.jobId,
+            jobObjectId: trainingJob._id,
+            logs: trainingJob.logs,
+            persistedLogIndexRef,
+            progress: trainingJob.progress,
+            metrics: trainingJob.metrics,
+            status: trainingJob.status,
+            extraSet: { error: trainingJob.error }
+          });
           throw downloadError;
         }
       } else {
@@ -771,7 +894,8 @@ const processTrainingJob = async (job) => {
       // runs independently, so Python process survives dev server restarts
     });
 
-    let logBuffer = '';
+    const stdoutStream = { buffer: '' };
+    const stderrStream = { buffer: '' };
     let lastSaveTime = Date.now();
     const SAVE_INTERVAL = 5000; // Save to DB every 5 seconds
     let isSaving = false; // Flag to prevent parallel saves
@@ -782,175 +906,189 @@ const processTrainingJob = async (job) => {
     let lastEpochStartTime = trainingStartTime;
     let epochDurations = []; // Track duration of completed epochs
 
-    // ✅ Helper function to save training job (prevents parallel saves)
+    // ✅ Incremental persist (avoids rewriting full logs array on each save)
     const saveTrainingJob = async () => {
       if (isSaving) {
-        return; // Already saving, skip
+        return;
       }
-      
+
+      isSaving = true;
+      lastSaveTime = Date.now();
+
       try {
-        isSaving = true;
-        // Fetch fresh document from DB to avoid stale document issues
-        const freshJob = await TrainingJob.findById(trainingJob._id);
-        if (!freshJob) {
-          console.warn(`⚠️  Training job ${trainingJob.jobId} not found in DB`);
-          return;
+        const result = await persistTrainingJobState({
+          jobId: trainingJob.jobId,
+          jobObjectId: trainingJob._id,
+          logs: trainingJob.logs,
+          persistedLogIndexRef,
+          progress: trainingJob.progress,
+          metrics: trainingJob.metrics,
+          status: trainingJob.status
+        });
+
+        if (!result.ok) {
+          console.warn(
+            `⚠️  Training job ${trainingJob.jobId} save returned not ok ` +
+              `(duration=${result.durationMs}ms, payload≈${result.payloadBytes} bytes)`
+          );
         }
-        
-        // Update fresh document with current state
-        freshJob.logs = trainingJob.logs;
-        freshJob.progress = trainingJob.progress;
-        freshJob.metrics = trainingJob.metrics;
-        freshJob.status = trainingJob.status;
-        
-        await freshJob.save();
-        lastSaveTime = Date.now();
       } catch (error) {
-        console.error(`❌ Error saving training job:`, error.message);
+        console.error(
+          `❌ Error saving training job:`,
+          error.message,
+          `(jobId=${trainingJob.jobId})`
+        );
       } finally {
         isSaving = false;
       }
     };
 
-    // ✅ Stream stdout (logs)
-    pythonProcess.stdout.on('data', async (data) => {
-      const chunk = data.toString();
-      logBuffer += chunk;
+    const handleTrainingOutputLine = (line) => {
+      appendTrainingLog(trainingJob.logs, line, persistedLogIndexRef, { alreadyNormalized: true });
 
-      // Process line by line
-      const lines = logBuffer.split('\n');
-      logBuffer = lines.pop() || ''; // Keep incomplete line in buffer
+      const parsedMetrics = parseLogLine(line);
+      if (parsedMetrics) {
+        const totalEpochs =
+          parsedMetrics.totalEpochs ||
+          trainingJob.progress.totalEpochs ||
+          hyperparameters.epochs;
 
-      for (const line of lines) {
-        if (line.trim()) {
-          // Add log to training job
-          trainingJob.logs.push(line);
-          
-          // Parse metrics from log line
-          const parsedMetrics = parseLogLine(line);
-          if (parsedMetrics) {
-            // Update metrics
-            if (parsedMetrics.currentEpoch !== undefined) {
-              const currentEpoch = parsedMetrics.currentEpoch;
-              const totalEpochs = parsedMetrics.totalEpochs || trainingJob.progress.totalEpochs || hyperparameters.epochs;
-              
-              // ✅ Detect new epoch started
-              if (currentEpoch > lastEpochNumber && currentEpoch > 0) {
-                const now = Date.now();
-                
-                // Calculate duration of previous epoch (if not first epoch)
-                if (lastEpochNumber > 0) {
-                  const epochDuration = now - lastEpochStartTime;
-                  epochDurations.push(epochDuration);
-                  
-                  // Keep only last 10 epoch durations for rolling average
-                  if (epochDurations.length > 10) {
-                    epochDurations.shift();
-                  }
-                }
-                
-                // Calculate ETA if we have epoch duration data
-                if (epochDurations.length > 0 && totalEpochs > 0) {
-                  const avgEpochTime = epochDurations.reduce((a, b) => a + b, 0) / epochDurations.length;
-                  const remainingEpochs = totalEpochs - currentEpoch;
-                  const estimatedTimeRemainingMs = remainingEpochs * avgEpochTime;
-                  
-                  // Calculate elapsed time
-                  const elapsedMs = now - trainingStartTime;
-                  const elapsedMinutes = Math.floor(elapsedMs / 1000 / 60);
-                  const elapsedSeconds = Math.floor((elapsedMs / 1000) % 60);
-                  
-                  // Format ETA
-                  const estimatedMinutes = Math.floor(estimatedTimeRemainingMs / 1000 / 60);
-                  const estimatedSeconds = Math.floor((estimatedTimeRemainingMs / 1000) % 60);
-                  
-                  // Add progress message to logs
-                  let progressMsg = `\n${'='.repeat(80)}\n`;
-                  progressMsg += `📊 EPOCH ${currentEpoch}/${totalEpochs} PROGRESS\n`;
-                  progressMsg += `${'='.repeat(80)}\n`;
-                  progressMsg += `⏱️  Elapsed time: ${elapsedMinutes}m ${elapsedSeconds}s\n`;
-                  progressMsg += `⏳ Estimated time remaining: ~${estimatedMinutes}m ${estimatedSeconds}s\n`;
-                  progressMsg += `📈 Progress: ${trainingService.computeProgressPercent(currentEpoch, totalEpochs)}%\n`;
-                  progressMsg += `${'='.repeat(80)}\n`;
-                  
-                  trainingJob.logs.push(progressMsg);
-                }
-                
-                lastEpochStartTime = now;
-                lastEpochNumber = currentEpoch;
+        if (parsedMetrics.currentEpoch !== undefined) {
+          const currentEpoch = parsedMetrics.currentEpoch;
+
+          if (currentEpoch > lastEpochNumber && currentEpoch > 0) {
+            const now = Date.now();
+
+            if (lastEpochNumber > 0) {
+              const epochDuration = now - lastEpochStartTime;
+              epochDurations.push(epochDuration);
+              if (epochDurations.length > 10) {
+                epochDurations.shift();
               }
-              
-              trainingJob.progress.currentEpoch = currentEpoch;
-              trainingJob.progress.totalEpochs = totalEpochs;
-              trainingJob.progress.progressPercent = trainingService.computeProgressPercent(
-                currentEpoch,
-                totalEpochs
+            }
+
+            if (epochDurations.length > 0 && totalEpochs > 0) {
+              const avgEpochTime = epochDurations.reduce((a, b) => a + b, 0) / epochDurations.length;
+              const remainingEpochs = totalEpochs - currentEpoch;
+              const estimatedTimeRemainingMs = remainingEpochs * avgEpochTime;
+              const elapsedMs = now - trainingStartTime;
+              const elapsedMinutes = Math.floor(elapsedMs / 1000 / 60);
+              const elapsedSeconds = Math.floor((elapsedMs / 1000) % 60);
+              const estimatedMinutes = Math.floor(estimatedTimeRemainingMs / 1000 / 60);
+              const estimatedSeconds = Math.floor((estimatedTimeRemainingMs / 1000) % 60);
+
+              let progressMsg = `\n${'='.repeat(80)}\n`;
+              progressMsg += `📊 EPOCH ${currentEpoch}/${totalEpochs} PROGRESS\n`;
+              progressMsg += `${'='.repeat(80)}\n`;
+              progressMsg += `⏱️  Elapsed time: ${elapsedMinutes}m ${elapsedSeconds}s\n`;
+              progressMsg += `⏳ Estimated time remaining: ~${estimatedMinutes}m ${estimatedSeconds}s\n`;
+              progressMsg += `📈 Progress: ${trainingService.computeProgressPercent(currentEpoch, totalEpochs)}%\n`;
+              progressMsg += `${'='.repeat(80)}\n`;
+
+              appendTrainingLogText(
+                trainingJob.logs,
+                progressMsg,
+                persistedLogIndexRef,
+                MAX_STORED_TRAINING_LOG_LINES
               );
             }
 
-            if (parsedMetrics.currentLoss !== undefined) {
-              trainingJob.metrics.currentLoss = parsedMetrics.currentLoss;
-              
-              // Update best loss if this is better
-              if (!trainingJob.metrics.bestLoss || parsedMetrics.currentLoss < trainingJob.metrics.bestLoss) {
-                trainingJob.metrics.bestLoss = parsedMetrics.currentLoss;
-                trainingJob.metrics.bestEpoch = parsedMetrics.currentEpoch || trainingJob.progress.currentEpoch;
-              }
-            }
-
-            if (parsedMetrics.currentLR !== undefined) {
-              trainingJob.metrics.currentLR = parsedMetrics.currentLR;
-            }
-
-            if (parsedMetrics.mAP50 !== undefined) {
-              trainingJob.metrics.mAP50 = parsedMetrics.mAP50;
-            }
-
-            if (parsedMetrics.mAP50_95 !== undefined) {
-              trainingJob.metrics.mAP50_95 = parsedMetrics.mAP50_95;
-            }
-
-            if (parsedMetrics.precision !== undefined) {
-              trainingJob.metrics.precision = parsedMetrics.precision;
-            }
-
-            if (parsedMetrics.recall !== undefined) {
-              trainingJob.metrics.recall = parsedMetrics.recall;
-            }
+            lastEpochStartTime = now;
+            lastEpochNumber = currentEpoch;
           }
 
-          // Save to DB periodically (not on every line to avoid overwhelming DB)
-          const now = Date.now();
-          if (now - lastSaveTime > SAVE_INTERVAL) {
-            await saveTrainingJob();
+          trainingJob.progress.currentEpoch = currentEpoch;
+          trainingJob.progress.totalEpochs = totalEpochs;
+
+          if (
+            parsedMetrics.ptlEpochIndex !== undefined &&
+            parsedMetrics.currentStep !== undefined &&
+            parsedMetrics.totalSteps > 0
+          ) {
+            trainingJob.progress.progressPercent = trainingService.computeProgressPercentWithBatch(
+              parsedMetrics.ptlEpochIndex,
+              totalEpochs,
+              parsedMetrics.currentStep,
+              parsedMetrics.totalSteps
+            );
+          } else {
+            trainingJob.progress.progressPercent = trainingService.computeProgressPercent(
+              currentEpoch,
+              totalEpochs
+            );
           }
         }
+
+        if (parsedMetrics.currentLoss !== undefined) {
+          trainingJob.metrics.currentLoss = parsedMetrics.currentLoss;
+
+          if (!trainingJob.metrics.bestLoss || parsedMetrics.currentLoss < trainingJob.metrics.bestLoss) {
+            trainingJob.metrics.bestLoss = parsedMetrics.currentLoss;
+            trainingJob.metrics.bestEpoch = parsedMetrics.currentEpoch || trainingJob.progress.currentEpoch;
+          }
+        }
+
+        if (parsedMetrics.currentLR !== undefined) {
+          trainingJob.metrics.currentLR = parsedMetrics.currentLR;
+        }
+
+        if (parsedMetrics.mAP50 !== undefined) {
+          trainingJob.metrics.mAP50 = parsedMetrics.mAP50;
+        }
+
+        if (parsedMetrics.mAP50_95 !== undefined) {
+          trainingJob.metrics.mAP50_95 = parsedMetrics.mAP50_95;
+        }
+
+        if (parsedMetrics.precision !== undefined) {
+          trainingJob.metrics.precision = parsedMetrics.precision;
+        }
+
+        if (parsedMetrics.recall !== undefined) {
+          trainingJob.metrics.recall = parsedMetrics.recall;
+        }
+      }
+    };
+
+    // ✅ Stream stdout — split on \n and \r, strip ANSI, cap line length
+    pythonProcess.stdout.on('data', async (data) => {
+      ingestTrainingStreamChunk(stdoutStream, data.toString(), handleTrainingOutputLine);
+
+      const now = Date.now();
+      if (now - lastSaveTime > SAVE_INTERVAL) {
+        await saveTrainingJob();
       }
     });
 
-    // ✅ Stream stderr (errors and warnings)
+    // ✅ Stream stderr — same normalization path as stdout
     pythonProcess.stderr.on('data', (data) => {
-      const errorLine = data.toString().trim();
-      if (!errorLine) return;
-      
-      // Filter out common Python warnings that are not actual errors
-      const isWarning = /RuntimeWarning|UserWarning|FutureWarning|DeprecationWarning/i.test(errorLine);
-      const isMetricsWarning = /Mean of empty slice|invalid value encountered in divide/i.test(errorLine);
-      
-      if (isWarning || isMetricsWarning) {
-        // Log as warning, not error (these are common during training)
-        console.warn(`[Training ${jobId}] Warning:`, errorLine);
-        trainingJob.logs.push(`[WARNING] ${errorLine}`);
-      } else {
-        // Actual errors
-        console.error(`[Training ${jobId}] Error:`, errorLine);
-        trainingJob.logs.push(`[ERROR] ${errorLine}`);
-      }
+      ingestTrainingStreamChunk(stderrStream, data.toString(), (line) => {
+        const isWarning = /RuntimeWarning|UserWarning|FutureWarning|DeprecationWarning/i.test(line);
+        const isMetricsWarning = /Mean of empty slice|invalid value encountered in divide/i.test(line);
+
+        if (isWarning || isMetricsWarning) {
+          console.warn(`[Training ${jobId}] Warning:`, line);
+          appendTrainingLog(trainingJob.logs, `[WARNING] ${line}`, persistedLogIndexRef, {
+            alreadyNormalized: true
+          });
+        } else {
+          console.error(`[Training ${jobId}] Error:`, line);
+          appendTrainingLog(trainingJob.logs, `[ERROR] ${line}`, persistedLogIndexRef, {
+            alreadyNormalized: true
+          });
+        }
+      });
     });
 
     // ✅ Handle process completion
     pythonProcess.on('close', async (code) => {
-      // Save final logs (wait for any pending save to complete)
+      flushTrainingStreamBuffer(stdoutStream, handleTrainingOutputLine);
+      flushTrainingStreamBuffer(stderrStream, (line) => {
+        appendTrainingLog(trainingJob.logs, `[ERROR] ${line}`, persistedLogIndexRef, {
+          alreadyNormalized: true
+        });
+      });
+
       while (isSaving) {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
@@ -982,20 +1120,36 @@ const processTrainingJob = async (job) => {
           `Model is being saved and registered...\n` +
           `${'='.repeat(80)}\n`;
         
-        trainingJob.logs.push(completionMsg);
+        appendTrainingLogText(
+          trainingJob.logs,
+          completionMsg,
+          persistedLogIndexRef,
+          MAX_STORED_TRAINING_LOG_LINES
+        );
         await saveTrainingJob();
         
-        await finalizeTraining(trainingJob, dataset, modelStoragePath, modelVersion, company, project);
+        await finalizeTraining(
+          trainingJob,
+          dataset,
+          modelStoragePath,
+          modelVersion,
+          company,
+          project,
+          persistedLogIndexRef
+        );
       } else {
         console.error(`❌ Training job ${jobId} failed with exit code ${code}`);
         // Fetch fresh job for final update
-        const freshJob = await TrainingJob.findById(trainingJob._id);
-        if (freshJob) {
-          freshJob.status = 'failed';
-          freshJob.error = `Training process exited with code ${code}`;
-          freshJob.completedAt = new Date();
-          await freshJob.save();
-        }
+        await TrainingJob.updateOne(
+          { _id: trainingJob._id },
+          {
+            $set: {
+              status: 'failed',
+              error: `Training process exited with code ${code}`,
+              completedAt: new Date()
+            }
+          }
+        );
       }
     });
 
@@ -1004,7 +1158,7 @@ const processTrainingJob = async (job) => {
     // ⚠️ IMPORTANT: This interval runs independently of HTTP requests
     // Training continues even if frontend reloads or dev server restarts
     const cancellationCheck = setInterval(async () => {
-      const updatedJob = await TrainingJob.findOne({ jobId });
+      const updatedJob = await TrainingJob.findOne({ jobId }).select('status').lean();
       if (updatedJob && updatedJob.status === 'cancelled') {
         console.log(`⚠️ Job ${jobId} cancelled, terminating process...`);
         if (pythonProcess && !pythonProcess.killed) {
@@ -1016,12 +1170,15 @@ const processTrainingJob = async (job) => {
           await new Promise(resolve => setTimeout(resolve, 100));
         }
         // Update status using fresh document
-        const freshJob = await TrainingJob.findById(trainingJob._id);
-        if (freshJob) {
-          freshJob.status = 'cancelled';
-          freshJob.cancelledAt = new Date();
-          await freshJob.save();
-        }
+        await TrainingJob.updateOne(
+          { _id: trainingJob._id },
+          {
+            $set: {
+              status: 'cancelled',
+              cancelledAt: new Date()
+            }
+          }
+        );
       }
     }, 2000); // Check every 2 seconds
 
@@ -1039,13 +1196,16 @@ const processTrainingJob = async (job) => {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       // Update status using fresh document
-      const freshJob = await TrainingJob.findById(trainingJob._id);
-      if (freshJob) {
-        freshJob.status = 'failed';
-        freshJob.error = error.message;
-        freshJob.completedAt = new Date();
-        await freshJob.save();
-      }
+      await TrainingJob.updateOne(
+        { _id: trainingJob._id },
+        {
+          $set: {
+            status: 'failed',
+            error: error.message,
+            completedAt: new Date()
+          }
+        }
+      );
     }
 
     // Kill Python process if running
@@ -1061,12 +1221,13 @@ const processTrainingJob = async (job) => {
 async function simulateTraining(trainingJob, hyperparameters, modelStoragePath, modelVersion) {
   console.log(`🎭 Simulating training for job ${trainingJob.jobId}...`);
 
+  const persistedLogIndexRef = { value: trainingJob.logs?.length || 0 };
   const totalEpochs = hyperparameters.epochs;
   let currentEpoch = 0;
 
   while (currentEpoch < totalEpochs) {
     // Check if cancelled
-    const updatedJob = await TrainingJob.findOne({ jobId: trainingJob.jobId });
+    const updatedJob = await TrainingJob.findOne({ jobId: trainingJob.jobId }).select('status').lean();
     if (updatedJob && updatedJob.status === 'cancelled') {
       console.log(`⚠️ Job ${trainingJob.jobId} cancelled during simulation`);
       return;
@@ -1091,9 +1252,21 @@ async function simulateTraining(trainingJob, hyperparameters, modelStoragePath, 
     }
 
     trainingJob.metrics.mAP50 = mAP50;
-    trainingJob.logs.push(`Epoch ${currentEpoch}/${totalEpochs}: loss=${loss.toFixed(4)}, lr=0.01, mAP50=${mAP50.toFixed(4)}`);
+    appendTrainingLog(
+      trainingJob.logs,
+      `Epoch ${currentEpoch}/${totalEpochs}: loss=${loss.toFixed(4)}, lr=0.01, mAP50=${mAP50.toFixed(4)}`,
+      persistedLogIndexRef
+    );
 
-    await trainingJob.save();
+    await persistTrainingJobState({
+      jobId: trainingJob.jobId,
+      jobObjectId: trainingJob._id,
+      logs: trainingJob.logs,
+      persistedLogIndexRef,
+      progress: trainingJob.progress,
+      metrics: trainingJob.metrics,
+      status: trainingJob.status
+    });
 
     // Simulate epoch duration
     await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second per epoch
@@ -1106,14 +1279,23 @@ async function simulateTraining(trainingJob, hyperparameters, modelStoragePath, 
     modelStoragePath,
     modelVersion,
     trainingJob.company,
-    trainingJob.project
+    trainingJob.project,
+    persistedLogIndexRef
   );
 }
 
 /**
  * Finalize training: compute final metrics, register model
  */
-async function finalizeTraining(trainingJob, dataset, modelStoragePath, modelVersion, company, project) {
+async function finalizeTraining(
+  trainingJob,
+  dataset,
+  modelStoragePath,
+  modelVersion,
+  company,
+  project,
+  persistedLogIndexRef = { value: trainingJob.logs?.length || 0 }
+) {
   try {
     console.log(`📊 Finalizing training job ${trainingJob.jobId}...`);
 
@@ -1232,21 +1414,42 @@ async function finalizeTraining(trainingJob, dataset, modelStoragePath, modelVer
       `\nYou can now use this model for inference!\n` +
       `${'='.repeat(80)}\n`;
     
-    trainingJob.logs.push(registrationMsg);
-    await trainingJob.save();
+    appendTrainingLogText(
+      trainingJob.logs,
+      registrationMsg,
+      persistedLogIndexRef,
+      MAX_STORED_TRAINING_LOG_LINES
+    );
+    trainingJob.status = 'completed';
+
+    await persistTrainingJobState({
+      jobId: trainingJob.jobId,
+      jobObjectId: trainingJob._id,
+      logs: trainingJob.logs,
+      persistedLogIndexRef,
+      progress: trainingJob.progress,
+      metrics: trainingJob.metrics,
+      status: trainingJob.status,
+      extraSet: {
+        finalMetrics: trainingJob.finalMetrics,
+        completedAt: trainingJob.completedAt
+      }
+    });
 
     console.log(`✅ Training job ${trainingJob.jobId} completed and model registered: ${model.modelId}`);
 
   } catch (error) {
     console.error(`❌ Error finalizing training:`, error);
-    // Update status using fresh document
-    const freshJob = await TrainingJob.findById(trainingJob._id);
-    if (freshJob) {
-      freshJob.status = 'failed';
-      freshJob.error = `Finalization error: ${error.message}`;
-      freshJob.completedAt = new Date();
-      await freshJob.save();
-    }
+    await TrainingJob.updateOne(
+      { _id: trainingJob._id },
+      {
+        $set: {
+          status: 'failed',
+          error: `Finalization error: ${error.message}`,
+          completedAt: new Date()
+        }
+      }
+    );
   }
 }
 

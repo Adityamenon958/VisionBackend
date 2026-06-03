@@ -423,9 +423,6 @@ const startLiveInference = async (req, res) => {
     await inferenceJob.save();
 
     const isRfdetr = model.modelType === 'RF_DETR';
-    // #region agent log
-    fetch('http://127.0.0.1:7270/ingest/edea3d81-57c5-49df-82fe-4c3da06c6ef5',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'aa4502'},body:JSON.stringify({sessionId:'aa4502',location:'inferenceController.js:startLiveInference',message:'live_start_model',data:{modelId:model.modelId,modelType:model.modelType,bestCheckpointPath:model.bestCheckpointPath,resolvedCheckpointPath:checkpointPath,checkpointExists:fs.existsSync(checkpointPath||'')},timestamp:Date.now(),hypothesisId:'A,D',runId:'post-fix'})}).catch(()=>{});
-    // #endregion
     const streamScriptName = isRfdetr
       ? 'process_frame_stream_rfdetr.py'
       : 'process_frame_stream.py';
@@ -496,9 +493,6 @@ const startLiveInference = async (req, res) => {
 
     // ✅ Check if process failed to start
     if (processError) {
-      // #region agent log
-      fetch('http://127.0.0.1:7270/ingest/edea3d81-57c5-49df-82fe-4c3da06c6ef5',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'aa4502'},body:JSON.stringify({sessionId:'aa4502',location:'inferenceController.js:startLiveInference',message:'live_start_process_error',data:{processError:String(processError).slice(0,500),processReady},timestamp:Date.now(),hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
       pythonProcess.kill();
       return res.status(500).json({
         error: 'Failed to start inference process',
@@ -729,9 +723,6 @@ const processLiveFrame = async (req, res) => {
     try {
       detectionData = await responsePromise;
     } catch (error) {
-      // #region agent log
-      fetch('http://127.0.0.1:7270/ingest/edea3d81-57c5-49df-82fe-4c3da06c6ef5',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'aa4502'},body:JSON.stringify({sessionId:'aa4502',location:'inferenceController.js:processLiveFrame',message:'live_frame_timeout',data:{inferenceId,error:error.message,processKilled:!!processInfo.process?.killed},timestamp:Date.now(),hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
       // ✅ Clean up pending request on error
       const requestKey = `${inferenceId}_${requestId}`;
       pendingFrameRequests.delete(requestKey);
@@ -769,9 +760,6 @@ const processLiveFrame = async (req, res) => {
       await inferenceJob.save();
     }
 
-    // #region agent log
-    fetch('http://127.0.0.1:7270/ingest/edea3d81-57c5-49df-82fe-4c3da06c6ef5',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'aa4502'},body:JSON.stringify({sessionId:'aa4502',location:'inferenceController.js:processLiveFrame',message:'live_frame_ok',data:{totalDetections:detectionData?.totalDetections||0,detectionError:detectionData?.error||null,processingTime:Date.now()-startTime,imageW:detectionData?.imageWidth,imageH:detectionData?.imageHeight},timestamp:Date.now(),hypothesisId:'C,E'})}).catch(()=>{});
-    // #endregion
     // ✅ Return detection data with image dimensions
     const response = {
       detections: detectionData?.detections || [],
