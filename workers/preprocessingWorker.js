@@ -474,12 +474,22 @@ const processPreprocessingJob = async (job) => {
       await dataset.save();
     }
 
-    // ✅ Copy test split to test folder (test_sample_ratio from splitDataset; already in testSampleImages)
+    // ✅ Copy test split to test folder (disjoint test set from splitDataset)
     await storageAdapter.ensureDir(testImagesPath);
     let testImagesCopied = 0;
-    
+
+    // Skip any test item already assigned to train/val (safety if old overlapping split is used)
+    const alreadyAssignedNames = new Set(
+      imageDocuments.map((d) => d.filename).filter(Boolean)
+    );
+
     for (const imageInfo of testSampleImages) {
       try {
+        if (alreadyAssignedNames.has(imageInfo.storedName)) {
+          console.log(`   - Skipping test copy (already in train/val): ${imageInfo.storedName}`);
+          continue;
+        }
+
         const srcPath = isAzure
           ? `${logicalDatasetRoot}/${imageInfo.storedPath}`
           : path.join(datasetRoot, imageInfo.storedPath);
@@ -488,6 +498,7 @@ const processPreprocessingJob = async (job) => {
         if (await storageAdapter.exists(srcPath)) {
           await storageAdapter.copyFile(srcPath, destPath);
           testImagesCopied++;
+          alreadyAssignedNames.add(imageInfo.storedName);
 
           // ✅ Extract image dimensions and create Image document
           try {
@@ -678,10 +689,13 @@ const processPreprocessingJob = async (job) => {
     // ✅ Recalculate labeled/unlabeled counts from Image collection
     const labeledCount = await Image.countDocuments({ datasetId, hasLabels: true });
     const unlabeledCount = await Image.countDocuments({ datasetId, hasLabels: false });
+    const uniqueImageCount = await Image.countDocuments({ datasetId });
 
     // ✅ Update final dataset metadata
     dataset.labeledImages = labeledCount; // Use count from Image collection
     dataset.unlabeledImages = unlabeledCount; // Use count from Image collection
+    // Keep totalImages aligned with unique Image rows (train/val/test are disjoint)
+    dataset.totalImages = uniqueImageCount;
     dataset.trainCount = trainCount;
     dataset.valCount = valCount;
     // testCount already updated during test folder copy

@@ -28,6 +28,156 @@ const { splitDataset } = require('../utils/splitDataset');
 // System user ID for createdBy (since auth is skipped)
 const SYSTEM_USER_ID = new mongoose.Types.ObjectId('000000000000000000000000');
 
+/**
+ * ✅ Repair path for augmented (or any) datasets that have files on disk / in
+ * dataset.files but no Image Mongo documents. Without Image rows, Annotate shows
+ * "No images found for this dataset."
+ */
+async function ensureImageIndexForDataset(dataset) {
+  const datasetId = dataset._id;
+  const existingCount = await Image.countDocuments({ datasetId });
+  if (existingCount > 0) return existingCount;
+
+  const datasetPath = storageAdapter.buildDatasetPath(
+    dataset.company,
+    dataset.project,
+    dataset.version
+  );
+
+  /** @type {Array<{ storedName: string, storedPath: string, folder: string, size?: number }>} */
+  let imageFiles = [];
+
+  // Prefer dataset.files manifest (augmented datasets populate this)
+  if (Array.isArray(dataset.files) && dataset.files.length > 0) {
+    imageFiles = dataset.files
+      .filter((f) => f && (f.type === 'image' || /\.(jpe?g|png)$/i.test(f.storedName || f.originalName || '')))
+      .map((f) => ({
+        storedName: f.storedName || path.basename(f.storedPath || f.originalName || ''),
+        storedPath: f.storedPath || `images/${f.folder || 'train'}/${f.storedName}`,
+        folder: f.folder || 'train',
+        size: typeof f.size === 'number' ? f.size : 0,
+      }))
+      .filter((f) => f.storedName && f.storedPath);
+  }
+
+  // Fallback: scan images/train|val|test on disk
+  if (imageFiles.length === 0) {
+    for (const split of ['train', 'val', 'test', 'dataset']) {
+      const splitDir = path.join(datasetPath, 'images', split);
+      try {
+        const entries = await fs.readdir(splitDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isFile()) continue;
+          const ext = path.extname(entry.name).toLowerCase();
+          if (ext !== '.jpg' && ext !== '.jpeg' && ext !== '.png') continue;
+          imageFiles.push({
+            storedName: entry.name,
+            storedPath: `images/${split}/${entry.name}`,
+            folder: split,
+            size: 0,
+          });
+        }
+      } catch {
+        // skip missing split
+      }
+    }
+  }
+
+  if (imageFiles.length === 0) return 0;
+
+  let created = 0;
+  let sharp = null;
+  try {
+    sharp = require('sharp');
+  } catch {
+    /* optional */
+  }
+
+  for (const file of imageFiles) {
+    const fullPath = path.join(datasetPath, file.storedPath);
+    let width = 1;
+    let height = 1;
+    let size = file.size || 0;
+    try {
+      if (sharp) {
+        const meta = await sharp(fullPath).metadata();
+        width = meta.width || 1;
+        height = meta.height || 1;
+      }
+      const st = await fs.stat(fullPath);
+      size = st.size || size;
+    } catch {
+      // keep defaults; file may be Azure-only or missing locally
+    }
+
+    let hasLabels = false;
+    try {
+      const labelRel = getLabelFilePath(file.storedPath);
+      hasLabels = await storageAdapter.exists(path.join(datasetPath, labelRel));
+    } catch {
+      hasLabels = false;
+    }
+
+    await Image.findOneAndUpdate(
+      { datasetId, storedPath: file.storedPath },
+      {
+        datasetId,
+        filename: file.storedName,
+        storedPath: file.storedPath,
+        folder: file.folder,
+        size,
+        width,
+        height,
+        hasLabels,
+        hasAnnotations: false,
+        convertedAt: hasLabels ? new Date() : undefined,
+      },
+      { upsert: true, new: true }
+    );
+    created += 1;
+  }
+
+  // Copy categories from source dataset if this version has none (common for old augmentations)
+  try {
+    const catCount = await Category.countDocuments({ datasetId });
+    if (catCount === 0 && dataset.backupDatasetId) {
+      const sourceCats = await Category.find({ datasetId: dataset.backupDatasetId }).lean();
+      for (const cat of sourceCats) {
+        await Category.findOneAndUpdate(
+          { datasetId, name: cat.name },
+          {
+            datasetId,
+            name: cat.name,
+            color: cat.color,
+            description: cat.description,
+            order: cat.order ?? 0,
+            createdBy: cat.createdBy || SYSTEM_USER_ID,
+          },
+          { upsert: true, new: true }
+        );
+      }
+    }
+  } catch (catErr) {
+    console.warn('[ensureImageIndexForDataset] category copy failed:', catErr.message);
+  }
+
+  // Align totalImages if it was wrong / zero
+  try {
+    if (!dataset.totalImages || dataset.totalImages < created) {
+      dataset.totalImages = created;
+      await dataset.save();
+    }
+  } catch {
+    /* non-fatal */
+  }
+
+  console.log('[ensureImageIndexForDataset] Hydrated Image index', {
+    datasetId: String(datasetId),
+    created,
+  });
+  return created;
+}
+
 function validatePolygon(polygon) {
   if (!Array.isArray(polygon)) {
     return { valid: false, error: 'polygon must be an array of points [[x,y], ...]' };
@@ -232,6 +382,9 @@ const getDatasetImages = async (req, res) => {
       return sendNotFoundError(res, 'Dataset', datasetId);
     }
 
+    // ✅ Auto-heal: augmented datasets created before Image indexing had files but no Image rows
+    await ensureImageIndexForDataset(dataset);
+
     // Build base filter
     const imageFilter = { datasetId };
 
@@ -247,9 +400,36 @@ const getDatasetImages = async (req, res) => {
       .sort({ createdAt: 1, _id: 1 })
       .lean();
 
+    // ✅ Deduplicate by filename: overlapping train/test splits used to create
+    // two Image rows for the same photo (e.g. 30 uploads → 33 annotate images).
+    // Prefer annotated / labeled / train over val/test when colliding.
+    const folderPriority = { train: 0, val: 1, test: 2 };
+    const byFilename = new Map();
+    for (const img of images) {
+      const key = String(img.filename || path.basename(img.storedPath || '') || img._id).toLowerCase();
+      const existing = byFilename.get(key);
+      if (!existing) {
+        byFilename.set(key, img);
+        continue;
+      }
+      const score = (i) =>
+        (i.hasAnnotations ? 100 : 0) +
+        (i.hasLabels ? 10 : 0) +
+        (100 - (folderPriority[i.folder] ?? 50));
+      if (score(img) > score(existing)) {
+        byFilename.set(key, img);
+      }
+    }
+    const uniqueImages = Array.from(byFilename.values()).sort((a, b) => {
+      const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      if (ta !== tb) return ta - tb;
+      return String(a._id).localeCompare(String(b._id));
+    });
+
     // Format response with signed URLs
     const formatted = await Promise.all(
-      images.map(async (img) => {
+      uniqueImages.map(async (img) => {
         const imagePath = img.storedPath;
 
         const imageUrl = await storageAdapter.generateSignedUrl(imagePath, 3600, {
@@ -1159,15 +1339,22 @@ const convertAnnotationsToYOLO = async (req, res) => {
     // Build full labeled pool and re-run split so train/val/test match configured seed and ratios
     const labeledImagesForSplit = await Image.find({ datasetId, hasLabels: true });
     if (labeledImagesForSplit.length > 0) {
-      const poolIds = new Set(labeledImagesForSplit.map((img) => img._id.toString()));
-      // Paths already taken by ANY image (labeled or unlabeled) — we must not assign a path that another image already has
+      // ✅ Deduplicate by filename so overlapping historical rows don't inflate the pool
+      const labeledByFilename = new Map();
+      for (const img of labeledImagesForSplit) {
+        const key = String(img.filename || path.basename(img.storedPath || '') || img._id).toLowerCase();
+        if (!labeledByFilename.has(key)) labeledByFilename.set(key, img);
+      }
+      const uniqueLabeled = Array.from(labeledByFilename.values());
+
+      // Paths already taken by OTHER images — exclude each image's own current path when moving
       const reservedPaths = new Set();
       const allDatasetImages = await Image.find({ datasetId }, { storedPath: 1 });
       for (const img of allDatasetImages) {
         reservedPaths.add(img.storedPath);
       }
 
-      const pool = labeledImagesForSplit.map((img) => ({
+      const pool = uniqueLabeled.map((img) => ({
         storedName: path.basename(img.storedPath),
         storedPath: img.storedPath,
         imageDoc: img,
@@ -1190,12 +1377,14 @@ const convertAnnotationsToYOLO = async (req, res) => {
       const copyAndUpdate = async (list, folder, imagesDir, labelsDir) => {
         for (const item of list) {
           let newPath = `images/${folder}/${item.storedName}`;
-          if (reservedPaths.has(newPath)) {
+          // ✅ Only rename when a *different* image already owns that path
+          if (reservedPaths.has(newPath) && newPath !== item.storedPath) {
             const ext = path.extname(item.storedName);
             const base = path.basename(item.storedName, ext);
             item.storedName = `${base}_${item.imageDoc._id.toString()}${ext}`;
             newPath = `images/${folder}/${item.storedName}`;
           }
+          reservedPaths.delete(item.storedPath);
           reservedPaths.add(newPath);
 
           const srcImage = path.join(datasetPath, item.storedPath);
@@ -1238,6 +1427,8 @@ const convertAnnotationsToYOLO = async (req, res) => {
       dataset.trainCount = trainList.length;
       dataset.valCount = valList.length;
       dataset.testCount = testList.length;
+      // Keep totalImages = unique labeled+unlabeled images after split
+      dataset.totalImages = await Image.countDocuments({ datasetId });
     }
 
     // Update Dataset conversion metadata

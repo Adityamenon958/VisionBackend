@@ -4,6 +4,10 @@
  * Provides deterministic, seeded train/val/test splitting. Used by preprocessing,
  * post-annotation, and augmentation. No filename-based ordering; same seed + input
  * always yields the same split.
+ *
+ * ❗ IMPORTANT: train / val / test are always DISJOINT (no image in more than one set).
+ * Older versions put test as an overlapping sample of train, which created duplicate
+ * Image DB rows (e.g. 30 uploads → 33 annotate images).
  */
 
 /** Default split configuration when not provided by DB/config */
@@ -72,16 +76,13 @@ function getSplitConfig(config) {
 }
 
 /**
- * Split an image list into train, val, and test using seeded shuffle and configurable ratios.
+ * Split an image list into disjoint train, val, and test sets using seeded shuffle.
  *
- * - Train: first split_ratio_train of the shuffled list.
- * - Val: next split_ratio_val of the shuffled list.
- * - Test: first test_sample_ratio of the shuffled list (copy; may overlap with train).
+ * When train + val + test ratios sum to more than 1 (default 0.8+0.2+0.1), ratios are
+ * normalized so every image appears in exactly one split.
  *
- * Uses Math.floor for all index calculations. Handles empty/small lists without crashing.
- *
- * @param {Array<Object>} imageList - List of items (e.g. { storedName, storedPath, type, ... }). Order is used only for determinism with seed.
- * @param {Object} [config] - Optional split config (split_seed, split_ratio_train, split_ratio_val, test_sample_ratio). Merged with defaults.
+ * @param {Array<Object>} imageList - List of items (e.g. { storedName, storedPath, ... })
+ * @param {Object} [config] - Optional split config from Dataset
  * @returns {{ train: Array, val: Array, test: Array }}
  */
 function splitDataset(imageList, config) {
@@ -94,13 +95,28 @@ function splitDataset(imageList, config) {
   const shuffled = seededShuffle(imageList, cfg.split_seed);
   const n = shuffled.length;
 
-  const trainEnd = Math.floor(n * cfg.split_ratio_train);
-  const valEnd = trainEnd + Math.floor(n * cfg.split_ratio_val);
-  const testSize = Math.floor(n * cfg.test_sample_ratio);
+  let trainRatio = cfg.split_ratio_train;
+  let valRatio = cfg.split_ratio_val;
+  let testRatio = cfg.test_sample_ratio;
+
+  // ✅ Keep partitions disjoint when defaults sum to > 1
+  const sum = trainRatio + valRatio + testRatio;
+  if (sum > 1 && sum > 0) {
+    trainRatio /= sum;
+    valRatio /= sum;
+    testRatio /= sum;
+  }
+
+  let trainEnd = Math.floor(n * trainRatio);
+  let valEnd = trainEnd + Math.floor(n * valRatio);
+
+  // Guarantee every image is assigned (rounding leftovers go to test, then val, then train)
+  if (valEnd > n) valEnd = n;
+  if (trainEnd > valEnd) trainEnd = valEnd;
 
   const train = shuffled.slice(0, trainEnd);
   const val = shuffled.slice(trainEnd, valEnd);
-  const test = shuffled.slice(0, testSize);
+  const test = shuffled.slice(valEnd);
 
   return { train, val, test };
 }

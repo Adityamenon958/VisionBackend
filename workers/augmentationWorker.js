@@ -12,6 +12,8 @@ const fs = require('fs').promises;
 
 const { augmentationQueue } = require('../queue');
 const Dataset = require('../models/Dataset');
+const Image = require('../models/Image');
+const Category = require('../models/Category');
 const storageAdapter = require('../services/storageAdapter');
 const { splitDataset } = require('../utils/splitDataset');
 const { getLabelFilePath } = require('../utils/yoloConverter');
@@ -458,20 +460,30 @@ const processAugmentationJob = async (job) => {
       }
     }
 
-    // ---------- 3. Augmentation parameters: target total from multiplier or explicit ----------
-    let effectiveTargetTrainTotal =
+    // ---------- 3. Augmentation parameters: desired FINAL image count ----------
+    // targetTrainTotal from the UI = "number of images after augmentation"
+    let desiredTotal =
       typeof targetTrainTotal === 'number' && targetTrainTotal > 0
         ? targetTrainTotal
         : 0;
-    if (augmentationMultiplier && !effectiveTargetTrainTotal) {
-      effectiveTargetTrainTotal = Math.max(
+    if (augmentationMultiplier && !desiredTotal) {
+      desiredTotal = Math.max(
         pool.length,
         Math.round(pool.length * augmentationMultiplier),
       );
     }
-    if (!effectiveTargetTrainTotal) {
-      effectiveTargetTrainTotal = 1000;
+    if (!desiredTotal) {
+      desiredTotal = Math.max(pool.length * 2, 100);
     }
+    // Never ask for fewer images than we already have
+    desiredTotal = Math.max(desiredTotal, pool.length);
+
+    // Python generates additional variants; aim so originals + augs ≈ desiredTotal
+    const additionalNeeded = Math.max(0, desiredTotal - pool.length);
+    // Ask Python for at least `additionalNeeded` variants (it creates ceil(target/n)*n files)
+    const effectiveTargetTrainTotal =
+      additionalNeeded > 0 ? Math.max(additionalNeeded, pool.length) : pool.length;
+
     const effectiveValTestMultiplier =
       typeof valTestMultiplier === 'number' && valTestMultiplier > 0 ? valTestMultiplier : 2;
 
@@ -481,42 +493,44 @@ const processAugmentationJob = async (job) => {
       throw new Error('Augmentation cancelled by user');
     }
 
-    const result = await runPythonAugmentation({
-      inputRoot: inputPoolRoot,
-      outputRoot: outputPoolRoot,
-      targetTrainTotal: effectiveTargetTrainTotal,
-      valTestMultiplier: effectiveValTestMultiplier,
-      targetSize: typeof targetSize === 'number' && targetSize > 0 ? targetSize : 640,
-      jobId: job.id,
-      datasetId,
-    });
+    // Skip Python when user asked for the same count as current (no extra images needed)
+    if (additionalNeeded > 0) {
+      const result = await runPythonAugmentation({
+        inputRoot: inputPoolRoot,
+        outputRoot: outputPoolRoot,
+        targetTrainTotal: effectiveTargetTrainTotal,
+        valTestMultiplier: effectiveValTestMultiplier,
+        targetSize: typeof targetSize === 'number' && targetSize > 0 ? targetSize : 640,
+        jobId: job.id,
+        datasetId,
+      });
 
-    // Capture process reference for cleanup if needed
-    if (result.process) {
-      pythonProcess = result.process;
+      if (result.process) {
+        pythonProcess = result.process;
+      }
+
+      const checkAfterPython = await Dataset.findById(datasetId);
+      if (checkAfterPython?.augmentationStatus === 'cancelled') {
+        throw new Error('Augmentation cancelled by user');
+      }
+
+      if (result.exitCode !== 0) {
+        const message =
+          result.stderr ||
+          result.stdout ||
+          `Python augmentation exited with code ${result.exitCode}`;
+        throw new Error(message);
+      }
     }
 
-    // Check for cancellation after Python completes
-    const checkAfterPython = await Dataset.findById(datasetId);
-    if (checkAfterPython?.augmentationStatus === 'cancelled') {
-      throw new Error('Augmentation cancelled by user');
-    }
-
-    if (result.exitCode !== 0) {
-      const message =
-        result.stderr ||
-        result.stdout ||
-        `Python augmentation exited with code ${result.exitCode}`;
-      throw new Error(message);
-    }
-
-    // ---------- 4. Combined list: original pool + augmented (from _output_pool/images/train) ----------
+    // ---------- 4. Combined list: originals + augmented (cap at desiredTotal) ----------
     const combinedList = pool.map((p) => ({ ...p }));
 
     try {
       const augImagesDir = path.join(outputPoolRoot, 'images', 'train');
       const augEntries = await fs.readdir(augImagesDir, { withFileTypes: true });
       for (const entry of augEntries) {
+        if (combinedList.length >= desiredTotal) break;
         if (!entry.isFile()) continue;
         const storedName = entry.name;
         const storedPath = `images/train/${storedName}`;
@@ -737,6 +751,98 @@ const processAugmentationJob = async (job) => {
       throw new Error('Augmentation cancelled before activation');
     }
 
+    // ---------- 9b. Create Image documents so Annotate / Edit can load the new version ----------
+    // Without these, Simulation → Edit annotations shows empty / "no images" for augmented datasets.
+    try {
+      const sharp = require('sharp');
+      let imageDocsCreated = 0;
+      for (const split of ['train', 'val', 'test']) {
+        const splitImagesDir = path.join(imagesRoot, split);
+        let imageEntries = [];
+        try {
+          imageEntries = await fs.readdir(splitImagesDir, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const entry of imageEntries) {
+          if (!entry.isFile()) continue;
+          const storedName = entry.name;
+          const ext = path.extname(storedName).toLowerCase();
+          if (ext !== '.jpg' && ext !== '.jpeg' && ext !== '.png') continue;
+          const storedPath = `images/${split}/${storedName}`;
+          const fullPath = path.join(outputRoot, storedPath);
+          const labelRel = getLabelFilePath(storedPath);
+          const labelFull = path.join(outputRoot, labelRel);
+          const hasLabels = await storageAdapter.exists(labelFull);
+
+          let width = 0;
+          let height = 0;
+          let size = 0;
+          try {
+            const meta = await sharp(fullPath).metadata();
+            width = meta.width || 0;
+            height = meta.height || 0;
+            const st = await fs.stat(fullPath);
+            size = st.size || 0;
+          } catch {
+            // keep zeros; Image schema requires width/height — use 1 as fallback
+            width = width || 1;
+            height = height || 1;
+          }
+
+          await Image.findOneAndUpdate(
+            { datasetId: augmentedDataset._id, storedPath },
+            {
+              datasetId: augmentedDataset._id,
+              filename: storedName,
+              storedPath,
+              folder: split,
+              size,
+              width: width || 1,
+              height: height || 1,
+              hasLabels,
+              hasAnnotations: false,
+              convertedAt: hasLabels ? new Date() : undefined,
+            },
+            { upsert: true, new: true }
+          );
+          imageDocsCreated += 1;
+        }
+      }
+      console.log('[AUGMENT-WORKER] Created Image documents for augmented dataset', {
+        augmentedDatasetId: augmentedDataset._id.toString(),
+        imageDocsCreated,
+      });
+    } catch (imgErr) {
+      console.error('[AUGMENT-WORKER] Failed to create Image documents:', imgErr.message);
+      throw new Error(`Augmented dataset files ready but Image index failed: ${imgErr.message}`);
+    }
+
+    // ---------- 9c. Copy categories from source so Edit annotations has class names ----------
+    try {
+      const sourceCategories = await Category.find({ datasetId: originalDataset._id }).lean();
+      for (const cat of sourceCategories) {
+        await Category.findOneAndUpdate(
+          { datasetId: augmentedDataset._id, name: cat.name },
+          {
+            datasetId: augmentedDataset._id,
+            name: cat.name,
+            color: cat.color,
+            description: cat.description,
+            order: cat.order ?? 0,
+            createdBy: cat.createdBy,
+          },
+          { upsert: true, new: true }
+        );
+      }
+      console.log('[AUGMENT-WORKER] Copied categories to augmented dataset', {
+        count: sourceCategories.length,
+        augmentedDatasetId: augmentedDataset._id.toString(),
+      });
+    } catch (catErr) {
+      console.warn('[AUGMENT-WORKER] Failed to copy categories (non-fatal):', catErr.message);
+    }
+
     augmentedDataset.status = 'ready';
     augmentedDataset.augmentationStatus = 'succeeded';
     augmentedDataset.totalImages = totalImages;
@@ -744,6 +850,9 @@ const processAugmentationJob = async (job) => {
     augmentedDataset.valCount = valCount;
     augmentedDataset.testCount = testCount;
     augmentedDataset.sizeBytes = sizeBytes;
+    augmentedDataset.labeledImages = totalImages;
+    augmentedDataset.unlabeledImages = 0;
+    augmentedDataset.unlabeledImagesCount = 0;
     augmentedDataset.augmentationError = undefined;
     augmentedDataset.isActive = true; // Make augmented dataset active
     await augmentedDataset.save();

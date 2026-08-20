@@ -640,8 +640,19 @@ const getAnnotationSummary = async (req, res) => {
     // Use Image model to compute annotation-based counts (independent of hasLabels)
     const Image = require('../models/Image');
 
-    const totalImages = await Image.countDocuments({ datasetId });
-    const annotatedImages = await Image.countDocuments({ datasetId, hasAnnotations: true });
+    const allImages = await Image.find({ datasetId }).select('filename storedPath hasAnnotations').lean();
+    // ✅ Unique by filename so overlapping train/test copies don't inflate totals
+    const byFilename = new Map();
+    for (const img of allImages) {
+      const key = String(img.filename || path.basename(img.storedPath || '') || img._id).toLowerCase();
+      const existing = byFilename.get(key);
+      if (!existing || (img.hasAnnotations && !existing.hasAnnotations)) {
+        byFilename.set(key, img);
+      }
+    }
+    const unique = Array.from(byFilename.values());
+    const totalImages = unique.length;
+    const annotatedImages = unique.filter((i) => i.hasAnnotations === true).length;
     const unannotatedImages = totalImages - annotatedImages;
 
     return res.status(200).json({
