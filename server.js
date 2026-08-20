@@ -13,6 +13,9 @@ const analyticsRoutes = require('./routes/analytics');
 const auditRoutes = require('./routes/audit');
 const demoExtinguisherRoutes = require('./routes/demoExtinguisherRoutes');
 const { authenticateToken } = require('./middleware/authMiddleware');
+const dns = require('dns');
+
+dns.setServers(['8.8.8.8', '1.1.1.1']);
 
 /**
  * Main Server File
