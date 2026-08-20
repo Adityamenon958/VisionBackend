@@ -498,35 +498,91 @@ const listDatasets = async (req, res) => {
       }
     }
 
+    // ✅ Unique image counts from Image index (fixes inflated totalImages when train/test overlapped)
+    const datasetIds = datasets.map((d) => d._id);
+    const uniqueCountByDatasetId = new Map();
+    if (datasetIds.length > 0) {
+      const uniqueAgg = await Image.aggregate([
+        { $match: { datasetId: { $in: datasetIds } } },
+        {
+          $group: {
+            _id: {
+              datasetId: '$datasetId',
+              filename: { $toLower: { $ifNull: ['$filename', ''] } },
+            },
+          },
+        },
+        {
+          $group: {
+            _id: '$_id.datasetId',
+            uniqueImages: { $sum: 1 },
+          },
+        },
+      ]);
+      for (const row of uniqueAgg) {
+        uniqueCountByDatasetId.set(row._id.toString(), row.uniqueImages);
+      }
+    }
+
     // ✅ Return list of datasets (include datasetType, annotationStatus, is_augmented, labelSource for frontend badges)
-    res.json({
-      datasets: datasets.map(d => {
-        let labelSource = getLabelSource(d);
-        if (d.isAugmented && !labelSource && d.backupDatasetId) {
-          labelSource = sourceLabelSourceMap.get(d.backupDatasetId.toString()) ?? 'pre_labelled';
+    const responseDatasets = [];
+    for (const d of datasets) {
+      let labelSource = getLabelSource(d);
+      if (d.isAugmented && !labelSource && d.backupDatasetId) {
+        labelSource = sourceLabelSourceMap.get(d.backupDatasetId.toString()) ?? 'pre_labelled';
+      }
+      const uniqueFromIndex = uniqueCountByDatasetId.get(d._id.toString());
+      let totalImages = d.totalImages;
+      let trainCount = d.trainCount;
+      let valCount = d.valCount;
+      let testCount = d.testCount;
+      if (typeof uniqueFromIndex === 'number' && uniqueFromIndex > 0) {
+        totalImages = uniqueFromIndex;
+        const splitSum = (Number(trainCount) || 0) + (Number(valCount) || 0) + (Number(testCount) || 0);
+        // ✅ Hide stale split counts when they include overlapping copies (e.g. 84+21+10 > 105)
+        if (splitSum > uniqueFromIndex) {
+          trainCount = undefined;
+          valCount = undefined;
+          testCount = undefined;
         }
-        return {
-          _id: d._id,
-          company: d.company,
-          project: d.project,
-          version: d.version,
-          totalImages: d.totalImages,
-          sizeBytes: d.sizeBytes,
-          status: d.status,
-          datasetType: d.datasetType ?? (d.status === 'ready_to_train' ? 'labeled' : null),
-          annotationStatus: d.annotationStatus ?? null,
-          labelSource,
-          is_augmented: d.isAugmented ?? false,
-          isActive: d.isActive,
-          isAugmented: d.isAugmented,
-          augmentationStatus: d.augmentationStatus,
-          backup_dataset_id: d.backupDatasetId ? d.backupDatasetId.toString() : null,
-          augmentedFromVersion: d.augmentedFromVersion || null,
-          createdAt: d.createdAt,
-          updatedAt: d.updatedAt
-        };
-      }),
-      count: datasets.length
+        // Self-heal stored totalImages when it was inflated by overlapping splits
+        if (d.totalImages !== uniqueFromIndex) {
+          Dataset.updateOne(
+            { _id: d._id },
+            { $set: { totalImages: uniqueFromIndex, labeledImages: uniqueFromIndex } },
+          ).catch((err) => {
+            console.warn('[listDatasets] Could not heal totalImages:', err.message);
+          });
+        }
+      }
+      responseDatasets.push({
+        _id: d._id,
+        company: d.company,
+        project: d.project,
+        version: d.version,
+        totalImages,
+        trainCount,
+        valCount,
+        testCount,
+        sizeBytes: d.sizeBytes,
+        status: d.status,
+        datasetType: d.datasetType ?? (d.status === 'ready_to_train' ? 'labeled' : null),
+        annotationStatus: d.annotationStatus ?? null,
+        labelSource,
+        is_augmented: d.isAugmented ?? false,
+        isActive: d.isActive,
+        isAugmented: d.isAugmented,
+        augmentationStatus: d.augmentationStatus,
+        backup_dataset_id: d.backupDatasetId ? d.backupDatasetId.toString() : null,
+        augmentedFromVersion: d.augmentedFromVersion || null,
+        createdAt: d.createdAt,
+        updatedAt: d.updatedAt
+      });
+    }
+
+    res.json({
+      datasets: responseDatasets,
+      count: responseDatasets.length
     });
 
   } catch (error) {

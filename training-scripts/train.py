@@ -13,6 +13,7 @@ Usage:
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -21,6 +22,108 @@ try:
 except ImportError:
     print("ERROR: ultralytics package not found. Install with: pip install ultralytics", file=sys.stderr)
     sys.exit(1)
+
+# ✅ Image extensions Ultralytics accepts for detect training
+_IMAGE_EXTS = {
+    '.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp',
+    '.jp2', '.jpeg2000', '.dng', '.mpo', '.heic', '.avif',
+}
+
+
+def _list_images(folder):
+    """Return image filenames in folder (non-recursive)."""
+    if not os.path.isdir(folder):
+        return []
+    try:
+        return [
+            f for f in os.listdir(folder)
+            if os.path.isfile(os.path.join(folder, f))
+            and Path(f).suffix.lower() in _IMAGE_EXTS
+        ]
+    except OSError:
+        return []
+
+
+def ensure_nonempty_val(dataset_path, data_yaml_path):
+    """
+    YOLO requires a non-empty val set. Small splits can leave images/val empty.
+
+    Strategy:
+      1. If images/val already has images → nothing to do
+      2. Else copy one train image + matching label into val
+      3. If train is also empty, try test
+      4. If still empty, point data.yaml val: to images/train (last resort)
+    """
+    dataset_path = os.path.abspath(dataset_path)
+    images_val = os.path.join(dataset_path, 'images', 'val')
+    images_train = os.path.join(dataset_path, 'images', 'train')
+    images_test = os.path.join(dataset_path, 'images', 'test')
+    labels_val = os.path.join(dataset_path, 'labels', 'val')
+    labels_train = os.path.join(dataset_path, 'labels', 'train')
+    labels_test = os.path.join(dataset_path, 'labels', 'test')
+
+    val_images = _list_images(images_val)
+    if val_images:
+        print(f"✅ Validation set OK ({len(val_images)} image(s) in images/val)")
+        sys.stdout.flush()
+        return
+
+    print("⚠️ images/val is empty — YOLO needs a validation set. Fixing automatically...")
+    sys.stdout.flush()
+
+    source_imgs = _list_images(images_train)
+    source_img_dir = images_train
+    source_lbl_dir = labels_train
+    source_name = 'train'
+
+    if not source_imgs:
+        source_imgs = _list_images(images_test)
+        source_img_dir = images_test
+        source_lbl_dir = labels_test
+        source_name = 'test'
+
+    if source_imgs:
+        os.makedirs(images_val, exist_ok=True)
+        os.makedirs(labels_val, exist_ok=True)
+
+        filename = source_imgs[0]
+        stem = Path(filename).stem
+        src_img = os.path.join(source_img_dir, filename)
+        dst_img = os.path.join(images_val, filename)
+        shutil.copy2(src_img, dst_img)
+
+        src_lbl = os.path.join(source_lbl_dir, f'{stem}.txt')
+        dst_lbl = os.path.join(labels_val, f'{stem}.txt')
+        if os.path.isfile(src_lbl):
+            shutil.copy2(src_lbl, dst_lbl)
+        else:
+            # ✅ Empty label file is valid (background image)
+            with open(dst_lbl, 'w', encoding='utf-8') as f:
+                f.write('')
+
+        print(f"✅ Copied 1 image from {source_name} → val: {filename}")
+        sys.stdout.flush()
+        return
+
+    # Last resort: rewrite data.yaml so val points at train
+    print("⚠️ No train/test images to copy — pointing data.yaml val: to images/train")
+    sys.stdout.flush()
+    try:
+        with open(data_yaml_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        lines = []
+        for line in content.split('\n'):
+            if line.strip().startswith('val:'):
+                lines.append('val: images/train')
+            else:
+                lines.append(line)
+        with open(data_yaml_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+        print("✅ Updated data.yaml: val: images/train")
+        sys.stdout.flush()
+    except Exception as e:
+        print(f"ERROR: Could not fix empty val set: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def load_config(config_path):
@@ -334,6 +437,9 @@ def train_yolo(config):
         
         print(f"✅ Verified data.yaml contains {num_classes} classes: {class_names}")
         sys.stdout.flush()
+
+        # ✅ YOLO crashes if images/val is empty (common on tiny datasets after floor split)
+        ensure_nonempty_val(dataset_path, data_yaml)
         
         # Load model
         if model_path and os.path.exists(model_path):

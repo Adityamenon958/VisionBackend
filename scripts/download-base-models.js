@@ -1,73 +1,106 @@
 /**
  * Download Base YOLO Models Script
- * 
- * This script downloads commonly used YOLO pretrained models
- * and stores them locally in models/base/ directory.
- * 
- * Run: node scripts/download-base-models.js
+ *
+ * Downloads YOLOv8s and YOLOv5s pretrained weights into models/base/
+ * so training can start without waiting on network downloads.
+ *
+ * Run: npm run download-models
+ *   or: node scripts/download-base-models.js
  */
 
 const https = require('https');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
 const BASE_MODELS_DIR = path.join(__dirname, '../models/base');
 
-// Common YOLO models to download
+// ✅ Base models used by training (small variants — balanced speed/accuracy)
 const YOLO_MODELS = [
   {
-    name: 'yolov11s.pt',
-    url: 'https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov11s.pt',
-    description: 'YOLOv11 Small - Latest version, balanced speed/accuracy'
-  }
+    name: 'yolov8s.pt',
+    url: 'https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s.pt',
+    description: 'YOLOv8 Small - Ultralytics, balanced speed/accuracy',
+  },
+  {
+    name: 'yolov5s.pt',
+    url: 'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5s.pt',
+    description: 'YOLOv5 Small - Ultralytics YOLOv5 release',
+  },
 ];
 
 /**
- * Download a file from URL
+ * Download a file from URL (follows redirects)
  */
-function downloadFile(url, destPath) {
+function downloadFile(url, destPath, redirectCount = 0) {
   return new Promise((resolve, reject) => {
+    if (redirectCount > 8) {
+      reject(new Error('Too many redirects'));
+      return;
+    }
+
+    const client = url.startsWith('http://') ? http : https;
     const file = fs.createWriteStream(destPath);
-    
-    https.get(url, (response) => {
-      if (response.statusCode === 302 || response.statusCode === 301) {
-        // Handle redirect
-        return downloadFile(response.headers.location, destPath)
-          .then(resolve)
-          .catch(reject);
-      }
-      
-      if (response.statusCode !== 200) {
-        reject(new Error(`Failed to download: ${response.statusCode} ${response.statusMessage}`));
-        return;
-      }
 
-      const totalSize = parseInt(response.headers['content-length'], 10);
-      let downloadedSize = 0;
+    client
+      .get(url, (response) => {
+        if (
+          response.statusCode === 301 ||
+          response.statusCode === 302 ||
+          response.statusCode === 307 ||
+          response.statusCode === 308
+        ) {
+          file.close();
+          fs.unlink(destPath, () => {});
+          const nextUrl = response.headers.location;
+          if (!nextUrl) {
+            reject(new Error(`Redirect without location (${response.statusCode})`));
+            return;
+          }
+          return downloadFile(nextUrl, destPath, redirectCount + 1)
+            .then(resolve)
+            .catch(reject);
+        }
 
-      response.on('data', (chunk) => {
-        downloadedSize += chunk.length;
-        const percent = ((downloadedSize / totalSize) * 100).toFixed(1);
-        process.stdout.write(`\rDownloading: ${percent}%`);
-      });
+        if (response.statusCode !== 200) {
+          file.close();
+          fs.unlink(destPath, () => {});
+          reject(
+            new Error(`Failed to download: ${response.statusCode} ${response.statusMessage}`)
+          );
+          return;
+        }
 
-      response.pipe(file);
+        const totalSize = parseInt(response.headers['content-length'], 10) || 0;
+        let downloadedSize = 0;
 
-      file.on('finish', () => {
+        response.on('data', (chunk) => {
+          downloadedSize += chunk.length;
+          if (totalSize > 0) {
+            const percent = ((downloadedSize / totalSize) * 100).toFixed(1);
+            process.stdout.write(`\r   ⬇️  Downloading: ${percent}%`);
+          } else {
+            const mb = (downloadedSize / (1024 * 1024)).toFixed(1);
+            process.stdout.write(`\r   ⬇️  Downloading: ${mb} MB`);
+          }
+        });
+
+        response.pipe(file);
+
+        file.on('finish', () => {
+          file.close();
+          console.log(' ✅');
+          resolve();
+        });
+      })
+      .on('error', (err) => {
         file.close();
-        console.log(` ✅`);
-        resolve();
+        fs.unlink(destPath, () => {});
+        reject(err);
       });
-    }).on('error', (err) => {
-      fs.unlink(destPath, () => {}); // Delete file on error
-      reject(err);
-    });
   });
 }
 
-/**
- * Check if file exists and get its size
- */
 function fileExists(filePath) {
   try {
     const stats = fs.statSync(filePath);
@@ -77,14 +110,10 @@ function fileExists(filePath) {
   }
 }
 
-/**
- * Main function
- */
 async function main() {
-  console.log('🚀 Downloading Base YOLO Models...\n');
+  console.log('🚀 Downloading Base YOLO Models (v8s + v5s)...\n');
   console.log(`📁 Storage directory: ${BASE_MODELS_DIR}\n`);
 
-  // Ensure directory exists
   if (!fs.existsSync(BASE_MODELS_DIR)) {
     fs.mkdirSync(BASE_MODELS_DIR, { recursive: true });
     console.log(`✅ Created directory: ${BASE_MODELS_DIR}\n`);
@@ -92,13 +121,13 @@ async function main() {
 
   let downloaded = 0;
   let skipped = 0;
+  let failed = 0;
 
   for (const model of YOLO_MODELS) {
     const filePath = path.join(BASE_MODELS_DIR, model.name);
-    
+
     console.log(`📦 ${model.name} - ${model.description}`);
-    
-    // Check if already downloaded
+
     if (fileExists(filePath)) {
       const stats = fs.statSync(filePath);
       const sizeMB = (stats.size / (1024 * 1024)).toFixed(2);
@@ -108,7 +137,6 @@ async function main() {
     }
 
     try {
-      process.stdout.write(`   ⬇️  Downloading... `);
       await downloadFile(model.url, filePath);
       const stats = fs.statSync(filePath);
       const sizeMB = (stats.size / (1024 * 1024)).toFixed(2);
@@ -116,24 +144,29 @@ async function main() {
       downloaded++;
     } catch (error) {
       console.error(`   ❌ Error: ${error.message}\n`);
+      failed++;
     }
   }
 
   console.log('\n📊 Summary:');
   console.log(`   ✅ Downloaded: ${downloaded}`);
   console.log(`   ⏭️  Skipped: ${skipped}`);
+  if (failed > 0) console.log(`   ❌ Failed: ${failed}`);
   console.log(`   📁 Location: ${BASE_MODELS_DIR}\n`);
 
+  if (failed > 0) {
+    console.log('⚠️  Some models failed. Check your network and try again.\n');
+    process.exit(1);
+  }
+
   if (downloaded > 0) {
-    console.log('✅ Base models ready! Training will use local models (faster).\n');
+    console.log('✅ Base models ready! Training will use local yolov8s.pt / yolov5s.pt.\n');
   } else {
     console.log('✅ All models already downloaded.\n');
   }
 }
 
-// Run the script
 main().catch((error) => {
   console.error('❌ Error:', error);
   process.exit(1);
 });
-

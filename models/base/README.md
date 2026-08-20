@@ -4,37 +4,48 @@ This directory stores pretrained YOLO models that are used as starting points fo
 
 ## Models Stored
 
-- **yolov11s.pt** - YOLOv11 Small (latest version, balanced speed/accuracy)
+- **yolov8s.pt** — YOLOv8 Small (Ultralytics, balanced speed/accuracy)
+- **yolov5s.pt** — YOLOv5 Small (Ultralytics YOLOv5 v7.0)
 
 ## Download Models
 
-Run this command to download all base models:
+Run this command from the backend project root:
 
 ```bash
 npm run download-models
 ```
 
+Or directly:
+
+```bash
+node scripts/download-base-models.js
+```
+
 This will:
-- Download models from official YOLO repository
-- Store them in `models/base/` directory
+
+- Download `yolov8s.pt` and `yolov5s.pt` from the official Ultralytics GitHub releases
+- Store them in `models/base/`
 - Skip models that are already downloaded
 
 ## Benefits
 
-✅ **Faster Training Starts** - No download delay  
-✅ **Works Offline** - No internet required  
-✅ **Predictable** - Same models every time  
-✅ **Production Ready** - Better for production environments
+✅ **Faster Training Starts** — No download delay  
+✅ **Works Offline** — No internet required after download  
+✅ **Predictable** — Same models every time  
+✅ **Production Ready** — Better for production environments
 
-## File Sizes
+## File Sizes (approximate)
 
-- yolov11s.pt: ~22 MB (approximate)
+| Model       | Size   |
+|-------------|--------|
+| yolov8s.pt  | ~22 MB |
+| yolov5s.pt  | ~14 MB |
 
 ## Usage
 
-The training worker automatically uses these local models if they exist. If a model is not found locally, YOLO will download it automatically (slower).
+The training worker looks for local weights under `models/base/` (for example `yolov8s.pt`, `yolov5s.pt`).  
+If a model is missing locally, YOLO may download it automatically (slower).
 
 ## Note
 
-These models are pretrained on COCO dataset. They serve as starting points (transfer learning) for your custom dataset training.
-
+These models are pretrained on the COCO dataset. They are starting points (transfer learning) for your custom dataset training.

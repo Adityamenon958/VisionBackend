@@ -9,6 +9,7 @@
     "start:training-worker": "node workers/trainingWorker.js",
     "start:inference-worker": "node workers/inferenceWorker.js",
     "dev": "nodemon --config nodemon.json server.js",
+    "download-models": "node scripts/download-base-models.js",
     "diagnose:inference": "node diagnose-missing-inference-jobs.js",
     "smoke:demo-extinguisher": "node scripts/demo-extinguisher-smoke-check.js"
   },

@@ -419,16 +419,40 @@ const startTraining = async (req, res) => {
       });
     }
 
-    // Use the requested dataset for training; it must be active
+    // Use the requested dataset for training
     const dataset = await Dataset.findById(datasetId);
     if (!dataset) {
       return res.status(404).json({
         error: 'Dataset not found'
       });
     }
-    if (!dataset.isActive) {
+
+    // Must be ready (annotated / processed) before training
+    if (dataset.status !== 'ready' && dataset.status !== 'ready_to_train') {
       return res.status(400).json({
-        error: 'Selected dataset is not active. Activate it before training.'
+        error: `Dataset is not ready for training (status: ${dataset.status}). Finish processing/annotation first.`
+      });
+    }
+
+    // ✅ Auto-activate selected version: after augmentation the original is marked inactive,
+    // but Simulation still lets you pick any ready version. Activate the one the user chose.
+    if (!dataset.isActive) {
+      await Dataset.updateMany(
+        {
+          company: dataset.company,
+          project: dataset.project,
+          deletedAt: null,
+          _id: { $ne: dataset._id },
+        },
+        { $set: { isActive: false } }
+      );
+      dataset.isActive = true;
+      await dataset.save();
+      console.log('[TRAIN] Auto-activated dataset for training', {
+        datasetId: dataset._id.toString(),
+        version: dataset.version,
+        company: dataset.company,
+        project: dataset.project,
       });
     }
 

@@ -107,6 +107,12 @@ function splitDataset(imageList, config) {
     testRatio /= sum;
   }
 
+  // ✅ Tiny datasets: YOLO needs train+val. Keep everything in train; train.py
+  // falls back to val=train when val is empty (n === 1).
+  if (n === 1) {
+    return { train: shuffled.slice(), val: [], test: [] };
+  }
+
   let trainEnd = Math.floor(n * trainRatio);
   let valEnd = trainEnd + Math.floor(n * valRatio);
 
@@ -117,6 +123,28 @@ function splitDataset(imageList, config) {
   const train = shuffled.slice(0, trainEnd);
   const val = shuffled.slice(trainEnd, valEnd);
   const test = shuffled.slice(valEnd);
+
+  // ✅ Math.floor on small n often leaves val empty (e.g. 5 imgs → train 3, val 0, test 2).
+  // Steal one image so val is never empty when n >= 2 (disjoint still holds).
+  if (val.length === 0) {
+    if (train.length > 1) {
+      val.push(train.pop());
+    } else if (test.length > 0) {
+      val.push(test.shift());
+    }
+  }
+
+  // ✅ Same floor issue can empty train; YOLO needs at least one train image.
+  if (train.length === 0) {
+    if (val.length > 1) {
+      train.push(val.shift());
+    } else if (test.length > 0) {
+      train.push(test.shift());
+    } else if (val.length === 1) {
+      // n === 2 edge: keep one in train, leave val empty for train.py fallback
+      train.push(val.shift());
+    }
+  }
 
   return { train, val, test };
 }

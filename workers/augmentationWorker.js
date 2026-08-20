@@ -410,7 +410,11 @@ const processAugmentationJob = async (job) => {
     await storageAdapter.ensureDir(outputRoot);
 
     // ---------- 1. Build full labeled pool from source (before any split) ----------
+    // ✅ Dedupe by filename: old overlapping train/test copies must not enter the pool twice
+    // (that caused 105 unique images → 115 files and Simulation showing the wrong count).
+    // Prefer train > val > test when the same name appears in multiple splits.
     const pool = [];
+    const poolNamesSeen = new Set();
     for (const split of ['train', 'val', 'test']) {
       const splitImagesDir = path.join(inputRoot, 'images', split);
       try {
@@ -420,11 +424,14 @@ const processAugmentationJob = async (job) => {
           const storedName = entry.name;
           const ext = path.extname(storedName).toLowerCase();
           if (ext !== '.jpg' && ext !== '.jpeg' && ext !== '.png') continue;
+          const nameKey = storedName.toLowerCase();
+          if (poolNamesSeen.has(nameKey)) continue;
           const storedPath = `images/${split}/${storedName}`;
           const labelPath = getLabelFilePath(storedPath);
           const fullLabelPath = path.join(inputRoot, labelPath);
           const exists = await storageAdapter.exists(fullLabelPath);
           if (!exists) continue;
+          poolNamesSeen.add(nameKey);
           pool.push({
             storedName,
             storedPath,
@@ -440,6 +447,11 @@ const processAugmentationJob = async (job) => {
     if (pool.length === 0) {
       throw new Error('No labeled images found in source dataset. Ensure images have corresponding .txt labels in labels/train, val, or test.');
     }
+
+    console.log('[AUGMENT-WORKER] Labeled pool built (unique filenames)', {
+      uniqueImages: pool.length,
+      sourceVersion: originalDataset.version,
+    });
 
     // ---------- 2. Temp dirs: input pool (all images) and output pool (Python writes augmented here) ----------
     const inputPoolRoot = path.join(outputRoot, '_input_pool');
@@ -525,6 +537,7 @@ const processAugmentationJob = async (job) => {
 
     // ---------- 4. Combined list: originals + augmented (cap at desiredTotal) ----------
     const combinedList = pool.map((p) => ({ ...p }));
+    const combinedNames = new Set(combinedList.map((p) => p.storedName.toLowerCase()));
 
     try {
       const augImagesDir = path.join(outputPoolRoot, 'images', 'train');
@@ -533,11 +546,15 @@ const processAugmentationJob = async (job) => {
         if (combinedList.length >= desiredTotal) break;
         if (!entry.isFile()) continue;
         const storedName = entry.name;
+        const nameKey = storedName.toLowerCase();
+        // ✅ Skip if this filename is already in the list (original or prior aug)
+        if (combinedNames.has(nameKey)) continue;
         const storedPath = `images/train/${storedName}`;
         const labelPath = getLabelFilePath(storedPath);
         const fullLabelPath = path.join(outputPoolRoot, labelPath);
         const labelExists = await storageAdapter.exists(fullLabelPath);
         if (!labelExists) continue;
+        combinedNames.add(nameKey);
         combinedList.push({
           storedName,
           storedPath,
@@ -550,7 +567,28 @@ const processAugmentationJob = async (job) => {
     }
 
     // ---------- 5. Canonical split once (same seed/ratios as preprocessing and post-annotation) ----------
-    const { train: trainList, val: valList, test: testList } = splitDataset(combinedList, originalDataset);
+    let { train: trainList, val: valList, test: testList } = splitDataset(combinedList, originalDataset);
+
+    // ✅ Hard guarantee: no filename in more than one split (defensive; splitDataset is already disjoint by item)
+    const enforceDisjointByFilename = (train, val, test) => {
+      const used = new Set();
+      const take = (list) => {
+        const out = [];
+        for (const item of list) {
+          const key = String(item.storedName || '').toLowerCase();
+          if (!key || used.has(key)) continue;
+          used.add(key);
+          out.push(item);
+        }
+        return out;
+      };
+      return { train: take(train), val: take(val), test: take(test) };
+    };
+    ({ train: trainList, val: valList, test: testList } = enforceDisjointByFilename(
+      trainList,
+      valList,
+      testList,
+    ));
 
     // ---------- 6. Write new version train/val/test from split (no reuse of old structure) ----------
     const imagesTrainPath = path.join(outputRoot, 'images', 'train');
@@ -566,18 +604,37 @@ const processAugmentationJob = async (job) => {
     await storageAdapter.ensureDir(labelsValPath);
     await storageAdapter.ensureDir(labelsTestPath);
 
-    const writeSplit = async (list, imagesDir, labelsDir) => {
+    // ✅ Track written names so we never copy the same file into a second split on disk
+    const writtenNames = new Set();
+    const writeSplit = async (list, imagesDir, labelsDir, splitName) => {
+      let written = 0;
+      let skippedDup = 0;
       for (const item of list) {
+        const nameKey = String(item.storedName || '').toLowerCase();
+        if (!nameKey || writtenNames.has(nameKey)) {
+          skippedDup += 1;
+          continue;
+        }
+        writtenNames.add(nameKey);
         const destImage = path.join(imagesDir, item.storedName);
         const destLabel = path.join(labelsDir, path.parse(item.storedName).name + '.txt');
         await storageAdapter.copyFile(item.sourcePath, destImage);
         await storageAdapter.copyFile(item.labelPath, destLabel);
+        written += 1;
       }
+      if (skippedDup > 0) {
+        console.warn('[AUGMENT-WORKER] Skipped duplicate filenames while writing split', {
+          split: splitName,
+          written,
+          skippedDup,
+        });
+      }
+      return written;
     };
 
-    await writeSplit(trainList, imagesTrainPath, labelsTrainPath);
-    await writeSplit(valList, imagesValPath, labelsValPath);
-    await writeSplit(testList, imagesTestPath, labelsTestPath);
+    await writeSplit(trainList, imagesTrainPath, labelsTrainPath, 'train');
+    await writeSplit(valList, imagesValPath, labelsValPath, 'val');
+    await writeSplit(testList, imagesTestPath, labelsTestPath, 'test');
 
     // ---------- 7. Clean up temp pools ----------
     try {
@@ -645,6 +702,7 @@ const processAugmentationJob = async (job) => {
     });
 
     // ---------- 9. Build files manifest and counts from outputRoot ----------
+    // ✅ totalImages = unique image filenames (never train+val+test with overlapping copies)
     const imagesRoot = path.join(outputRoot, 'images');
     const labelRoot = path.join(outputRoot, 'labels');
     let totalImages = 0;
@@ -652,6 +710,7 @@ const processAugmentationJob = async (job) => {
     let valCount = 0;
     let testCount = 0;
     const filesManifest = [];
+    const countedImageNames = new Set();
 
     for (const split of ['train', 'val', 'test']) {
       const splitImagesDir = path.join(imagesRoot, split);
@@ -662,6 +721,16 @@ const processAugmentationJob = async (job) => {
         for (const entry of imageEntries) {
           if (!entry.isFile()) continue;
           const storedName = entry.name;
+          const nameKey = storedName.toLowerCase();
+          // Prefer first split we visit (train → val → test); skip overlapping copies
+          if (countedImageNames.has(nameKey)) {
+            console.warn('[AUGMENT-WORKER] Overlapping image copy ignored for counts', {
+              split,
+              storedName,
+            });
+            continue;
+          }
+          countedImageNames.add(nameKey);
           const fullPath = path.join(splitImagesDir, storedName);
           let stat;
           try {
@@ -756,6 +825,7 @@ const processAugmentationJob = async (job) => {
     try {
       const sharp = require('sharp');
       let imageDocsCreated = 0;
+      const indexedFilenames = new Set();
       for (const split of ['train', 'val', 'test']) {
         const splitImagesDir = path.join(imagesRoot, split);
         let imageEntries = [];
@@ -769,6 +839,10 @@ const processAugmentationJob = async (job) => {
           const storedName = entry.name;
           const ext = path.extname(storedName).toLowerCase();
           if (ext !== '.jpg' && ext !== '.jpeg' && ext !== '.png') continue;
+          const nameKey = storedName.toLowerCase();
+          // ✅ One Image doc per unique filename (train wins over val/test)
+          if (indexedFilenames.has(nameKey)) continue;
+          indexedFilenames.add(nameKey);
           const storedPath = `images/${split}/${storedName}`;
           const fullPath = path.join(outputRoot, storedPath);
           const labelRel = getLabelFilePath(storedPath);

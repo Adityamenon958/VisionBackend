@@ -1454,8 +1454,18 @@ const convertAnnotationsToYOLO = async (req, res) => {
     dataset.unlabeledImagesCount = 0;
     // ==============================================================
 
-    // ✅ Update dataset status to ready_to_train
+    // ✅ Update dataset status to ready_to_train and make it the active version for training
     dataset.status = 'ready_to_train';
+    dataset.isActive = true;
+    await Dataset.updateMany(
+      {
+        company: dataset.company,
+        project: dataset.project,
+        deletedAt: null,
+        _id: { $ne: dataset._id },
+      },
+      { $set: { isActive: false } }
+    );
 
     await dataset.save();
 
