@@ -582,7 +582,8 @@ const processInferenceJob = async (job) => {
               totalFiles: metadata.totalFiles || metadata.totalImages || 0,
               totalImages: metadata.totalImages || imageFiles.length || 0,
               totalVideos: metadata.totalVideos || videoCount || 0,
-              detectionsByClass: metadata.detectionsByClass || []
+              detectionsByClass: metadata.detectionsByClass || [],
+              corrosionStats: metadata.corrosionStats || null
             };
           } else {
             // Fallback: set basic results structure

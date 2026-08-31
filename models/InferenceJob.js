@@ -45,6 +45,19 @@ const inferenceJobSchema = new mongoose.Schema({
     index: true
   },
 
+  // Optional location label from the Android inspect app
+  regionName: {
+    type: String,
+    default: null
+  },
+
+  // Groups many region inspects into one ship/visit survey
+  surveyName: {
+    type: String,
+    default: null,
+    index: true
+  },
+
   // Source type: 'test_folder', 'custom_folder', or 'live_camera'
   sourceType: {
     type: String,
@@ -161,7 +174,11 @@ const inferenceJobSchema = new mongoose.Schema({
         type: Number,
         default: 0
       }
-    }]
+    }],
+    corrosionStats: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null
+    }
   },
 
   // Error information (if inference fails)
@@ -184,7 +201,7 @@ const inferenceJobSchema = new mongoose.Schema({
 });
 
 // ✅ Create compound indexes for faster queries
-inferenceJobSchema.index({ company: 1, project: 1 });
+inferenceJobSchema.index({ company: 1, project: 1, surveyName: 1 });
 inferenceJobSchema.index({ company: 1, project: 1, status: 1 }); // For filtering by status
 inferenceJobSchema.index({ modelId: 1 }); // For model-based queries
 inferenceJobSchema.index({ createdAt: -1 }); // For sorting by newest first

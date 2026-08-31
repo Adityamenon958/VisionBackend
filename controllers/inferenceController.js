@@ -73,6 +73,10 @@ const startBatchInference = async (req, res) => {
     const modelId = req.body.modelId;
     const datasetId = req.body.datasetId;
     const confidenceThreshold = req.body.confidenceThreshold;
+    const regionName =
+      typeof req.body.regionName === 'string' && req.body.regionName.trim()
+        ? req.body.regionName.trim()
+        : null;
     const uploadedImages = Array.isArray(req.files) ? req.files : [];
 
     // ✅ Determine inference type: dataset-based or custom upload
@@ -275,6 +279,7 @@ const startBatchInference = async (req, res) => {
       sourceType: sourceType,
       status: 'queued',
       createdBy: req.user ? req.user.id : null, // Store user ID for ownership verification
+      regionName: regionName || null,
       progress: {
         totalImages: totalImages,
         processedImages: 0,
@@ -936,6 +941,8 @@ const getInferenceStatus = async (req, res) => {
       status: inferenceJob.status,
       progress: inferenceJob.progress,
       sourceType: inferenceJob.sourceType,
+      regionName: inferenceJob.regionName || null,
+      surveyName: inferenceJob.surveyName || null,
       model: {
         modelId: inferenceJob.modelId?.modelId,
         modelVersion: inferenceJob.modelId?.modelVersion,
@@ -1139,20 +1146,43 @@ const getInferenceResults = async (req, res) => {
       ? (inferenceJob.results.defectCount || defectImages.length)
       : 0;
 
+    const corrosionStats = metadata?.corrosionStats || null;
+    const imageStatsByName = {};
+    const metaImages = metadata?.images || metadata?.files || [];
+    const basename = (name) => String(name || '').split(/[/\\]/).pop();
+    for (const img of metaImages) {
+      const name = img.filePath || img.filename;
+      if (!name) continue;
+      const stats = {
+        corrosionPercentTotal: img.corrosionPercentTotal,
+        byClass: img.byClass || [],
+        instanceCount: img.instanceCount ?? img.detectionCount,
+      };
+      imageStatsByName[name] = stats;
+      imageStatsByName[basename(name)] = stats;
+    }
+
+    const attachStats = (list) =>
+      list.map((item) => ({
+        ...item,
+        ...(imageStatsByName[item.filename] || imageStatsByName[basename(item.filename)] || {}),
+      }));
+
+    goodImages = attachStats(goodImages);
+    defectImages = attachStats(defectImages);
+    fallbackImages = attachStats(fallbackImages);
+
     // ✅ Apply filter if specified
     let filteredImages = [];
     if (hasNewStructure) {
-      // New structure: filter by good/defect
       if (filter === 'good') {
         filteredImages = goodImages;
       } else if (filter === 'defect') {
         filteredImages = defectImages;
       } else {
-        // 'all' - combine both arrays
         filteredImages = [...goodImages, ...defectImages];
       }
     } else {
-      // Old structure: return all from annotated folder (filtering not supported)
       filteredImages = fallbackImages;
     }
 
@@ -1160,6 +1190,8 @@ const getInferenceResults = async (req, res) => {
     const response = {
       inferenceId: inferenceJob.inferenceId,
       status: inferenceJob.status,
+      regionName: inferenceJob.regionName || null,
+      surveyName: inferenceJob.surveyName || null,
       filter: filter,
       results: {
         resultsPath: inferenceJob.results.resultsPath,
@@ -1170,11 +1202,11 @@ const getInferenceResults = async (req, res) => {
         totalDetections: inferenceJob.results.totalDetections || 0,
         averageConfidence: inferenceJob.results.averageConfidence || 0,
         detectionsByClass: inferenceJob.results.detectionsByClass || [],
-        // ✅ Images grouped by tag
+        corrosion: corrosionStats,
         annotatedImages: {
           good: goodImages,
           defect: defectImages,
-          all: filteredImages // Filtered results based on query param
+          all: filteredImages
         },
         // ✅ Videos (always from annotated folder, not categorized)
         videos: videos,
@@ -1650,6 +1682,8 @@ const listInferenceJobs = async (req, res) => {
         inferenceId: job.inferenceId,
         status: job.status,
         sourceType: job.sourceType,
+        regionName: job.regionName || null,
+        surveyName: job.surveyName || null,
         progress: job.progress,
         model: job.modelId ? {
           modelId: job.modelId.modelId,

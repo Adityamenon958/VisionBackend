@@ -1,11 +1,13 @@
 const mongoose = require('mongoose');
 const fs = require('fs').promises;
+const os = require('os');
 const path = require('path');
 const Image = require('../models/Image');
 const Annotation = require('../models/Annotation');
 const Category = require('../models/Category');
 const Dataset = require('../models/Dataset');
 const storageAdapter = require('../services/storageAdapter');
+const { segmentAtClick } = require('../services/samClickWorker');
 const { validateBbox } = require('../utils/bboxValidator');
 const { sendError, sendValidationError, sendNotFoundError } = require('../utils/errors');
 const {
@@ -892,6 +894,7 @@ const batchSaveAnnotations = async (req, res) => {
     // Process valid annotations in transaction
     let saved = 0;
     let skippedDuplicates = 0;
+    const createdDocs = [];
     const session = await mongoose.startSession();
     session.startTransaction();
 
@@ -929,6 +932,7 @@ const batchSaveAnnotations = async (req, res) => {
 
         if (duplicate) {
           skippedDuplicates++;
+          createdDocs.push(duplicate);
           continue;
         }
 
@@ -945,7 +949,7 @@ const batchSaveAnnotations = async (req, res) => {
           createdBy: SYSTEM_USER_ID
         });
         await annotation.save({ session });
-
+        createdDocs.push(annotation);
         saved++;
       }
 
@@ -961,7 +965,18 @@ const batchSaveAnnotations = async (req, res) => {
       saved,
       skippedDuplicates,
       failed: validationErrors.length,
-      errors: validationErrors
+      errors: validationErrors,
+      annotations: createdDocs.map((ann) => ({
+        id: ann._id,
+        imageId: ann.imageId,
+        bbox: ann.bbox,
+        polygon: ann.polygon,
+        categoryId: ann.categoryId,
+        categoryName: ann.categoryName,
+        state: ann.state,
+        createdAt: ann.createdAt,
+        updatedAt: ann.updatedAt,
+      })),
     });
 
   } catch (error) {
@@ -1051,12 +1066,11 @@ const importLabelsToAnnotations = async (req, res) => {
         const existingCount = await Annotation.countDocuments({
           datasetId,
           imageId: image._id,
-          deletedAt: null
         });
 
         if (!replace && existingCount > 0) {
           imageSummary.status = 'skipped';
-          imageSummary.reason = 'Image already has annotations; pass replace=true to replace from file';
+          imageSummary.reason = 'Image already has annotation history; pass replace=true to replace from file';
           details.push(imageSummary);
           skipped++;
           continue;
@@ -1494,6 +1508,99 @@ const convertAnnotationsToYOLO = async (req, res) => {
 };
 
 /**
+ * Resolve a dataset image to a local filesystem path SAM can open.
+ * Azure / missing-local files are copied into a temp file keyed by image id.
+ */
+async function resolveLocalImagePath(dataset, imageDoc) {
+  const datasetPath = storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version);
+  const fullPath = path.join(datasetPath, imageDoc.storedPath);
+  const resolvedPath = path.resolve(fullPath);
+  const resolvedDatasetPath = path.resolve(datasetPath);
+  if (!resolvedPath.startsWith(resolvedDatasetPath)) {
+    const err = new Error('Invalid file path');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  if (await storageAdapter.exists(fullPath)) {
+    if (storageAdapter.mode === 'local') {
+      return resolvedPath;
+    }
+  }
+
+  const buf = await storageAdapter.readFile(fullPath);
+  const ext = path.extname(imageDoc.storedPath || '') || '.jpg';
+  const tmpPath = path.join(os.tmpdir(), `vision-sam-${String(imageDoc._id)}${ext}`);
+  await fs.writeFile(tmpPath, buf);
+  return tmpPath;
+}
+
+/**
+ * POST /api/dataset/:datasetId/click-to-mask
+ *
+ * Click-prompt SAM: return a simplified polygon for one image click.
+ * Body: { imageId, x, y } with x,y normalized 0–1.
+ */
+const clickToMask = async (req, res) => {
+  try {
+    const { datasetId } = req.params;
+    const { imageId, x, y } = req.body || {};
+
+    if (!mongoose.Types.ObjectId.isValid(datasetId)) {
+      return sendNotFoundError(res, 'Dataset', datasetId);
+    }
+    if (!imageId || !mongoose.Types.ObjectId.isValid(imageId)) {
+      return sendValidationError(res, 'imageId', 'A valid imageId is required');
+    }
+
+    const nx = Number(x);
+    const ny = Number(y);
+    if (!Number.isFinite(nx) || !Number.isFinite(ny) || nx < 0 || nx > 1 || ny < 0 || ny > 1) {
+      return sendValidationError(res, 'point', 'x and y must be numbers in [0, 1]');
+    }
+
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return sendNotFoundError(res, 'Dataset', datasetId);
+    }
+
+    const imageDoc = await Image.findOne({ _id: imageId, datasetId: dataset._id });
+    if (!imageDoc) {
+      return sendNotFoundError(res, 'Image', imageId);
+    }
+
+    req.setTimeout(180000);
+    if (typeof res.setTimeout === 'function') {
+      res.setTimeout(180000);
+    }
+
+    const localPath = await resolveLocalImagePath(dataset, imageDoc);
+    const result = await segmentAtClick({ imagePath: localPath, x: nx, y: ny });
+
+    if (!result || !Array.isArray(result.polygon) || result.polygon.length < 3) {
+      return res.status(422).json({
+        error: 'No mask',
+        message: 'No object found at that click. Try the center of the defect.',
+      });
+    }
+
+    return res.status(200).json({
+      polygon: result.polygon,
+      pointCount: result.pointCount || result.polygon.length,
+    });
+  } catch (error) {
+    console.error('Error in click-to-mask:', error);
+    const status = error.statusCode || 500;
+    return sendError(
+      res,
+      status,
+      status === 403 ? 'Forbidden' : 'Internal Server Error',
+      error.message || 'Click-to-mask failed'
+    );
+  }
+};
+
+/**
  * GET /api/dataset/:datasetId/image-signed
  * 
  * Serve image file by path.
@@ -1589,6 +1696,7 @@ module.exports = {
   batchSaveAnnotations,
   importLabelsToAnnotations,
   convertAnnotationsToYOLO,
+  clickToMask,
   serveSignedImage
 };
 

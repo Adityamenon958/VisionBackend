@@ -36,6 +36,155 @@ except ImportError:
         sys.exit(1)
 
 
+try:
+    import cv2
+    import numpy as np
+except ImportError:
+    cv2 = None
+    np = None
+
+# High-contrast BGR colors so classes do not all look like rust.
+# Index 0/1/2 = first three defect classes (e.g. s1 / s2 / s3).
+CLASS_MASK_COLORS_BGR = [
+    (0, 255, 255),    # yellow
+    (255, 0, 255),    # magenta
+    (0, 220, 0),      # lime
+    (255, 90, 0),     # blue
+    (0, 140, 255),    # orange
+    (255, 255, 0),    # cyan
+    (180, 0, 255),    # violet
+    (0, 255, 160),    # mint
+]
+
+
+def class_mask_color_bgr(cls_idx):
+    return CLASS_MASK_COLORS_BGR[int(cls_idx) % len(CLASS_MASK_COLORS_BGR)]
+
+
+def save_mask_only_image(result, dest_path, alpha=0.45):
+    """
+    Overwrite YOLO's default plot: filled masks + outline + class label.
+    No bounding boxes. Each class id gets a different color.
+    """
+    if cv2 is None or np is None:
+        return False
+    orig = getattr(result, "orig_img", None)
+    if orig is None:
+        return False
+    img = orig.copy()
+    boxes = getattr(result, "boxes", None)
+    names = getattr(result, "names", None) or {}
+    mask_xy = []
+    if hasattr(result, "masks") and result.masks is not None and hasattr(result.masks, "xy"):
+        mask_xy = result.masks.xy or []
+
+    overlay = img.copy()
+    drawn = []
+    for idx, poly in enumerate(mask_xy):
+        if poly is None or len(poly) < 3:
+            continue
+        cls_idx = 0
+        conf_score = 0.0
+        if boxes is not None and idx < len(boxes):
+            cls_idx = int(boxes.cls[idx])
+            conf_score = float(boxes.conf[idx])
+        color = class_mask_color_bgr(cls_idx)
+        pts = np.asarray(poly, dtype=np.int32).reshape((-1, 1, 2))
+        cv2.fillPoly(overlay, [pts], color)
+        drawn.append((pts, color, cls_idx, conf_score))
+
+    if drawn:
+        cv2.addWeighted(overlay, alpha, img, 1.0 - alpha, 0, img)
+        for pts, color, cls_idx, conf_score in drawn:
+            cv2.polylines(img, [pts], True, color, 2, cv2.LINE_AA)
+            label = names.get(cls_idx, f"class_{cls_idx}")
+            text = f"{label} {conf_score:.2f}"
+            x = int(pts[:, 0, 0].min())
+            y = int(pts[:, 0, 1].min())
+            y_text = max(18, y - 6)
+            cv2.putText(img, text, (x, y_text), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(img, text, (x, y_text), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
+    dest_dir = os.path.dirname(dest_path)
+    if dest_dir:
+        os.makedirs(dest_dir, exist_ok=True)
+    return bool(cv2.imwrite(dest_path, img))
+
+
+def compute_corrosion_coverage(result, file_detections):
+    """
+    Union of instance masks as % of image pixels.
+    Overlaps count once in the total. Per-class percents can overlap each other.
+    """
+    if cv2 is None or np is None:
+        return None
+    orig = getattr(result, "orig_img", None)
+    if orig is None:
+        return None
+    h, w = orig.shape[:2]
+    if h <= 0 or w <= 0:
+        return None
+    pixel_count = float(h * w)
+    union = np.zeros((h, w), dtype=np.uint8)
+    class_masks = {}
+    class_counts = {}
+    class_confs = {}
+
+    mask_xy = []
+    if hasattr(result, "masks") and result.masks is not None and hasattr(result.masks, "xy"):
+        mask_xy = result.masks.xy or []
+
+    for idx, det in enumerate(file_detections):
+        cls_name = det.get("class") or "unknown"
+        class_counts[cls_name] = class_counts.get(cls_name, 0) + 1
+        class_confs.setdefault(cls_name, []).append(float(det.get("confidence") or 0))
+        poly = None
+        if idx < len(mask_xy) and mask_xy[idx] is not None and len(mask_xy[idx]) >= 3:
+            poly = mask_xy[idx]
+        elif det.get("polygon") is not None and len(det["polygon"]) >= 3:
+            poly = det["polygon"]
+        if poly is None:
+            continue
+        pts = np.array(poly, dtype=np.int32)
+        if pts.ndim != 2 or pts.shape[0] < 3:
+            continue
+        inst = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(inst, [pts], 1)
+        union = np.maximum(union, inst)
+        if cls_name not in class_masks:
+            class_masks[cls_name] = np.zeros((h, w), dtype=np.uint8)
+        class_masks[cls_name] = np.maximum(class_masks[cls_name], inst)
+
+    by_class = []
+    for cls_name, mask in class_masks.items():
+        confs = class_confs.get(cls_name) or []
+        by_class.append({
+            "class": cls_name,
+            "percent": round(float(mask.sum()) / pixel_count * 100.0, 4),
+            "count": int(class_counts.get(cls_name, 0)),
+            "avgConfidence": round(sum(confs) / len(confs), 4) if confs else 0.0,
+        })
+    # Include classes that had boxes but no usable polygon
+    for cls_name, count in class_counts.items():
+        if cls_name in class_masks:
+            continue
+        confs = class_confs.get(cls_name) or []
+        by_class.append({
+            "class": cls_name,
+            "percent": 0.0,
+            "count": int(count),
+            "avgConfidence": round(sum(confs) / len(confs), 4) if confs else 0.0,
+        })
+    by_class.sort(key=lambda x: x["percent"], reverse=True)
+    return {
+        "corrosionPercentTotal": round(float(union.sum()) / pixel_count * 100.0, 4),
+        "byClass": by_class,
+        "imageWidth": int(w),
+        "imageHeight": int(h),
+        "instanceCount": len(file_detections),
+    }
+
+
 def load_config(config_path):
     """Load inference configuration from JSON file."""
     try:
@@ -206,6 +355,11 @@ def run_inference(config):
         print(f"Running inference on: {source}")
         print(f"Output directory: {output}")
         print(f"Confidence threshold: {conf}")
+        if getattr(model, "names", None):
+            print("Mask colors (no bounding boxes):")
+            for cls_idx in sorted(model.names.keys()):
+                b, g, r = class_mask_color_bgr(cls_idx)
+                print(f"  {model.names[cls_idx]} → RGB({r},{g},{b})")
         if is_video_file or has_videos:
             print(f"🎬 Video files detected - will process videos")
         print("-" * 80)
@@ -215,15 +369,20 @@ def run_inference(config):
         # YOLO's predict() method can handle images, videos, and folders
         # For images: saves annotated images to {output}/annotated/
         # For videos: saves annotated videos to {output}/annotated/
-        results = model.predict(
+        # boxes=False: do not draw detection rectangles (ultralytics 8.1+)
+        predict_kwargs = dict(
             source=source_for_inference,
-            save=True,  # Save annotated images/videos
-            save_txt=False,  # Don't save label files (we only need images/videos)
-            conf=conf,  # Confidence threshold
-            project=output,  # Output project directory
-            name='annotated',  # Subdirectory name within project (creates output/annotated/)
-            exist_ok=True  # Overwrite if exists
+            save=True,
+            save_txt=False,
+            conf=conf,
+            project=output,
+            name='annotated',
+            exist_ok=True,
         )
+        try:
+            results = model.predict(**predict_kwargs, boxes=False)
+        except TypeError:
+            results = model.predict(**predict_kwargs)
 
         print("-" * 80)
         print("✅ Inference completed successfully!")
@@ -390,6 +549,21 @@ def run_inference(config):
                 'detections': file_detections,
                 'detectionCount': num_detections
             }
+            if file_type == 'image':
+                coverage = compute_corrosion_coverage(result, file_detections)
+                if coverage:
+                    file_info['corrosionPercentTotal'] = coverage['corrosionPercentTotal']
+                    file_info['byClass'] = coverage['byClass']
+                    file_info['imageWidth'] = coverage['imageWidth']
+                    file_info['imageHeight'] = coverage['imageHeight']
+                    file_info['instanceCount'] = coverage['instanceCount']
+                annotated_image_path = os.path.join(annotated_dir, saved_file_name)
+                if save_mask_only_image(result, annotated_image_path):
+                    print(f"🎨 Mask-only overlay saved: {saved_file_name}")
+                    sys.stdout.flush()
+                else:
+                    print(f"⚠️ Could not rewrite mask-only overlay for {saved_file_name}", file=sys.stderr)
+                    sys.stdout.flush()
             
             all_detections.append(file_info)
             
@@ -544,6 +718,36 @@ def run_inference(config):
                 'avgConfidence': avg_conf
             })
 
+        image_percents = [
+            img.get('corrosionPercentTotal')
+            for img in image_files
+            if isinstance(img.get('corrosionPercentTotal'), (int, float))
+        ]
+        class_totals = {}
+        for img in image_files:
+            for row in img.get('byClass') or []:
+                name = row.get('class')
+                if not name:
+                    continue
+                bucket = class_totals.setdefault(name, {'percentSum': 0.0, 'count': 0, 'n': 0})
+                bucket['percentSum'] += float(row.get('percent') or 0)
+                bucket['count'] += int(row.get('count') or 0)
+                bucket['n'] += 1
+        batch_by_class = [
+            {
+                'class': name,
+                'meanPercent': round(v['percentSum'] / v['n'], 4) if v['n'] else 0.0,
+                'count': v['count'],
+            }
+            for name, v in class_totals.items()
+        ]
+        batch_by_class.sort(key=lambda x: x['meanPercent'], reverse=True)
+        corrosion_stats = {
+            'imageCount': len(image_files),
+            'meanCorrosionPercent': round(sum(image_percents) / len(image_percents), 4) if image_percents else 0.0,
+            'byClass': batch_by_class,
+        }
+
         # ✅ Generate metadata JSON
         metadata = {
             'totalFiles': total_files,
@@ -552,6 +756,7 @@ def run_inference(config):
             'totalDetections': total_detections,
             'averageConfidence': average_confidence,
             'detectionsByClass': detections_by_class_list,
+            'corrosionStats': corrosion_stats,
             'files': all_detections,  # All files (images + videos)
             'images': image_files,  # Image files only
             'videos': video_files  # Video files only

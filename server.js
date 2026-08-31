@@ -7,6 +7,7 @@ const annotationRoutes = require('./routes/annotations');
 const trainingRoutes = require('./routes/training');
 const modelRoutes = require('./routes/models');
 const inferenceRoutes = require('./routes/inference');
+const mobileInspectRoutes = require('./routes/mobileInspect');
 const aiRoutes = require('./routes/ai');
 const dashboardRoutes = require('./routes/dashboard');
 const analyticsRoutes = require('./routes/analytics');
@@ -41,16 +42,16 @@ app.set('trust proxy', 1); // required for Azure behind proxy
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (allowedOrigin === '*' || (origin && origin === allowedOrigin)) {
-    res.header('Access-Control-Allow-Origin', allowedOrigin === '*' ? '*' : origin);
+  // Native apps (Expo / Android) often send no Origin header.
+  if (!origin || allowedOrigin === '*' || origin === allowedOrigin) {
+    res.header('Access-Control-Allow-Origin', !origin || allowedOrigin === '*' ? '*' : origin);
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-User-Id, X-User-Role, X-User-Company, X-User-Email, X-User-Company-Id');
     res.header('Access-Control-Allow-Credentials', 'true');
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     return next();
-  } else {
-    return res.status(403).json({ error: 'CORS origin denied' });
   }
+  return res.status(403).json({ error: 'CORS origin denied' });
 });
 
 // ✅ Health check endpoint (public, no authentication required)
@@ -106,6 +107,7 @@ app.use('/api/models', modelRoutes);
 // ✅ Register inference routes
 // All routes in routes/inference.js will be prefixed with /api/inference
 app.use('/api/inference', inferenceRoutes);
+app.use('/api/mobile-inspect', mobileInspectRoutes);
 
 // ✅ Register AI routes
 // All routes in routes/ai.js will be prefixed with /api/ai

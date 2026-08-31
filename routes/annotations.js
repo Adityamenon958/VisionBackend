@@ -14,6 +14,7 @@ const {
   batchSaveAnnotations,
   importLabelsToAnnotations,
   convertAnnotationsToYOLO,
+  clickToMask,
   serveSignedImage
 } = require('../controllers/annotationController');
 
@@ -66,6 +67,10 @@ router.post('/:datasetId/annotations/batch', authenticateToken, requirePermissio
 // Import existing YOLO .txt files into Annotation documents (edit pre-labeled data)
 // POST /api/dataset/:datasetId/import-labels-to-annotations
 router.post('/:datasetId/import-labels-to-annotations', authenticateToken, requirePermission('uploadDatasets'), importLabelsToAnnotations);
+
+// Click-to-mask (SAM): one click → polygon
+// POST /api/dataset/:datasetId/click-to-mask
+router.post('/:datasetId/click-to-mask', authenticateToken, requirePermission('uploadDatasets'), clickToMask);
 
 // YOLO Conversion
 // POST /api/dataset/:datasetId/convert-annotations-to-labels
