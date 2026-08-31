@@ -1615,6 +1615,108 @@ function parseYoloLabelContent(content) {
 }
 
 /**
+ * Resolve YOLO class IDs for a dataset (labels array, then on-disk .txt files).
+ * @returns {Promise<{ classIds: number[], classNames: string[] }>}
+ */
+async function resolveDetectedClassIds(dataset) {
+  let classIds = [];
+  let classNames = [];
+
+  if (dataset.labels && Array.isArray(dataset.labels) && dataset.labels.length > 0) {
+    for (const label of dataset.labels) {
+      const match = String(label).match(/^class_(\d+)$/);
+      if (match) {
+        const classId = parseInt(match[1], 10);
+        if (!isNaN(classId)) {
+          classIds.push(classId);
+          classNames.push(String(label));
+        }
+      }
+    }
+  }
+
+  if (classIds.length === 0 && dataset.storagePath && dataset.files && dataset.files.length > 0) {
+    const labelFiles = dataset.files.filter((f) => f.type === 'label' && f.storedPath);
+    const allClassIds = new Set();
+    for (const file of labelFiles) {
+      try {
+        const fullPath = path.join(dataset.storagePath, file.storedPath);
+        if (await storageAdapter.exists(fullPath)) {
+          const buffer = await storageAdapter.readFile(fullPath);
+          const ids = parseYoloLabelContent(buffer.toString('utf-8'));
+          ids.forEach((id) => allClassIds.add(id));
+        }
+      } catch {
+        // Skip unreadable files
+      }
+    }
+    if (allClassIds.size > 0) {
+      classIds = Array.from(allClassIds).sort((a, b) => a - b);
+      classNames = classIds.map((id) => `class_${id}`);
+    }
+  }
+
+  if (classIds.length === 0 && dataset.storagePath && fs.existsSync(dataset.storagePath)) {
+    const allClassIds = new Set();
+    for (const split of ['train', 'val', 'test']) {
+      const splitPath = path.join(dataset.storagePath, 'labels', split);
+      try {
+        const entries = await fsPromises.readdir(splitPath, { withFileTypes: true });
+        for (const ent of entries) {
+          if (ent.isFile() && ent.name.endsWith('.txt')) {
+            const content = await fsPromises.readFile(path.join(splitPath, ent.name), 'utf-8');
+            parseYoloLabelContent(content).forEach((id) => allClassIds.add(id));
+          }
+        }
+      } catch {
+        // Folder may not exist
+      }
+    }
+    if (allClassIds.size > 0) {
+      classIds = Array.from(allClassIds).sort((a, b) => a - b);
+      classNames = classIds.map((id) => `class_${id}`);
+    }
+  }
+
+  if (classIds.length === 0 && dataset.storagePath && fs.existsSync(dataset.storagePath)) {
+    const labelsRoot = path.join(dataset.storagePath, 'labels');
+    const allClassIds = new Set();
+    async function walkLabels(dir) {
+      try {
+        const entries = await fsPromises.readdir(dir, { withFileTypes: true });
+        for (const ent of entries) {
+          const fullPath = path.join(dir, ent.name);
+          if (ent.isDirectory()) {
+            await walkLabels(fullPath);
+          } else if (ent.isFile() && ent.name.endsWith('.txt')) {
+            const content = await fsPromises.readFile(fullPath, 'utf-8');
+            parseYoloLabelContent(content).forEach((id) => allClassIds.add(id));
+          }
+        }
+      } catch {
+        // Ignore
+      }
+    }
+    if (fs.existsSync(labelsRoot)) {
+      await walkLabels(labelsRoot);
+    }
+    if (allClassIds.size > 0) {
+      classIds = Array.from(allClassIds).sort((a, b) => a - b);
+      classNames = classIds.map((id) => `class_${id}`);
+    }
+  }
+
+  const sortedPairs = classIds
+    .map((id, idx) => ({ id, name: classNames[idx] }))
+    .sort((a, b) => a.id - b.id);
+
+  return {
+    classIds: sortedPairs.map((p) => p.id),
+    classNames: sortedPairs.map((p) => p.name)
+  };
+}
+
+/**
  * GET /api/dataset/:datasetId/detected-classes
  * 
  * Returns detected class IDs and default class names for labeled datasets.
@@ -1646,111 +1748,18 @@ const getDetectedClasses = async (req, res) => {
       });
     }
 
-    // Extract class IDs from dataset.labels array (populated by preprocessing)
-    // Labels are stored as ["class_0", "class_1", "class_2", ...]
-    let classIds = [];
-    let classNames = [];
+    const resolved = await resolveDetectedClassIds(dataset);
+    const sortedClassIds = resolved.classIds;
+    let sortedClassNames = resolved.classNames;
 
-    if (dataset.labels && Array.isArray(dataset.labels) && dataset.labels.length > 0) {
-      for (const label of dataset.labels) {
-        const match = label.match(/^class_(\d+)$/);
-        if (match) {
-          const classId = parseInt(match[1], 10);
-          if (!isNaN(classId)) {
-            classIds.push(classId);
-            classNames.push(label);
-          }
-        }
-      }
+    // Prefill with saved category names when remapping later
+    const existingCategoryDocs = await Category.getOrderedCategories(datasetId);
+    const existingCategories = existingCategoryDocs.length;
+    if (existingCategories > 0) {
+      sortedClassNames = sortedClassIds.map(
+        (id, i) => existingCategoryDocs[i]?.name || sortedClassNames[i] || `class_${id}`
+      );
     }
-
-    // Fallback: parse label files when dataset.labels is empty (e.g. before processing, or Azure where preprocessing skips label extraction)
-    if (classIds.length === 0 && dataset.storagePath && dataset.files && dataset.files.length > 0) {
-      const labelFiles = dataset.files.filter((f) => f.type === 'label' && f.storedPath);
-      const allClassIds = new Set();
-      for (const file of labelFiles) {
-        try {
-          const fullPath = path.join(dataset.storagePath, file.storedPath);
-          if (await storageAdapter.exists(fullPath)) {
-            const buffer = await storageAdapter.readFile(fullPath);
-            const content = buffer.toString('utf-8');
-            const ids = parseYoloLabelContent(content);
-            ids.forEach((id) => allClassIds.add(id));
-          }
-        } catch (e) {
-          // Skip unreadable files
-        }
-      }
-      if (allClassIds.size > 0) {
-        classIds = Array.from(allClassIds).sort((a, b) => a - b);
-        classNames = classIds.map((id) => `class_${id}`);
-      }
-    }
-
-    // Fallback 2: parse labels/train, labels/val, labels/test on disk (local storage)
-    if (classIds.length === 0 && dataset.storagePath && fs.existsSync(dataset.storagePath)) {
-      const allClassIds = new Set();
-      for (const split of ['train', 'val', 'test']) {
-        const splitPath = path.join(dataset.storagePath, 'labels', split);
-        try {
-          const entries = await fsPromises.readdir(splitPath, { withFileTypes: true });
-          for (const ent of entries) {
-            if (ent.isFile() && ent.name.endsWith('.txt')) {
-              const labelPath = path.join(splitPath, ent.name);
-              const content = await fsPromises.readFile(labelPath, 'utf-8');
-              const ids = parseYoloLabelContent(content);
-              ids.forEach((id) => allClassIds.add(id));
-            }
-          }
-        } catch {
-          // Folder may not exist
-        }
-      }
-      if (allClassIds.size > 0) {
-        classIds = Array.from(allClassIds).sort((a, b) => a - b);
-        classNames = classIds.map((id) => `class_${id}`);
-      }
-    }
-
-    // Fallback 3: recursively walk labels/ folder (handles labels/good/, labels/dataset/, etc. when dataset.files empty)
-    if (classIds.length === 0 && dataset.storagePath && fs.existsSync(dataset.storagePath)) {
-      const labelsRoot = path.join(dataset.storagePath, 'labels');
-      const allClassIds = new Set();
-      async function walkLabels(dir) {
-        try {
-          const entries = await fsPromises.readdir(dir, { withFileTypes: true });
-          for (const ent of entries) {
-            const fullPath = path.join(dir, ent.name);
-            if (ent.isDirectory()) {
-              await walkLabels(fullPath);
-            } else if (ent.isFile() && ent.name.endsWith('.txt')) {
-              const content = await fsPromises.readFile(fullPath, 'utf-8');
-              const ids = parseYoloLabelContent(content);
-              ids.forEach((id) => allClassIds.add(id));
-            }
-          }
-        } catch {
-          // Ignore
-        }
-      }
-      if (fs.existsSync(labelsRoot)) {
-        await walkLabels(labelsRoot);
-      }
-      if (allClassIds.size > 0) {
-        classIds = Array.from(allClassIds).sort((a, b) => a - b);
-        classNames = classIds.map((id) => `class_${id}`);
-      }
-    }
-
-    // Sort class IDs to ensure consistent order
-    const sortedPairs = classIds.map((id, idx) => ({ id, name: classNames[idx] }))
-      .sort((a, b) => a.id - b.id);
-    
-    const sortedClassIds = sortedPairs.map(p => p.id);
-    const sortedClassNames = sortedPairs.map(p => p.name);
-
-    // Check if categories already exist
-    const existingCategories = await Category.countDocuments({ datasetId });
 
     // Debug: log when no classes found (helps diagnose empty detected-classes)
     if (sortedClassIds.length === 0) {
@@ -1920,31 +1929,31 @@ const createCategoriesFromClasses = async (req, res) => {
     }
 
     // Check if categories already exist
-    const existingCategories = await Category.countDocuments({ datasetId });
-    if (existingCategories > 0) {
-      return res.status(400).json({
-        error: 'Categories already exist for this dataset',
-        message: 'Cannot create categories - they already exist'
-      });
+    const existingOrdered = await Category.getOrderedCategories(datasetId);
+
+    const resolved = await resolveDetectedClassIds(dataset);
+    let detectedClassIds = resolved.classIds;
+
+    // If labels were already renamed (not class_N), still accept mapping keys that are YOLO ids
+    if (detectedClassIds.length === 0) {
+      detectedClassIds = Object.keys(classMappings)
+        .map((id) => parseInt(id, 10))
+        .filter((id) => !isNaN(id) && id >= 0)
+        .sort((a, b) => a - b);
     }
 
-    // Extract class IDs from dataset.labels to validate
-    const detectedClassIds = [];
-    if (dataset.labels && Array.isArray(dataset.labels)) {
-      for (const label of dataset.labels) {
-        const match = label.match(/^class_(\d+)$/);
-        if (match) {
-          const classId = parseInt(match[1], 10);
-          if (!isNaN(classId)) {
-            detectedClassIds.push(classId);
-          }
-        }
-      }
+    if (detectedClassIds.length === 0) {
+      return res.status(400).json({
+        error: 'Validation Error',
+        message: 'No class IDs found on this dataset. Re-run preprocessing or check label files.'
+      });
     }
 
     // Validate that all provided class IDs exist in detected classes
     const providedClassIds = Object.keys(classMappings).map(id => parseInt(id, 10));
-    const invalidClassIds = providedClassIds.filter(id => !detectedClassIds.includes(id));
+    const invalidClassIds = providedClassIds.filter(
+      (id) => !Number.isNaN(id) && !detectedClassIds.includes(id)
+    );
     
     if (invalidClassIds.length > 0) {
       return res.status(400).json({
@@ -1970,18 +1979,20 @@ const createCategoriesFromClasses = async (req, res) => {
     // System user ID (same as used in categoryController)
     const SYSTEM_USER_ID = new mongoose.Types.ObjectId('000000000000000000000000');
 
-    // Create categories in order (sorted by class ID)
-    const sortedClassIds = detectedClassIds.sort((a, b) => a - b);
+    // Create or update categories in order (sorted by class ID)
+    const sortedClassIds = [...detectedClassIds].sort((a, b) => a - b);
     const createdCategories = [];
+    let createdCount = 0;
+    let updatedCount = 0;
 
     for (let i = 0; i < sortedClassIds.length; i++) {
       const classId = sortedClassIds[i];
       const providedName = classMappings[classId.toString()];
       
-      // Use provided name if available, otherwise use class_X
+      // Use provided name if available, otherwise keep existing / class_X
       const categoryName = providedName && providedName.trim() 
         ? providedName.trim() 
-        : `class_${classId}`;
+        : (existingOrdered[i]?.name || `class_${classId}`);
 
       // Check for duplicate names within this batch
       const isDuplicate = createdCategories.some(cat => cat.name === categoryName);
@@ -1992,16 +2003,26 @@ const createCategoriesFromClasses = async (req, res) => {
         });
       }
 
-      const category = new Category({
-        datasetId: dataset._id,
-        name: categoryName,
-        color: colorPalette[i % colorPalette.length],
-        description: `Imported from class ID ${classId}`,
-        order: i,
-        createdBy: SYSTEM_USER_ID
-      });
+      let category = existingOrdered[i] || null;
+      if (category) {
+        category.name = categoryName;
+        category.description = `Imported from class ID ${classId}`;
+        category.order = i;
+        await category.save();
+        updatedCount += 1;
+      } else {
+        category = new Category({
+          datasetId: dataset._id,
+          name: categoryName,
+          color: colorPalette[i % colorPalette.length],
+          description: `Imported from class ID ${classId}`,
+          order: i,
+          createdBy: SYSTEM_USER_ID
+        });
+        await category.save();
+        createdCount += 1;
+      }
 
-      await category.save();
       createdCategories.push({
         id: category._id,
         name: category.name,
@@ -2031,8 +2052,11 @@ const createCategoriesFromClasses = async (req, res) => {
     await fsPromises.writeFile(classMappingPath, JSON.stringify(classMapping, null, 2), 'utf8');
 
     return res.status(200).json({
-      message: 'Categories created from class IDs successfully',
-      createdCount: createdCategories.length,
+      message: updatedCount > 0 && createdCount === 0
+        ? 'Class names updated successfully'
+        : 'Categories created from class IDs successfully',
+      createdCount,
+      updatedCount,
       classes: sortedClassIds,
       categories: createdCategories
     });
@@ -2516,6 +2540,204 @@ const downloadDataset = async (req, res) => {
   }
 };
 
+/**
+ * Classify one YOLO label line.
+ * Detection: class_id cx cy w h (5 tokens)
+ * Segmentation: class_id x1 y1 ... xn yn (odd count >= 7)
+ */
+function classifyYoloLabelLine(line) {
+  const trimmed = String(line || '').trim();
+  if (!trimmed || trimmed.startsWith('#')) return null;
+  const parts = trimmed.split(/\s+/);
+  const classId = parseInt(parts[0], 10);
+  if (Number.isNaN(classId) || classId < 0) {
+    return { kind: 'invalid', classId: null };
+  }
+  if (parts.length === 5) return { kind: 'detection', classId };
+  if (parts.length >= 7 && parts.length % 2 === 1) return { kind: 'segmentation', classId };
+  return { kind: 'invalid', classId };
+}
+
+async function collectLabelFilePaths(dataset) {
+  const paths = [];
+  const seen = new Set();
+  const addPath = (filePath) => {
+    if (!filePath) return;
+    const normalized = path.normalize(filePath);
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    paths.push(normalized);
+  };
+
+  if (Array.isArray(dataset.files)) {
+    for (const file of dataset.files) {
+      if (file.type !== 'label' || !file.storedPath) continue;
+      const fullPath = path.isAbsolute(file.storedPath)
+        ? file.storedPath
+        : path.join(dataset.storagePath || '', file.storedPath);
+      addPath(fullPath);
+    }
+  }
+
+  if (dataset.storagePath && fs.existsSync(dataset.storagePath)) {
+    const labelsRoot = path.join(dataset.storagePath, 'labels');
+    const walk = async (dir) => {
+      let entries;
+      try {
+        entries = await fsPromises.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const ent of entries) {
+        const full = path.join(dir, ent.name);
+        if (ent.isDirectory()) {
+          await walk(full);
+        } else if (ent.isFile() && ent.name.toLowerCase().endsWith('.txt')) {
+          addPath(full);
+        }
+      }
+    };
+    if (fs.existsSync(labelsRoot)) {
+      await walk(labelsRoot);
+    }
+  }
+
+  return paths;
+}
+
+/**
+ * GET /api/dataset/:datasetId/type-check
+ *
+ * Scan YOLO .txt labels on disk and report detection vs segmentation vs unlabeled/mixed.
+ * Used from Manage Datasets so Roboflow / prelabelled uploads can be checked before training.
+ */
+const checkDatasetType = async (req, res) => {
+  try {
+    const { datasetId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(datasetId)) {
+      return res.status(404).json({
+        error: 'Dataset not found',
+        datasetId,
+      });
+    }
+
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return res.status(404).json({
+        error: 'Dataset not found',
+        datasetId,
+      });
+    }
+
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, dataset.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this dataset',
+        });
+      }
+    }
+
+    const imageFileCount = Array.isArray(dataset.files)
+      ? dataset.files.filter((f) => f.type === 'image').length
+      : 0;
+
+    const labelPaths = await collectLabelFilePaths(dataset);
+    const classIds = new Set();
+    let detectionLines = 0;
+    let segmentationLines = 0;
+    let invalidLines = 0;
+    let emptyLabelFiles = 0;
+    let labeledFiles = 0;
+    let unreadableFiles = 0;
+
+    for (const labelPath of labelPaths) {
+      try {
+        if (!(await storageAdapter.exists(labelPath))) {
+          unreadableFiles += 1;
+          continue;
+        }
+        const buffer = await storageAdapter.readFile(labelPath);
+        const content = buffer.toString('utf-8');
+        const lines = content.split(/\r?\n/);
+        let fileHasLabels = false;
+        for (const line of lines) {
+          const classified = classifyYoloLabelLine(line);
+          if (!classified) continue;
+          fileHasLabels = true;
+          if (classified.classId !== null) classIds.add(classified.classId);
+          if (classified.kind === 'detection') detectionLines += 1;
+          else if (classified.kind === 'segmentation') segmentationLines += 1;
+          else invalidLines += 1;
+        }
+        if (fileHasLabels) labeledFiles += 1;
+        else emptyLabelFiles += 1;
+      } catch {
+        unreadableFiles += 1;
+      }
+    }
+
+    const hasDetection = detectionLines > 0;
+    const hasSegmentation = segmentationLines > 0;
+    let type = 'unlabeled';
+    let summary = 'Unlabeled — no YOLO objects found in .txt files';
+    let recommendation = 'Upload labelled data, or annotate images (Box for YOLO / RF-DETR, Polygon for YOLO_SEG).';
+
+    if (hasDetection && hasSegmentation) {
+      type = 'mixed';
+      summary = 'Mixed — both bounding boxes and segmentation polygons';
+      recommendation = 'YOLO_SEG training needs polygon lines only. Split or convert bbox-only files before training segmentation.';
+    } else if (hasSegmentation) {
+      type = 'segmentation';
+      summary = 'Segmentation — YOLO polygon labels (class x1 y1 ... xn yn)';
+      recommendation = 'Train with YOLO_SEG. Do not use YOLO or RF-DETR on this version.';
+    } else if (hasDetection) {
+      type = 'detection';
+      summary = 'Detection — YOLO bounding boxes (class cx cy w h)';
+      recommendation = 'Train with YOLO or RF-DETR. Polygon / YOLO_SEG training will fail on these labels.';
+    } else if (labelPaths.length > 0) {
+      summary = 'Label files exist but contain no valid YOLO objects';
+      recommendation = 'Check that .txt files use YOLO format (5 numbers for boxes, or class + polygon points).';
+    }
+
+    if (invalidLines > 0) {
+      recommendation += ` ${invalidLines} invalid line(s) were skipped.`;
+    }
+
+    const sortedClassIds = Array.from(classIds).sort((a, b) => a - b);
+
+    return res.status(200).json({
+      datasetId: dataset._id,
+      version: dataset.version,
+      type,
+      summary,
+      recommendation,
+      counts: {
+        imageFiles: imageFileCount || dataset.totalImages || 0,
+        labelFiles: labelPaths.length,
+        labeledFiles,
+        emptyLabelFiles,
+        unreadableFiles,
+        detectionLines,
+        segmentationLines,
+        invalidLines,
+        uniqueClasses: sortedClassIds.length,
+      },
+      classIds: sortedClassIds,
+      recordedDatasetType: dataset.datasetType ?? null,
+      recordedLabelSource: getLabelSource(dataset),
+    });
+  } catch (error) {
+    console.error('[checkDatasetType] Error:', error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   uploadDataset,
   listDatasets,
@@ -2535,5 +2757,6 @@ module.exports = {
   createCategoriesFromClasses,
   startAugmentation,
   cancelAugmentation,
-  downloadDataset
+  downloadDataset,
+  checkDatasetType
 };

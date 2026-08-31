@@ -386,6 +386,7 @@ const processAugmentationJob = async (job) => {
       datasetType: 'labeled',
       annotationStatus: null,
       labelSource,
+      labels: Array.isArray(originalDataset.labels) ? originalDataset.labels : [],
       backupDatasetId: originalDataset._id,
       augmentationMultiplier: augmentationMultiplier || null,
       augmentedFromVersion: originalDataset.version,

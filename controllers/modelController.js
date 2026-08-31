@@ -6,6 +6,7 @@ const path = require('path');
 const storageAdapter = require('../services/storageAdapter');
 const onnxConverter = require('../services/onnxConverter');
 const { getClassNamesForTrainedModel } = require('../services/yoloClassNamesService');
+const { hydrateAndPersistModelMetrics } = require('../utils/yoloTrainingMetrics');
 
 /**
  * Model Controller - Handles model registry operations
@@ -56,16 +57,17 @@ const listModels = async (req, res) => {
     const models = await Model.find({ company, project })
       .collation({ locale: 'en', strength: 2 })
       .sort({ createdAt: -1 }) // Newest first
-      .select('modelId modelVersion modelType status metrics insights createdAt datasetVersion datasetId')
+      .select('modelId modelVersion modelType status metrics insights createdAt datasetVersion datasetId storagePath')
       .lean();
 
-    // ✅ Format response with all metrics and insights
-    const formattedModels = models.map(model => ({
+    const formattedModels = await Promise.all(models.map(async (model) => {
+      const metrics = await hydrateAndPersistModelMetrics(Model, model);
+      return {
       modelId: model.modelId,
       modelVersion: model.modelVersion,
       modelType: model.modelType,
       status: model.status || 'completed',
-      metrics: model.metrics || {
+      metrics: metrics || {
         bestEpoch: null,
         bestLoss: null,
         precision: null,
@@ -84,6 +86,7 @@ const listModels = async (req, res) => {
       createdAt: model.createdAt,
       datasetVersion: model.datasetVersion,
       datasetId: model.datasetId ? model.datasetId.toString() : null
+      };
     }));
 
     return res.status(200).json({

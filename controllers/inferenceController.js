@@ -3,6 +3,10 @@ const InferenceJob = require('../models/InferenceJob');
 const Model = require('../models/Model');
 const Dataset = require('../models/Dataset');
 const { getClassNamesForTrainedModel } = require('../services/yoloClassNamesService');
+const {
+  hydrateAndPersistModelMetrics,
+  formatModelNameWithMap,
+} = require('../utils/yoloTrainingMetrics');
 const { resolveModelCheckpointPath } = require('../services/resolveModelCheckpoint');
 const { inferenceQueue } = require('../queue');
 const storageAdapter = require('../services/storageAdapter');
@@ -1559,19 +1563,18 @@ const listAvailableModels = async (req, res) => {
     // ✅ Format response (classNames: ordered label strings matching inference detection `class`)
     const formattedModels = await Promise.all(
       validModels.map(async (model) => {
-        const mAP50 = model.metrics?.mAP50 || 0;
-        const mAP50Percent = (mAP50 * 100).toFixed(0);
+        const metrics = await hydrateAndPersistModelMetrics(Model, model);
         const classNames = await getClassNamesForTrainedModel(model);
 
         return {
           modelId: model.modelId,
           modelVersion: model.modelVersion,
           modelType: model.modelType,
-          name: `${model.modelType} - ${model.modelVersion} (mAP: ${mAP50Percent}%)`,
+          name: formatModelNameWithMap(model.modelType, model.modelVersion, metrics?.mAP50),
           metrics: {
-            mAP50: model.metrics?.mAP50,
-            precision: model.metrics?.precision,
-            recall: model.metrics?.recall
+            mAP50: metrics?.mAP50,
+            precision: metrics?.precision,
+            recall: metrics?.recall
           },
           createdAt: model.createdAt,
           classNames

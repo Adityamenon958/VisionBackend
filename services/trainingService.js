@@ -236,6 +236,26 @@ function canRetryJob(status) {
   return status === 'failed' || status === 'cancelled';
 }
 
+/**
+ * Find a job that is actually live (queued/running with a recent heartbeat).
+ * Ignores months-old leftover "running"/"queued" rows in Mongo.
+ */
+const LIVE_TRAINING_WINDOW_MS = 10 * 60 * 1000;
+
+async function findLiveTrainingJob() {
+  const cutoff = new Date(Date.now() - LIVE_TRAINING_WINDOW_MS);
+  return TrainingJob.findOne({
+    status: { $in: ['queued', 'running'] },
+    $or: [
+      { createdAt: { $gte: cutoff } },
+      { updatedAt: { $gte: cutoff } }
+    ]
+  })
+    .select('jobId status company project datasetId modelType modelSize requestedModelVersion')
+    .sort({ updatedAt: -1 })
+    .lean();
+}
+
 module.exports = {
   resolveActiveDataset,
   validateDatasetForTraining,
@@ -246,6 +266,7 @@ module.exports = {
   computeProgressPercentWithBatch,
   validateHyperparameters,
   canCancelJob,
-  canRetryJob
+  canRetryJob,
+  findLiveTrainingJob
 };
 

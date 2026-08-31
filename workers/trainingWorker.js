@@ -51,6 +51,13 @@ const Model = require('../models/Model');
 const storageAdapter = require('../services/storageAdapter');
 const trainingService = require('../services/trainingService');
 const {
+  parseYoloAllMetricsLine,
+  readBestMetricsFromResultsCsv,
+  resultsCsvPath,
+  buildFinalMetrics,
+  formatMetric,
+} = require('../utils/yoloTrainingMetrics');
+const {
   ingestTrainingStreamChunk,
   flushTrainingStreamBuffer,
   appendTrainingLog: appendNormalizedTrainingLog,
@@ -573,19 +580,29 @@ async function generateRfdetrTrainingConfig(
 function parseLogLine(logLine) {
   const metrics = {};
 
-  // ✅ Parse loss from YOLO epoch line: "1/20 0.438G 2.573 28.79 1.434"
-  // Format: epoch, gpu_mem (can be decimal like 0.438G), box_loss, cls_loss, dfl_loss
-  // This is the MOST SPECIFIC pattern - check this FIRST to avoid false matches
-  const yoloEpochLineMatch = logLine.match(/\s+(\d+)\/(\d+)\s+[\d.]+G\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
-  if (yoloEpochLineMatch) {
-    metrics.currentEpoch = parseInt(yoloEpochLineMatch[1]);
-    metrics.totalEpochs = parseInt(yoloEpochLineMatch[2]);
-    // Use box_loss as currentLoss (or could combine: box_loss + cls_loss + dfl_loss)
-    const boxLoss = parseFloat(yoloEpochLineMatch[3]);
-    const clsLoss = parseFloat(yoloEpochLineMatch[4]);
-    const dflLoss = parseFloat(yoloEpochLineMatch[5]);
-    metrics.currentLoss = boxLoss + clsLoss + dflLoss; // Total loss
+  // YOLO_SEG epoch: "98/100 1.87G box_loss seg_loss cls_loss dfl_loss sem_loss instances size"
+  const yoloSegEpochMatch = logLine.match(
+    /(\d+)\/(\d+)\s+[\d.]+G\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)\s+(\d+)/
+  );
+  if (yoloSegEpochMatch) {
+    metrics.currentEpoch = parseInt(yoloSegEpochMatch[1], 10);
+    metrics.totalEpochs = parseInt(yoloSegEpochMatch[2], 10);
+    const boxLoss = parseFloat(yoloSegEpochMatch[3]);
+    const segLoss = parseFloat(yoloSegEpochMatch[4]);
+    const clsLoss = parseFloat(yoloSegEpochMatch[5]);
+    const dflLoss = parseFloat(yoloSegEpochMatch[6]);
+    metrics.currentLoss = boxLoss + segLoss + clsLoss + dflLoss;
   } else {
+    // YOLO detect epoch: "1/20 0.438G box_loss cls_loss dfl_loss"
+    const yoloEpochLineMatch = logLine.match(/\s*(\d+)\/(\d+)\s+[\d.]+G\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
+    if (yoloEpochLineMatch) {
+      metrics.currentEpoch = parseInt(yoloEpochLineMatch[1], 10);
+      metrics.totalEpochs = parseInt(yoloEpochLineMatch[2], 10);
+      const boxLoss = parseFloat(yoloEpochLineMatch[3]);
+      const clsLoss = parseFloat(yoloEpochLineMatch[4]);
+      const dflLoss = parseFloat(yoloEpochLineMatch[5]);
+      metrics.currentLoss = boxLoss + clsLoss + dflLoss;
+    } else {
     // ✅ RF-DETR / PyTorch Lightning tqdm: "Epoch 0: 66%|...| 142/216 [..., train/lr=0.0001]"
     const ptlEpochColonMatch = logLine.match(/Epoch\s+(\d+)\s*:/i);
     if (ptlEpochColonMatch) {
@@ -612,6 +629,7 @@ function parseLogLine(logLine) {
         metrics.totalEpochs = parseInt(epochMatch[2]);
       }
     }
+    }
   }
 
   // ✅ PyTorch Lightning: train/loss=0.42, val/loss=0.38
@@ -632,38 +650,36 @@ function parseLogLine(logLine) {
     metrics.currentLR = parseFloat(lrMatch[1]);
   }
 
-  // ✅ Parse metrics from YOLO validation table: "all 34 55 0.501 0.545 0.461 0.216"
-  // Format: class_name, images, instances, precision, recall, mAP50, mAP50-95
-  // This is the most reliable format for metrics
-  const yoloMetricsMatch = logLine.match(/^\s+all\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
-  if (yoloMetricsMatch) {
-    metrics.precision = parseFloat(yoloMetricsMatch[3]);
-    metrics.recall = parseFloat(yoloMetricsMatch[4]);
-    metrics.mAP50 = parseFloat(yoloMetricsMatch[5]);
-    metrics.mAP50_95 = parseFloat(yoloMetricsMatch[6]);
+  // ✅ YOLO val table: detect (6 numbers) or YOLO_SEG (10 numbers = box + mask)
+  const yoloAll = parseYoloAllMetricsLine(logLine);
+  if (yoloAll) {
+    metrics.precision = yoloAll.precision;
+    metrics.recall = yoloAll.recall;
+    metrics.mAP50 = yoloAll.mAP50;
+    metrics.mAP50_95 = yoloAll.mAP50_95;
   }
 
   // ✅ Fallback: Parse mAP50: "mAP50=0.72" or "mAP@0.5=0.72"
   const map50Match = logLine.match(/mAP(?:@|50)[:\s=]+([\d.]+)/i);
-  if (map50Match && !metrics.mAP50) {
+  if (map50Match && metrics.mAP50 === undefined) {
     metrics.mAP50 = parseFloat(map50Match[1]);
   }
 
   // ✅ Fallback: Parse mAP50-95: "mAP50-95=0.58" or "mAP@0.5:0.95=0.58"
   const map50_95Match = logLine.match(/mAP(?:50-95|@0\.5:0\.95)[:\s=]+([\d.]+)/i);
-  if (map50_95Match && !metrics.mAP50_95) {
+  if (map50_95Match && metrics.mAP50_95 === undefined) {
     metrics.mAP50_95 = parseFloat(map50_95Match[1]);
   }
 
   // ✅ Fallback: Parse precision: "precision=0.85"
   const precisionMatch = logLine.match(/precision[:\s=]+([\d.]+)/i);
-  if (precisionMatch && !metrics.precision) {
+  if (precisionMatch && metrics.precision === undefined) {
     metrics.precision = parseFloat(precisionMatch[1]);
   }
 
   // ✅ Fallback: Parse recall: "recall=0.78"
   const recallMatch = logLine.match(/recall[:\s=]+([\d.]+)/i);
-  if (recallMatch && !metrics.recall) {
+  if (recallMatch && metrics.recall === undefined) {
     metrics.recall = parseFloat(recallMatch[1]);
   }
 
@@ -692,6 +708,7 @@ const processTrainingJob = async (job) => {
 
   let trainingJob = null;
   let pythonProcess = null;
+  let isSaving = false;
 
   try {
     // ✅ Load training job from MongoDB
@@ -901,7 +918,7 @@ const processTrainingJob = async (job) => {
     const stderrStream = { buffer: '' };
     let lastSaveTime = Date.now();
     const SAVE_INTERVAL = 5000; // Save to DB every 5 seconds
-    let isSaving = false; // Flag to prevent parallel saves
+    isSaving = false; // Flag to prevent parallel saves
     
     // ✅ Track epoch timing for ETA calculation
     const trainingStartTime = Date.now();
@@ -1083,112 +1100,130 @@ const processTrainingJob = async (job) => {
       });
     });
 
-    // ✅ Handle process completion
-    pythonProcess.on('close', async (code) => {
-      flushTrainingStreamBuffer(stdoutStream, handleTrainingOutputLine);
-      flushTrainingStreamBuffer(stderrStream, (line) => {
-        appendTrainingLog(trainingJob.logs, `[ERROR] ${line}`, persistedLogIndexRef, {
-          alreadyNormalized: true
-        });
-      });
-
-      while (isSaving) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+    // ✅ Hold this Bull job until Python exits.
+    // Previously we returned after spawn(), so concurrency=1 still started job B on the GPU.
+    let cancelledDuringRun = false;
+    const cancellationCheck = setInterval(async () => {
+      try {
+        const updatedJob = await TrainingJob.findOne({ jobId }).select('status').lean();
+        if (updatedJob && updatedJob.status === 'cancelled') {
+          cancelledDuringRun = true;
+          console.log(`⚠️ Job ${jobId} cancelled, terminating process...`);
+          if (pythonProcess && !pythonProcess.killed) {
+            pythonProcess.kill('SIGTERM');
+          }
+          clearInterval(cancellationCheck);
+        }
+      } catch (err) {
+        console.warn(`[Training ${jobId}] cancel check failed:`, err.message);
       }
+    }, 2000);
+
+    const exitCode = await new Promise((resolve) => {
+      pythonProcess.once('close', (code) => resolve(code));
+      pythonProcess.once('error', (err) => {
+        console.error(`❌ Training process error for ${jobId}:`, err);
+        resolve(1);
+      });
+    });
+
+    clearInterval(cancellationCheck);
+
+    flushTrainingStreamBuffer(stdoutStream, handleTrainingOutputLine);
+    flushTrainingStreamBuffer(stderrStream, (line) => {
+      appendTrainingLog(trainingJob.logs, `[ERROR] ${line}`, persistedLogIndexRef, {
+        alreadyNormalized: true
+      });
+    });
+
+    while (isSaving) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    await saveTrainingJob();
+
+    const latestStatus = await TrainingJob.findOne({ jobId }).select('status').lean();
+    if (cancelledDuringRun || latestStatus?.status === 'cancelled') {
+      console.log(`⚠️ Training job ${jobId} cancelled`);
+      await TrainingJob.updateOne(
+        { _id: trainingJob._id },
+        {
+          $set: {
+            status: 'cancelled',
+            cancelledAt: new Date()
+          }
+        }
+      );
+      return;
+    }
+
+    if (exitCode === 0) {
+      console.log(`✅ Training job ${jobId} completed successfully`);
+
+      const csvMetrics = readBestMetricsFromResultsCsv(resultsCsvPath(modelStoragePath));
+      const hydrated = buildFinalMetrics(
+        trainingJob.metrics || {},
+        trainingJob.progress || {},
+        csvMetrics
+      );
+      if (hydrated.mAP50 !== undefined) trainingJob.metrics.mAP50 = hydrated.mAP50;
+      if (hydrated.mAP50_95 !== undefined) trainingJob.metrics.mAP50_95 = hydrated.mAP50_95;
+      if (hydrated.precision !== undefined) trainingJob.metrics.precision = hydrated.precision;
+      if (hydrated.recall !== undefined) trainingJob.metrics.recall = hydrated.recall;
+      if (hydrated.bestEpoch !== undefined) trainingJob.metrics.bestEpoch = hydrated.bestEpoch;
+      if (hydrated.bestLoss !== undefined) trainingJob.metrics.bestLoss = hydrated.bestLoss;
+
+      const completionTime = Date.now();
+      const totalDurationMs = completionTime - trainingStartTime;
+      const totalMinutes = Math.floor(totalDurationMs / 1000 / 60);
+      const totalSeconds = Math.floor((totalDurationMs / 1000) % 60);
+
+      const completionMsg = `\n${'='.repeat(80)}\n` +
+        `✅ TRAINING COMPLETED SUCCESSFULLY!\n` +
+        `${'='.repeat(80)}\n` +
+        `Completed at: ${new Date().toLocaleString()}\n` +
+        `Total duration: ${totalMinutes}m ${totalSeconds}s\n` +
+        `Total epochs: ${trainingJob.progress.totalEpochs || hyperparameters.epochs}\n` +
+        `Best epoch: ${trainingJob.metrics.bestEpoch || trainingJob.progress.currentEpoch || 'N/A'}\n` +
+        `\nFinal Metrics:\n` +
+        `  📊 mAP50: ${formatMetric(trainingJob.metrics.mAP50)}\n` +
+        `  📊 mAP50-95: ${formatMetric(trainingJob.metrics.mAP50_95)}\n` +
+        `  🎯 Precision: ${formatMetric(trainingJob.metrics.precision)}\n` +
+        `  🎯 Recall: ${formatMetric(trainingJob.metrics.recall)}\n` +
+        `  📉 Best Loss: ${formatMetric(trainingJob.metrics.bestLoss || trainingJob.metrics.currentLoss)}\n` +
+        `\n${'='.repeat(80)}\n` +
+        `Model is being saved and registered...\n` +
+        `${'='.repeat(80)}\n`;
+
+      appendTrainingLogText(
+        trainingJob.logs,
+        completionMsg,
+        persistedLogIndexRef,
+        MAX_STORED_TRAINING_LOG_LINES
+      );
       await saveTrainingJob();
 
-      if (code === 0) {
-        console.log(`✅ Training job ${jobId} completed successfully`);
-        
-        // ✅ Add explicit completion message to logs
-        const completionTime = Date.now();
-        const totalDurationMs = completionTime - trainingStartTime;
-        const totalMinutes = Math.floor(totalDurationMs / 1000 / 60);
-        const totalSeconds = Math.floor((totalDurationMs / 1000) % 60);
-        
-        const completionMsg = `\n${'='.repeat(80)}\n` +
-          `✅ TRAINING COMPLETED SUCCESSFULLY!\n` +
-          `${'='.repeat(80)}\n` +
-          `Completed at: ${new Date().toLocaleString()}\n` +
-          `Total duration: ${totalMinutes}m ${totalSeconds}s\n` +
-          `Total epochs: ${trainingJob.progress.totalEpochs || hyperparameters.epochs}\n` +
-          `Best epoch: ${trainingJob.metrics.bestEpoch || trainingJob.progress.currentEpoch || 'N/A'}\n` +
-          `\nFinal Metrics:\n` +
-          `  📊 mAP50: ${(trainingJob.metrics.mAP50 || 0).toFixed(4)}\n` +
-          `  📊 mAP50-95: ${(trainingJob.metrics.mAP50_95 || 0).toFixed(4)}\n` +
-          `  🎯 Precision: ${(trainingJob.metrics.precision || 0).toFixed(4)}\n` +
-          `  🎯 Recall: ${(trainingJob.metrics.recall || 0).toFixed(4)}\n` +
-          `  📉 Best Loss: ${(trainingJob.metrics.bestLoss || trainingJob.metrics.currentLoss || 0).toFixed(4)}\n` +
-          `\n${'='.repeat(80)}\n` +
-          `Model is being saved and registered...\n` +
-          `${'='.repeat(80)}\n`;
-        
-        appendTrainingLogText(
-          trainingJob.logs,
-          completionMsg,
-          persistedLogIndexRef,
-          MAX_STORED_TRAINING_LOG_LINES
-        );
-        await saveTrainingJob();
-        
-        await finalizeTraining(
-          trainingJob,
-          dataset,
-          modelStoragePath,
-          modelVersion,
-          company,
-          project,
-          persistedLogIndexRef
-        );
-      } else {
-        console.error(`❌ Training job ${jobId} failed with exit code ${code}`);
-        // Fetch fresh job for final update
-        await TrainingJob.updateOne(
-          { _id: trainingJob._id },
-          {
-            $set: {
-              status: 'failed',
-              error: `Training process exited with code ${code}`,
-              completedAt: new Date()
-            }
+      await finalizeTraining(
+        trainingJob,
+        dataset,
+        modelStoragePath,
+        modelVersion,
+        company,
+        project,
+        persistedLogIndexRef
+      );
+    } else {
+      console.error(`❌ Training job ${jobId} failed with exit code ${exitCode}`);
+      await TrainingJob.updateOne(
+        { _id: trainingJob._id },
+        {
+          $set: {
+            status: 'failed',
+            error: `Training process exited with code ${exitCode}`,
+            completedAt: new Date()
           }
-        );
-      }
-    });
-
-    // ✅ Handle cancellation
-    // Check periodically if job was cancelled
-    // ⚠️ IMPORTANT: This interval runs independently of HTTP requests
-    // Training continues even if frontend reloads or dev server restarts
-    const cancellationCheck = setInterval(async () => {
-      const updatedJob = await TrainingJob.findOne({ jobId }).select('status').lean();
-      if (updatedJob && updatedJob.status === 'cancelled') {
-        console.log(`⚠️ Job ${jobId} cancelled, terminating process...`);
-        if (pythonProcess && !pythonProcess.killed) {
-          pythonProcess.kill('SIGTERM');
         }
-        clearInterval(cancellationCheck);
-        // Wait for any pending save before updating status
-        while (isSaving) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-        // Update status using fresh document
-        await TrainingJob.updateOne(
-          { _id: trainingJob._id },
-          {
-            $set: {
-              status: 'cancelled',
-              cancelledAt: new Date()
-            }
-          }
-        );
-      }
-    }, 2000); // Check every 2 seconds
-
-    // Clean up interval on process exit
-    pythonProcess.on('exit', () => {
-      clearInterval(cancellationCheck);
-    });
+      );
+    }
 
   } catch (error) {
     console.error(`❌ Error processing training job ${jobId}:`, error);
@@ -1361,16 +1396,14 @@ async function finalizeTraining(
       }
     }
 
-    // ✅ Compute final metrics (copy from current metrics)
-    const finalMetrics = {
-      bestEpoch: trainingJob.metrics.bestEpoch || trainingJob.progress.currentEpoch,
-      bestLoss: trainingJob.metrics.bestLoss || trainingJob.metrics.currentLoss,
-      precision: trainingJob.metrics.precision || 0.85,
-      recall: trainingJob.metrics.recall || 0.78,
-      mAP50: trainingJob.metrics.mAP50 || 0.72,
-      mAP50_95: trainingJob.metrics.mAP50_95 || 0.58,
-      perLabelStats: [] // Will be populated from Python output
-    };
+    // Prefer metrics parsed from the "all ..." val line; fill gaps from results.csv.
+    // ❗ Never invent 0.72 / 0.85 / 0.78 — that made every YOLO_SEG card look identical.
+    const csvMetrics = readBestMetricsFromResultsCsv(resultsCsvPath(modelStoragePath));
+    const finalMetrics = buildFinalMetrics(
+      trainingJob.metrics || {},
+      trainingJob.progress || {},
+      csvMetrics
+    );
 
     trainingJob.finalMetrics = finalMetrics;
 
@@ -1471,7 +1504,8 @@ const startWorker = async () => {
     
     console.log('✅ Training worker connected to MongoDB');
 
-    // ✅ Process jobs from queue
+    // ✅ Process jobs from queue (concurrency 1). processTrainingJob now awaits Python,
+    // so the next job cannot start until the GPU is free.
     trainingQueue.process(1, async (job) => {
       await processTrainingJob(job);
     });

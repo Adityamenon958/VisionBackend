@@ -24,7 +24,8 @@ const {
   deleteDatasetByVersion,
   getDetectedClasses,
   createCategoriesFromClasses,
-  downloadDataset
+  downloadDataset,
+  checkDatasetType
 } = require('../controllers/datasetController');
 
 /**
@@ -178,6 +179,13 @@ router.get('/:datasetId/annotation-summary', authenticateToken, requirePermissio
  * Used by frontend to prompt user to map class IDs to meaningful names.
  */
 router.get('/:datasetId/detected-classes', authenticateToken, requirePermission('viewDatasets'), getDetectedClasses);
+
+/**
+ * GET /api/dataset/:datasetId/type-check
+ *
+ * Scan YOLO label files and report detection vs segmentation vs unlabeled/mixed.
+ */
+router.get('/:datasetId/type-check', authenticateToken, requirePermission('viewDatasets'), checkDatasetType);
 
 /**
  * POST /api/dataset/:datasetId/create-categories-from-classes

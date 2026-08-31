@@ -1,7 +1,7 @@
 /**
  * Download Base YOLO Models Script
  *
- * Downloads YOLOv8s and YOLOv5s pretrained weights into models/base/
+ * Downloads YOLOv8s, YOLOv5s, and YOLOv8 segmentation weights into models/base/
  * so training can start without waiting on network downloads.
  *
  * Run: npm run download-models
@@ -26,6 +26,16 @@ const YOLO_MODELS = [
     name: 'yolov5s.pt',
     url: 'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5s.pt',
     description: 'YOLOv5 Small - Ultralytics YOLOv5 release',
+  },
+  {
+    name: 'yolov8n-seg.pt',
+    url: 'https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n-seg.pt',
+    description: 'YOLOv8 Nano Segmentation - for YOLO_SEG training',
+  },
+  {
+    name: 'yolov8s-seg.pt',
+    url: 'https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-seg.pt',
+    description: 'YOLOv8 Small Segmentation - for YOLO_SEG training',
   },
 ];
 
@@ -111,7 +121,7 @@ function fileExists(filePath) {
 }
 
 async function main() {
-  console.log('🚀 Downloading Base YOLO Models (v8s + v5s)...\n');
+  console.log('🚀 Downloading Base YOLO Models (v8s + v5s + v8 seg)...\n');
   console.log(`📁 Storage directory: ${BASE_MODELS_DIR}\n`);
 
   if (!fs.existsSync(BASE_MODELS_DIR)) {
@@ -160,7 +170,7 @@ async function main() {
   }
 
   if (downloaded > 0) {
-    console.log('✅ Base models ready! Training will use local yolov8s.pt / yolov5s.pt.\n');
+    console.log('✅ Base models ready! Training will use local detect + YOLO_SEG weights.\n');
   } else {
     console.log('✅ All models already downloaded.\n');
   }

@@ -8,6 +8,10 @@ const { buildWorkspaceFilter, validateWorkspaceAccess, canAccessAllWorkspaces } 
 const fs = require('fs');
 const path = require('path');
 const { BlobServiceClient } = require('@azure/storage-blob');
+const {
+  hydrateAndPersistModelMetrics,
+  formatModelNameWithMap,
+} = require('../utils/yoloTrainingMetrics');
 
 /**
  * Normalize modelSize input to a consistent format.
@@ -132,29 +136,26 @@ const getAvailableBaseModels = async (req, res) => {
     if (req.query.company && req.query.project) {
       const models = await Model.find({ company: req.query.company, project: req.query.project })
         .sort({ createdAt: -1 }) // Newest first
-        .select('modelId modelVersion modelType metrics createdAt')
+        .select('modelId modelVersion modelType metrics createdAt storagePath')
         .lean();
 
-      trainedModels.push(...models.map(model => {
-        // Format name with metrics: "YOLO - v1 (mAP: 83%)"
-        const mAP50 = model.metrics?.mAP50 || 0;
-        const mAP50Percent = (mAP50 * 100).toFixed(0);
-        const name = `${model.modelType} - ${model.modelVersion} (mAP: ${mAP50Percent}%)`;
+      trainedModels.push(...await Promise.all(models.map(async (model) => {
+        const metrics = await hydrateAndPersistModelMetrics(Model, model);
 
         return {
           type: 'trained',
           modelId: model.modelId,
           modelVersion: model.modelVersion,
           modelType: model.modelType,
-          name: name,
+          name: formatModelNameWithMap(model.modelType, model.modelVersion, metrics?.mAP50),
           metrics: {
-            mAP50: model.metrics?.mAP50,
-            precision: model.metrics?.precision,
-            recall: model.metrics?.recall
+            mAP50: metrics?.mAP50,
+            precision: metrics?.precision,
+            recall: metrics?.recall
           },
           createdAt: model.createdAt
         };
-      }));
+      })));
     }
 
     // ✅ DUAL MODE: Read base models from Azure Blob Storage OR local filesystem
@@ -375,6 +376,45 @@ const getDefaultHyperparameters = async (req, res) => {
     });
   }
 };
+
+/**
+ * Block a second training start while this server already has a live job.
+ * Returns true if a 409 was already sent.
+ */
+async function respondIfTrainingBusy(res) {
+  try {
+    const [active, waiting, delayed] = await Promise.all([
+      trainingQueue.getActive(),
+      trainingQueue.getWaiting(),
+      trainingQueue.getDelayed()
+    ]);
+    const busy = [...active, ...waiting, ...delayed];
+    if (busy.length > 0) {
+      const existingJobId = busy[0]?.data?.jobId || null;
+      res.status(409).json({
+        error:
+          'A training job is already running or queued on this server. Cancel it before starting another.',
+        existingJobId,
+        existingStatus: 'queued_or_running'
+      });
+      return true;
+    }
+  } catch (err) {
+    console.warn('[training] Could not inspect queue:', err.message);
+  }
+
+  const live = await trainingService.findLiveTrainingJob();
+  if (live) {
+    res.status(409).json({
+      error: `A training job is already ${live.status} (${live.jobId}). Cancel it before starting another.`,
+      existingJobId: live.jobId,
+      existingStatus: live.status
+    });
+    return true;
+  }
+
+  return false;
+}
 
 /**
  * POST /api/train
@@ -598,6 +638,10 @@ const startTraining = async (req, res) => {
       }
     }
 
+    if (await respondIfTrainingBusy(res)) {
+      return;
+    }
+
     // Generate job ID
     const jobId = trainingService.generateJobId();
 
@@ -716,6 +760,9 @@ const getTrainingStatus = async (req, res) => {
       augmentationPreset: trainingJob.augmentationPreset || 'none',
       /** Display / storage folder name if client sent modelVersion at train start; mirrors registered Model.modelVersion when complete */
       requestedModelVersion: trainingJob.requestedModelVersion || null,
+      datasetId: trainingJob.datasetId ? trainingJob.datasetId.toString() : null,
+      company: trainingJob.company,
+      project: trainingJob.project,
       startedAt: trainingJob.startedAt,
       completedAt: trainingJob.completedAt,
       cancelledAt: trainingJob.cancelledAt,
@@ -747,6 +794,45 @@ const getTrainingStatus = async (req, res) => {
 
   } catch (error) {
     console.error('Error getting training status:', error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+};
+
+/**
+ * GET /api/train/active
+ *
+ * Return the live queued/running job on this server (heartbeat within 10 minutes).
+ * Used by the Simulation page so a refresh or navigation cannot hide a GPU job.
+ */
+const getActiveTraining = async (req, res) => {
+  try {
+    const live = await trainingService.findLiveTrainingJob();
+    if (!live) {
+      return res.status(200).json({ jobId: null });
+    }
+
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, live.company);
+      if (!accessValidation.allowed) {
+        return res.status(200).json({ jobId: null });
+      }
+    }
+
+    return res.status(200).json({
+      jobId: live.jobId,
+      status: live.status,
+      company: live.company,
+      project: live.project,
+      datasetId: live.datasetId ? String(live.datasetId) : null,
+      modelType: live.modelType,
+      modelSize: live.modelSize,
+      requestedModelVersion: live.requestedModelVersion || null
+    });
+  } catch (error) {
+    console.error('Error getting active training job:', error);
     return res.status(500).json({
       error: 'Internal server error',
       message: error.message
@@ -882,6 +968,10 @@ const retryTraining = async (req, res) => {
       });
     }
 
+    if (await respondIfTrainingBusy(res)) {
+      return;
+    }
+
     // Create new job with same parameters
     const newJobId = trainingService.generateJobId();
     const newTrainingJob = new TrainingJob({
@@ -936,6 +1026,7 @@ module.exports = {
   getAvailableBaseModels,
   getDefaultHyperparameters,
   startTraining,
+  getActiveTraining,
   getTrainingStatus,
   getTrainingLogs,
   cancelTraining,

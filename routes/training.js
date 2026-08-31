@@ -6,6 +6,7 @@ const {
   getAvailableBaseModels,
   getDefaultHyperparameters,
   startTraining,
+  getActiveTraining,
   getTrainingStatus,
   getTrainingLogs,
   cancelTraining,
@@ -32,6 +33,9 @@ router.get('/defaults', authenticateToken, requirePermission('viewTrainingMetric
 
 // POST /api/train - Start a new training job
 router.post('/', authenticateToken, requirePermission('startTraining'), startTraining);
+
+// GET /api/train/active - Live queued/running job (must be before /:jobId/status)
+router.get('/active', authenticateToken, requirePermission('viewTrainingMetrics'), getActiveTraining);
 
 // GET /api/train/:jobId/status - Get training job status and progress
 router.get('/:jobId/status', authenticateToken, requirePermission('viewTrainingMetrics'), getTrainingStatus);
