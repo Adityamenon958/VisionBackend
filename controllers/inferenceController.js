@@ -3,6 +3,7 @@ const InferenceJob = require('../models/InferenceJob');
 const Model = require('../models/Model');
 const Dataset = require('../models/Dataset');
 const { getClassNamesForTrainedModel } = require('../services/yoloClassNamesService');
+const { classNamesFromMetadata, stampClassIds } = require('../utils/classLegend');
 const {
   hydrateAndPersistModelMetrics,
   formatModelNameWithMap,
@@ -1147,6 +1148,19 @@ const getInferenceResults = async (req, res) => {
       : 0;
 
     const corrosionStats = metadata?.corrosionStats || null;
+    let classNames = classNamesFromMetadata(metadata);
+    if (!classNames.length && inferenceJob.modelId) {
+      try {
+        const model = await Model.findById(inferenceJob.modelId);
+        if (model) classNames = await getClassNamesForTrainedModel(model);
+      } catch (err) {
+        console.warn('[inference results] classNames lookup failed:', err.message);
+      }
+    }
+    if (corrosionStats) {
+      corrosionStats.byClass = stampClassIds(corrosionStats.byClass || [], classNames);
+      corrosionStats.classNames = classNames;
+    }
     const imageStatsByName = {};
     const metaImages = metadata?.images || metadata?.files || [];
     const basename = (name) => String(name || '').split(/[/\\]/).pop();
@@ -1155,7 +1169,7 @@ const getInferenceResults = async (req, res) => {
       if (!name) continue;
       const stats = {
         corrosionPercentTotal: img.corrosionPercentTotal,
-        byClass: img.byClass || [],
+        byClass: stampClassIds(img.byClass || [], classNames),
         instanceCount: img.instanceCount ?? img.detectionCount,
       };
       imageStatsByName[name] = stats;

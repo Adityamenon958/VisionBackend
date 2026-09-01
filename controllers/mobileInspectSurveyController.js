@@ -1,18 +1,42 @@
 const fs = require('fs');
 const InferenceJob = require('../models/InferenceJob');
+const Model = require('../models/Model');
 const { validateWorkspaceAccess, canAccessAllWorkspaces } = require('../utils/workspaceScoping');
+const { getClassNamesForTrainedModel } = require('../services/yoloClassNamesService');
+const { classNamesFromMetadata, stampClassIds } = require('../utils/classLegend');
+
+function readMetadata(job) {
+  const metadataPath = job.results?.metadataPath;
+  if (!metadataPath || !fs.existsSync(metadataPath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
 
 function readCorrosionFromJob(job) {
   if (job.results?.corrosionStats && typeof job.results.corrosionStats.meanCorrosionPercent === 'number') {
     return job.results.corrosionStats;
   }
-  const metadataPath = job.results?.metadataPath;
-  if (!metadataPath || !fs.existsSync(metadataPath)) return null;
+  const metadata = readMetadata(job);
+  return metadata?.corrosionStats || null;
+}
+
+async function resolveClassNamesForJobs(jobs) {
+  for (const job of jobs || []) {
+    const fromMeta = classNamesFromMetadata(readMetadata(job));
+    if (fromMeta.length) return fromMeta;
+  }
+  const modelId = jobs?.[0]?.modelId;
+  if (!modelId) return [];
   try {
-    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
-    return metadata.corrosionStats || null;
-  } catch {
-    return null;
+    const model = await Model.findById(modelId);
+    if (!model) return [];
+    return await getClassNamesForTrainedModel(model);
+  } catch (err) {
+    console.warn('[mobile-inspect] classNames lookup failed:', err.message);
+    return [];
   }
 }
 
@@ -32,7 +56,8 @@ function mergeClassRows(rowsList) {
     for (const row of rows || []) {
       const name = row.class || row.className;
       if (!name) continue;
-      const item = bucket[name] || { class: name, percentSum: 0, n: 0, count: 0 };
+      const item = bucket[name] || { class: name, percentSum: 0, n: 0, count: 0, classId: null };
+      if (item.classId == null && typeof row.classId === 'number') item.classId = row.classId;
       const pct = row.meanPercent ?? row.percent;
       if (typeof pct === 'number') {
         item.percentSum += pct;
@@ -45,6 +70,7 @@ function mergeClassRows(rowsList) {
   return Object.values(bucket)
     .map((v) => ({
       class: v.class,
+      classId: typeof v.classId === 'number' ? v.classId : undefined,
       meanPercent: v.n ? round4(v.percentSum / v.n) : 0,
       count: v.count,
     }))
@@ -63,7 +89,7 @@ function inspectFilter(company, project, extra = {}) {
   };
 }
 
-function hydrateJob(job) {
+function hydrateJob(job, classNames) {
   const corrosion = job.status === 'completed' ? readCorrosionFromJob(job) : null;
   return {
     inferenceId: job.inferenceId,
@@ -75,12 +101,12 @@ function hydrateJob(job) {
     imageCount: corrosion?.imageCount ?? job.progress?.totalImages ?? 0,
     meanCorrosionPercent:
       typeof corrosion?.meanCorrosionPercent === 'number' ? corrosion.meanCorrosionPercent : null,
-    byClass: corrosion?.byClass || [],
+    byClass: stampClassIds(corrosion?.byClass || [], classNames),
   };
 }
 
-function buildSurveyFromJobs(surveyName, jobs) {
-  const hydrated = jobs.map(hydrateJob);
+function buildSurveyFromJobs(surveyName, jobs, classNames = []) {
+  const hydrated = jobs.map((job) => hydrateJob(job, classNames));
   const byPart = {};
   for (const visit of hydrated) {
     const key = visit.regionName;
@@ -118,7 +144,8 @@ function buildSurveyFromJobs(surveyName, jobs) {
     completedPartCount: completedParts.length,
     visitCount: hydrated.length,
     overallMeanCorrosionPercent: mean(partPercents),
-    byClass: mergeClassRows(completedParts.map((p) => p.byClass)),
+    byClass: stampClassIds(mergeClassRows(completedParts.map((p) => p.byClass)), classNames),
+    classNames,
     updatedAt: hydrated[0]?.createdAt || null,
     parts,
   };
@@ -169,7 +196,7 @@ const listMobileInspectSurveys = async (req, res) => {
 
     const surveys = Object.keys(byName)
       .map((surveyName) => {
-        const detail = buildSurveyFromJobs(surveyName, byName[surveyName]);
+        const detail = buildSurveyFromJobs(surveyName, byName[surveyName], []);
         return {
           surveyName: detail.surveyName,
           partCount: detail.partCount,
@@ -207,8 +234,9 @@ const getMobileInspectSurvey = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
+    const classNames = await resolveClassNamesForJobs(jobs);
     return res.status(200).json({
-      survey: buildSurveyFromJobs(surveyName, jobs),
+      survey: buildSurveyFromJobs(surveyName, jobs, classNames),
       company,
       project,
     });

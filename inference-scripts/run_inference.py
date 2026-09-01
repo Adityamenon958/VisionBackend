@@ -129,6 +129,7 @@ def compute_corrosion_coverage(result, file_detections):
     class_masks = {}
     class_counts = {}
     class_confs = {}
+    class_ids = {}
 
     mask_xy = []
     if hasattr(result, "masks") and result.masks is not None and hasattr(result.masks, "xy"):
@@ -136,6 +137,8 @@ def compute_corrosion_coverage(result, file_detections):
 
     for idx, det in enumerate(file_detections):
         cls_name = det.get("class") or "unknown"
+        if det.get("classId") is not None:
+            class_ids[cls_name] = int(det.get("classId"))
         class_counts[cls_name] = class_counts.get(cls_name, 0) + 1
         class_confs.setdefault(cls_name, []).append(float(det.get("confidence") or 0))
         poly = None
@@ -160,6 +163,7 @@ def compute_corrosion_coverage(result, file_detections):
         confs = class_confs.get(cls_name) or []
         by_class.append({
             "class": cls_name,
+            "classId": class_ids.get(cls_name),
             "percent": round(float(mask.sum()) / pixel_count * 100.0, 4),
             "count": int(class_counts.get(cls_name, 0)),
             "avgConfidence": round(sum(confs) / len(confs), 4) if confs else 0.0,
@@ -171,6 +175,7 @@ def compute_corrosion_coverage(result, file_detections):
         confs = class_confs.get(cls_name) or []
         by_class.append({
             "class": cls_name,
+            "classId": class_ids.get(cls_name),
             "percent": 0.0,
             "count": int(count),
             "avgConfidence": round(sum(confs) / len(confs), 4) if confs else 0.0,
@@ -443,6 +448,7 @@ def run_inference(config):
 
                     detection = {
                         'class': class_name,
+                        'classId': cls,
                         'confidence': conf,
                         'bbox': xyxy
                     }
@@ -729,23 +735,32 @@ def run_inference(config):
                 name = row.get('class')
                 if not name:
                     continue
-                bucket = class_totals.setdefault(name, {'percentSum': 0.0, 'count': 0, 'n': 0})
+                bucket = class_totals.setdefault(name, {'percentSum': 0.0, 'count': 0, 'n': 0, 'classId': None})
                 bucket['percentSum'] += float(row.get('percent') or 0)
                 bucket['count'] += int(row.get('count') or 0)
                 bucket['n'] += 1
+                if bucket.get('classId') is None and row.get('classId') is not None:
+                    bucket['classId'] = int(row.get('classId'))
         batch_by_class = [
             {
                 'class': name,
+                'classId': v.get('classId'),
                 'meanPercent': round(v['percentSum'] / v['n'], 4) if v['n'] else 0.0,
                 'count': v['count'],
             }
             for name, v in class_totals.items()
         ]
         batch_by_class.sort(key=lambda x: x['meanPercent'], reverse=True)
+        names_map = getattr(model, 'names', None) or {}
+        if isinstance(names_map, dict):
+            class_names = [str(names_map[k]) for k in sorted(names_map.keys(), key=lambda x: int(x) if str(x).isdigit() else x)]
+        else:
+            class_names = [str(n) for n in list(names_map)]
         corrosion_stats = {
             'imageCount': len(image_files),
             'meanCorrosionPercent': round(sum(image_percents) / len(image_percents), 4) if image_percents else 0.0,
             'byClass': batch_by_class,
+            'classNames': class_names,
         }
 
         # ✅ Generate metadata JSON
@@ -756,6 +771,7 @@ def run_inference(config):
             'totalDetections': total_detections,
             'averageConfidence': average_confidence,
             'detectionsByClass': detections_by_class_list,
+            'classNames': class_names,
             'corrosionStats': corrosion_stats,
             'files': all_detections,  # All files (images + videos)
             'images': image_files,  # Image files only
