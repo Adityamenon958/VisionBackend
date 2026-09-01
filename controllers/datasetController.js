@@ -9,7 +9,7 @@ const Annotation = require('../models/Annotation');
 const Image = require('../models/Image');
 const storageAdapter = require('../services/storageAdapter');
 const { preprocessingQueue, augmentationQueue } = require('../queue');
-const { generateDataYaml } = require('../utils/yoloConverter');
+const { generateDataYaml, getLabelFilePath } = require('../utils/yoloConverter');
 const auditService = require('../services/auditService');
 const { buildWorkspaceFilter, validateWorkspaceAccess, canAccessAllWorkspaces } = require('../utils/workspaceScoping');
 const { sanitizeString } = require('../middleware/xssSanitizer');
@@ -25,6 +25,199 @@ function getLabelSource(dataset) {
   if (dataset.status === 'ready_to_train') return 'manually_labeled';
   if (dataset.status === 'ready' && dt === 'labeled') return 'pre_labelled';
   return null;
+}
+
+/** Map an Image row to train / val / test using folder name or storedPath. */
+function classifySplitFolder(folder, storedPath) {
+  const folderNorm = String(folder || '').toLowerCase().trim();
+  if (folderNorm === 'train') return 'train';
+  if (folderNorm === 'val' || folderNorm === 'valid' || folderNorm === 'validation') return 'val';
+  if (folderNorm === 'test') return 'test';
+  const p = String(storedPath || '').replace(/\\/g, '/').toLowerCase();
+  if (/(^|\/)train\//.test(p)) return 'train';
+  if (/(^|\/)(val|valid|validation)\//.test(p)) return 'val';
+  if (/(^|\/)test\//.test(p)) return 'test';
+  return null;
+}
+
+/**
+ * Live train/val/test + unique image counts from the Image index.
+ * Used after add/delete photos so the Training card does not keep the old split snapshot.
+ */
+async function computeSplitCountsForDatasets(datasetIds) {
+  const result = new Map();
+  if (!datasetIds || datasetIds.length === 0) return result;
+
+  const images = await Image.find({ datasetId: { $in: datasetIds } })
+    .select('datasetId folder storedPath filename')
+    .lean();
+
+  const grouped = new Map();
+  for (const img of images) {
+    const id = img.datasetId.toString();
+    if (!grouped.has(id)) {
+      grouped.set(id, { train: 0, val: 0, test: 0, filenames: new Set() });
+    }
+    const row = grouped.get(id);
+    const key = String(img.filename || '').toLowerCase();
+    if (key) row.filenames.add(key);
+    const split = classifySplitFolder(img.folder, img.storedPath);
+    if (split === 'train') row.train += 1;
+    else if (split === 'val') row.val += 1;
+    else if (split === 'test') row.test += 1;
+  }
+
+  for (const [id, row] of grouped) {
+    result.set(id, {
+      trainCount: row.train,
+      valCount: row.val,
+      testCount: row.test,
+      uniqueImages: row.filenames.size,
+    });
+  }
+  return result;
+}
+
+/** Write live split counts onto a Dataset mongoose doc (caller must save if needed). */
+async function applyLiveSplitCounts(dataset) {
+  const fromFiles = (dataset.files || []).filter((f) => f.type === 'image').length;
+  const liveById = await computeSplitCountsForDatasets([dataset._id]);
+  const live = liveById.get(dataset._id.toString());
+  if (!live) {
+    if (fromFiles > 0) dataset.totalImages = fromFiles;
+    return {
+      trainCount: dataset.trainCount ?? 0,
+      valCount: dataset.valCount ?? 0,
+      testCount: dataset.testCount ?? 0,
+      totalImages: dataset.totalImages ?? fromFiles,
+    };
+  }
+
+  const liveSplitSum = live.trainCount + live.valCount + live.testCount;
+  if (liveSplitSum > 0) {
+    dataset.trainCount = live.trainCount;
+    dataset.valCount = live.valCount;
+    dataset.testCount = live.testCount;
+  }
+  dataset.totalImages = live.uniqueImages || fromFiles;
+  const trainCount = dataset.trainCount ?? 0;
+  const valCount = dataset.valCount ?? 0;
+  const testCount = dataset.testCount ?? 0;
+  return {
+    trainCount,
+    valCount,
+    testCount,
+    totalImages: dataset.totalImages,
+    otherCount: Math.max(0, (dataset.totalImages || 0) - trainCount - valCount - testCount),
+  };
+}
+
+/** True when this version already has a YOLO train/val/test split. */
+async function datasetAlreadyHasSplit(dataset) {
+  const splitSum =
+    (Number(dataset.trainCount) || 0) +
+    (Number(dataset.valCount) || 0) +
+    (Number(dataset.testCount) || 0);
+  if (splitSum > 0) return true;
+  if (dataset.status === 'ready_to_train') return true;
+  const derived = getLabelSource(dataset);
+  if (derived === 'manually_labeled' || derived === 'pre_labelled') return true;
+  if (dataset.datasetType === 'labeled') return true;
+  const splitImages = await Image.countDocuments({
+    datasetId: dataset._id,
+    $or: [
+      { folder: { $in: ['train', 'val', 'test', 'valid', 'validation'] } },
+      { storedPath: { $regex: /(^|\/)(train|val|valid|validation|test)\//i } },
+    ],
+  });
+  return splitImages > 0;
+}
+
+/**
+ * New photos on a split/ready-to-train version go to train (unless caller
+ * explicitly picked val or test) so YOLO actually trains on them.
+ */
+function resolveFolderForNewPhotos(requestedFolder, hasSplit) {
+  const cleaned = sanitizeDatasetFolderName(requestedFolder);
+  if (!hasSplit) return cleaned;
+  const split = classifySplitFolder(cleaned, '');
+  if (split === 'val' || split === 'test') return split;
+  return 'train';
+}
+
+/** Point dataset.files folder/path at the Image index (train/val/test). */
+async function syncManifestFoldersFromImageIndex(dataset) {
+  const images = await Image.find({ datasetId: dataset._id }).select('filename storedPath folder').lean();
+  const byName = new Map(images.map((i) => [String(i.filename || '').toLowerCase(), i]));
+  let changed = false;
+  for (const f of dataset.files || []) {
+    const img = byName.get(String(f.storedName || '').toLowerCase());
+    if (!img) continue;
+    const nextPath = f.type === 'label' ? getLabelFilePath(img.storedPath) : img.storedPath;
+    if (f.folder !== img.folder || f.storedPath !== nextPath) {
+      f.folder = img.folder;
+      f.storedPath = nextPath;
+      changed = true;
+    }
+  }
+  if (changed) dataset.markModified('files');
+  return changed;
+}
+
+/**
+ * Move Image rows that are not in train/val/test into train, including disk files.
+ * Fixes photos previously added to the original zip folder (e.g. "bike rust images").
+ */
+async function relocateNonSplitImagesToTrain(dataset) {
+  const images = await Image.find({ datasetId: dataset._id });
+  const datasetRoot = storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version);
+  let moved = 0;
+
+  for (const img of images) {
+    if (classifySplitFolder(img.folder, img.storedPath)) continue;
+
+    const filename = img.filename || path.basename(img.storedPath || '');
+    if (!filename) continue;
+    const destRel = `images/train/${filename}`;
+    const srcFull = path.join(datasetRoot, img.storedPath);
+    const destFull = path.join(datasetRoot, destRel);
+
+    await storageAdapter.ensureDir(path.dirname(destFull));
+    if (path.resolve(srcFull) !== path.resolve(destFull) && (await storageAdapter.exists(srcFull))) {
+      if (!(await storageAdapter.exists(destFull))) {
+        await storageAdapter.copyFile(srcFull, destFull);
+      }
+      try { await fsPromises.unlink(srcFull); } catch { /* original copy can stay */ }
+    }
+
+    const srcLabelRel = getLabelFilePath(img.storedPath);
+    const destLabelRel = getLabelFilePath(destRel);
+    const srcLabelFull = path.join(datasetRoot, srcLabelRel);
+    const destLabelFull = path.join(datasetRoot, destLabelRel);
+    if (path.resolve(srcLabelFull) !== path.resolve(destLabelFull) && (await storageAdapter.exists(srcLabelFull))) {
+      await storageAdapter.ensureDir(path.dirname(destLabelFull));
+      if (!(await storageAdapter.exists(destLabelFull))) {
+        await storageAdapter.copyFile(srcLabelFull, destLabelFull);
+      }
+      try { await fsPromises.unlink(srcLabelFull); } catch { /* ignore */ }
+    }
+
+    const oldPath = img.storedPath;
+    img.folder = 'train';
+    img.storedPath = destRel;
+    await img.save();
+
+    for (const f of dataset.files || []) {
+      const sameFile = f.storedPath === oldPath || f.storedName === filename;
+      if (!sameFile) continue;
+      f.folder = 'train';
+      f.storedPath = f.type === 'label' ? destLabelRel : destRel;
+    }
+    moved += 1;
+  }
+
+  if (moved > 0) dataset.markModified('files');
+  return moved;
 }
 
 /**
@@ -437,6 +630,15 @@ const getDataset = async (req, res) => {
     datasetObject.backup_dataset_id = dataset.backupDatasetId ? dataset.backupDatasetId.toString() : null;
     datasetObject.augmentedFromVersion = dataset.augmentedFromVersion || null;
 
+    if (dataset.status !== 'queued' && dataset.status !== 'processing') {
+      const live = await applyLiveSplitCounts(dataset);
+      datasetObject.trainCount = live.trainCount;
+      datasetObject.valCount = live.valCount;
+      datasetObject.testCount = live.testCount;
+      datasetObject.totalImages = live.totalImages;
+      datasetObject.otherCount = live.otherCount;
+    }
+
     // ✅ Include folders summary in response
     res.json({ ...datasetObject, folders });
 
@@ -498,31 +700,9 @@ const listDatasets = async (req, res) => {
       }
     }
 
-    // ✅ Unique image counts from Image index (fixes inflated totalImages when train/test overlapped)
+    // ✅ Live unique + split counts from Image index (add/delete photos used to leave trainCount stale)
     const datasetIds = datasets.map((d) => d._id);
-    const uniqueCountByDatasetId = new Map();
-    if (datasetIds.length > 0) {
-      const uniqueAgg = await Image.aggregate([
-        { $match: { datasetId: { $in: datasetIds } } },
-        {
-          $group: {
-            _id: {
-              datasetId: '$datasetId',
-              filename: { $toLower: { $ifNull: ['$filename', ''] } },
-            },
-          },
-        },
-        {
-          $group: {
-            _id: '$_id.datasetId',
-            uniqueImages: { $sum: 1 },
-          },
-        },
-      ]);
-      for (const row of uniqueAgg) {
-        uniqueCountByDatasetId.set(row._id.toString(), row.uniqueImages);
-      }
-    }
+    const liveByDatasetId = await computeSplitCountsForDatasets(datasetIds);
 
     // ✅ Return list of datasets (include datasetType, annotationStatus, is_augmented, labelSource for frontend badges)
     const responseDatasets = [];
@@ -531,27 +711,42 @@ const listDatasets = async (req, res) => {
       if (d.isAugmented && !labelSource && d.backupDatasetId) {
         labelSource = sourceLabelSourceMap.get(d.backupDatasetId.toString()) ?? 'pre_labelled';
       }
-      const uniqueFromIndex = uniqueCountByDatasetId.get(d._id.toString());
+      const live = liveByDatasetId.get(d._id.toString());
       let totalImages = d.totalImages;
       let trainCount = d.trainCount;
       let valCount = d.valCount;
       let testCount = d.testCount;
-      if (typeof uniqueFromIndex === 'number' && uniqueFromIndex > 0) {
-        totalImages = uniqueFromIndex;
-        const splitSum = (Number(trainCount) || 0) + (Number(valCount) || 0) + (Number(testCount) || 0);
-        // ✅ Hide stale split counts when they include overlapping copies (e.g. 84+21+10 > 105)
-        if (splitSum > uniqueFromIndex) {
-          trainCount = undefined;
-          valCount = undefined;
-          testCount = undefined;
+      if (live && live.uniqueImages > 0) {
+        totalImages = live.uniqueImages;
+        const liveSplitSum = live.trainCount + live.valCount + live.testCount;
+        if (liveSplitSum > 0) {
+          trainCount = live.trainCount;
+          valCount = live.valCount;
+          testCount = live.testCount;
+          // Hide overlapping train/val/test copies (e.g. 84+21+10 > 105 unique)
+          if (liveSplitSum > live.uniqueImages) {
+            trainCount = undefined;
+            valCount = undefined;
+            testCount = undefined;
+          }
         }
-        // Self-heal stored totalImages when it was inflated by overlapping splits
-        if (d.totalImages !== uniqueFromIndex) {
-          Dataset.updateOne(
-            { _id: d._id },
-            { $set: { totalImages: uniqueFromIndex, labeledImages: uniqueFromIndex } },
-          ).catch((err) => {
-            console.warn('[listDatasets] Could not heal totalImages:', err.message);
+        const isBusy = d.status === 'queued' || d.status === 'processing';
+        const shouldHeal =
+          !isBusy &&
+          (d.totalImages !== live.uniqueImages ||
+            (liveSplitSum > 0 &&
+              (d.trainCount !== live.trainCount ||
+                d.valCount !== live.valCount ||
+                d.testCount !== live.testCount)));
+        if (shouldHeal) {
+          const healSet = { totalImages: live.uniqueImages, labeledImages: live.uniqueImages };
+          if (liveSplitSum > 0 && liveSplitSum <= live.uniqueImages) {
+            healSet.trainCount = live.trainCount;
+            healSet.valCount = live.valCount;
+            healSet.testCount = live.testCount;
+          }
+          Dataset.updateOne({ _id: d._id }, { $set: healSet }).catch((err) => {
+            console.warn('[listDatasets] Could not heal split counts:', err.message);
           });
         }
       }
@@ -564,6 +759,10 @@ const listDatasets = async (req, res) => {
         trainCount,
         valCount,
         testCount,
+        otherCount:
+          typeof trainCount === 'number' && typeof totalImages === 'number'
+            ? Math.max(0, totalImages - (trainCount || 0) - (valCount || 0) - (testCount || 0))
+            : undefined,
         sizeBytes: d.sizeBytes,
         status: d.status,
         datasetType: d.datasetType ?? (d.status === 'ready_to_train' ? 'labeled' : null),
@@ -629,12 +828,39 @@ const getDatasetStatus = async (req, res) => {
       labelSource = source?.labelSource ?? (source?.status === 'ready_to_train' ? 'manually_labeled' : 'pre_labelled');
     }
 
+    let trainCount = dataset.trainCount;
+    let valCount = dataset.valCount;
+    let testCount = dataset.testCount;
+    let totalImages = dataset.totalImages;
+    if (dataset.status !== 'queued' && dataset.status !== 'processing') {
+      let moved = 0;
+      if (await datasetAlreadyHasSplit(dataset)) {
+        moved = await relocateNonSplitImagesToTrain(dataset);
+        if (moved > 0) {
+          await syncManifestFoldersFromImageIndex(dataset);
+          dataset.markModified('files');
+        }
+      }
+      const live = await applyLiveSplitCounts(dataset);
+      trainCount = live.trainCount;
+      valCount = live.valCount;
+      testCount = live.testCount;
+      totalImages = live.totalImages;
+      if (moved > 0) {
+        await dataset.save();
+      }
+    }
+
     // ✅ Return minimal status info (good for frequent polling)
     res.json({
       id: dataset._id.toString(),
       status: dataset.status,
       version: dataset.version,
-      totalImages: dataset.totalImages,
+      totalImages,
+      trainCount,
+      valCount,
+      testCount,
+      otherCount: Math.max(0, (totalImages || 0) - (trainCount || 0) - (valCount || 0) - (testCount || 0)),
       sizeBytes: dataset.sizeBytes,
       createdAt: dataset.createdAt,
       uploadErrors: dataset.uploadErrors.length > 0 ? dataset.uploadErrors : undefined,
@@ -644,11 +870,6 @@ const getDatasetStatus = async (req, res) => {
       is_augmented: dataset.isAugmented ?? false,
       backup_dataset_id: dataset.backupDatasetId ? dataset.backupDatasetId.toString() : null,
       augmentedFromVersion: dataset.augmentedFromVersion || null,
-      // Include preprocessing progress info if processing
-      ...(dataset.status === 'processing' && {
-        trainCount: dataset.trainCount,
-        valCount: dataset.valCount
-      }),
       // Augmentation fields for frontend polling
       augmentation_status: dataset.augmentationStatus,
       backup_dataset_id: dataset.backupDatasetId || null,
@@ -769,11 +990,25 @@ const getDatasetFolders = async (req, res) => {
       totalSize += f.size;
     }
 
+    const live =
+      dataset.status !== 'queued' && dataset.status !== 'processing'
+        ? await applyLiveSplitCounts(dataset)
+        : {
+            trainCount: dataset.trainCount ?? 0,
+            valCount: dataset.valCount ?? 0,
+            testCount: dataset.testCount ?? 0,
+            totalImages: dataset.totalImages,
+          };
+
     // ✅ Return folders summary with total statistics
     res.json({
       folders,
       totalFolders: Object.keys(folders).length,
-      totalImages: dataset.totalImages,
+      totalImages: live.totalImages,
+      trainCount: live.trainCount,
+      valCount: live.valCount,
+      testCount: live.testCount,
+      otherCount: live.otherCount ?? Math.max(0, (live.totalImages || 0) - (live.trainCount || 0) - (live.valCount || 0) - (live.testCount || 0)),
       totalSizeBytes: totalSize
     });
 
@@ -2738,6 +2973,347 @@ const checkDatasetType = async (req, res) => {
   }
 };
 
+function findDatasetFileEntry(dataset, fileId) {
+  const raw = String(fileId || '');
+  let decoded = raw;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    decoded = raw;
+  }
+  return (dataset.files || []).find((f) => {
+    const id = f._id ? f._id.toString() : '';
+    return (
+      id === raw ||
+      id === decoded ||
+      f.storedName === raw ||
+      f.storedName === decoded
+    );
+  });
+}
+
+function sanitizeDatasetFolderName(folder) {
+  const cleaned = String(folder || 'unlabeled').trim() || 'unlabeled';
+  if (cleaned.includes('..') || /[\\/]/.test(cleaned)) {
+    const err = new Error('Invalid folder name');
+    err.statusCode = 400;
+    throw err;
+  }
+  return cleaned.slice(0, 80);
+}
+
+async function removeLocalFileIfExists(filePath) {
+  try {
+    if (filePath && (await storageAdapter.exists(filePath))) {
+      await fsPromises.unlink(filePath);
+    }
+  } catch (err) {
+    console.warn('[dataset-files] Could not delete file:', filePath, err.message);
+  }
+}
+
+/**
+ * POST /api/dataset/:datasetId/files
+ * Add images (and optional matching .txt labels) to an existing dataset version.
+ */
+const addDatasetFiles = async (req, res) => {
+  try {
+    const { datasetId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(datasetId)) {
+      return res.status(400).json({ error: 'Validation Error', message: 'Invalid datasetId' });
+    }
+
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return res.status(404).json({ error: 'Not Found', message: 'Dataset not found' });
+    }
+    if (dataset.deletedAt) {
+      return res.status(400).json({ error: 'Validation Error', message: 'Cannot add files to a deleted dataset' });
+    }
+    if (dataset.status === 'queued' || dataset.status === 'processing') {
+      return res.status(409).json({
+        error: 'Conflict',
+        message: 'This version is still processing. Wait until it is ready, then add photos.',
+      });
+    }
+
+    const uploadedFiles = (req.files && req.files.files) ? req.files.files : [];
+    if (!Array.isArray(uploadedFiles) || uploadedFiles.length === 0) {
+      return res.status(400).json({ error: 'Validation Error', message: 'No files uploaded' });
+    }
+
+    const hasSplit = await datasetAlreadyHasSplit(dataset);
+    const folderName = resolveFolderForNewPhotos(req.body.folder || req.body.folderName, hasSplit);
+    const validExtensions = ['.jpg', '.jpeg', '.png', '.txt'];
+    const datasetRoot = storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version);
+    const imagesPath = storageAdapter.buildImagesPath(dataset.company, dataset.project, dataset.version);
+    const labelsPath = storageAdapter.buildLabelsPath(dataset.company, dataset.project, dataset.version);
+    const thumbnailsPath = storageAdapter.buildThumbnailsPath(dataset.company, dataset.project, dataset.version);
+    await storageAdapter.ensureDir(path.join(imagesPath, folderName));
+    await storageAdapter.ensureDir(path.join(labelsPath, folderName));
+    await storageAdapter.ensureDir(thumbnailsPath);
+
+    let sharp = null;
+    try {
+      sharp = require('sharp');
+    } catch {
+      sharp = null;
+    }
+
+    const hashCache = new Map();
+    const added = [];
+    const skipped = [];
+    let addedImages = 0;
+    let addedBytes = 0;
+
+    for (const file of uploadedFiles) {
+      const originalName = file.originalname;
+      const ext = path.extname(originalName).toLowerCase();
+      const tempPath = file.path;
+
+      if (!validExtensions.includes(ext)) {
+        skipped.push({ filename: originalName, reason: `Invalid extension: ${ext}` });
+        try { await fsPromises.unlink(tempPath); } catch { /* ignore */ }
+        continue;
+      }
+
+      const isImage = ['.jpg', '.jpeg', '.png'].includes(ext);
+      const baseName = path.parse(originalName).name;
+      let hash = hashCache.get(baseName);
+      if (hash === undefined) {
+        hash = crypto.createHash('sha256').update(`${dataset._id}_${baseName}`).digest('hex').substring(0, 12);
+        hashCache.set(baseName, hash);
+      }
+      const uniqueName = `${hash}${ext}`;
+      const destPath = isImage
+        ? path.join(imagesPath, folderName, uniqueName)
+        : path.join(labelsPath, folderName, uniqueName);
+      const storedPath = path.relative(datasetRoot, destPath).replace(/\\/g, '/');
+
+      const already = (dataset.files || []).some(
+        (f) => f.storedPath === storedPath || (f.storedName === uniqueName && f.folder === folderName)
+      );
+      if (already) {
+        skipped.push({ filename: originalName, reason: 'Already in this dataset folder' });
+        try { await fsPromises.unlink(tempPath); } catch { /* ignore */ }
+        continue;
+      }
+
+      try {
+        await storageAdapter.ensureDir(path.dirname(destPath));
+        await storageAdapter.saveFile(tempPath, destPath);
+        dataset.files.push({
+          storedName: uniqueName,
+          originalName,
+          type: isImage ? 'image' : 'label',
+          size: file.size,
+          folder: folderName,
+          storedPath,
+        });
+        added.push({ originalName, storedName: uniqueName, type: isImage ? 'image' : 'label', folder: folderName });
+        addedBytes += file.size || 0;
+
+        if (isImage) {
+          addedImages += 1;
+          let width = 1;
+          let height = 1;
+          if (sharp) {
+            try {
+              const meta = await sharp(destPath).metadata();
+              width = meta.width || 1;
+              height = meta.height || 1;
+            } catch {
+              /* keep defaults */
+            }
+            try {
+              const thumbnailPath = path.join(thumbnailsPath, `thumb_${uniqueName}`);
+              await sharp(destPath).resize(200, 200, { fit: 'inside', withoutEnlargement: true }).toFile(thumbnailPath);
+            } catch (thumbErr) {
+              console.warn('[dataset-files] Thumbnail failed:', uniqueName, thumbErr.message);
+            }
+          }
+
+          const existingImage = await Image.findOne({ datasetId: dataset._id, storedPath });
+          if (!existingImage) {
+            await Image.create({
+              datasetId: dataset._id,
+              filename: uniqueName,
+              storedPath,
+              folder: folderName,
+              size: file.size || 0,
+              width,
+              height,
+              hasLabels: false,
+              hasAnnotations: false,
+            });
+          }
+        }
+      } catch (error) {
+        skipped.push({ filename: originalName, reason: error.message || 'Failed to save file' });
+        try { await fsPromises.unlink(tempPath); } catch { /* ignore */ }
+      }
+    }
+
+    for (const entry of added.filter((a) => a.type === 'label')) {
+      const imageBase = path.parse(entry.storedName).name;
+      const imageDoc = await Image.findOne({
+        datasetId: dataset._id,
+        filename: { $regex: new RegExp(`^${imageBase}\\.(jpe?g|png)$`, 'i') },
+      });
+      if (imageDoc && imageDoc.hasLabels !== true) {
+        imageDoc.hasLabels = true;
+        await imageDoc.save();
+      }
+    }
+
+    dataset.sizeBytes = (dataset.sizeBytes || 0) + addedBytes;
+    if (hasSplit) {
+      await relocateNonSplitImagesToTrain(dataset);
+      await syncManifestFoldersFromImageIndex(dataset);
+    }
+    const liveCounts = await applyLiveSplitCounts(dataset);
+    dataset.unlabeledImagesCount = await Image.countDocuments({ datasetId: dataset._id, hasLabels: false });
+    dataset.unlabeledImages = dataset.unlabeledImagesCount;
+    dataset.labeledImages = await Image.countDocuments({ datasetId: dataset._id, hasLabels: true });
+    dataset.markModified('files');
+    await dataset.save();
+
+    return res.status(200).json({
+      added: added.length,
+      addedImages,
+      skipped: skipped.length,
+      details: { added, skipped },
+      folder: folderName,
+      totalImages: liveCounts.totalImages,
+      trainCount: liveCounts.trainCount,
+      valCount: liveCounts.valCount,
+      testCount: liveCounts.testCount,
+      otherCount: liveCounts.otherCount,
+      message: `Added ${added.length} file(s) to ${folderName}`,
+    });
+  } catch (error) {
+    console.error('addDatasetFiles error:', error);
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      error: status === 400 ? 'Validation Error' : 'Internal Server Error',
+      message: error.message,
+    });
+  }
+};
+
+/**
+ * DELETE /api/dataset/:datasetId/files/:fileId
+ * Delete one photo (and its matching label) or a standalone label.
+ */
+const deleteDatasetFile = async (req, res) => {
+  try {
+    const { datasetId, fileId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(datasetId)) {
+      return res.status(400).json({ error: 'Validation Error', message: 'Invalid datasetId' });
+    }
+
+    const dataset = await Dataset.findById(datasetId);
+    if (!dataset) {
+      return res.status(404).json({ error: 'Not Found', message: 'Dataset not found' });
+    }
+    if (dataset.deletedAt) {
+      return res.status(400).json({ error: 'Validation Error', message: 'Dataset is deleted' });
+    }
+    if (dataset.status === 'queued' || dataset.status === 'processing') {
+      return res.status(409).json({
+        error: 'Conflict',
+        message: 'This version is still processing. Wait until it is ready, then delete photos.',
+      });
+    }
+
+    const file = findDatasetFileEntry(dataset, fileId);
+    if (!file) {
+      return res.status(404).json({ error: 'Not Found', message: 'File not found in this dataset' });
+    }
+
+    const datasetPath = storageAdapter.buildDatasetPath(dataset.company, dataset.project, dataset.version);
+    const toRemove = [file];
+
+    if (file.type === 'image') {
+      const labelRel = getLabelFilePath(file.storedPath);
+      const pairedLabel = (dataset.files || []).find((f) => {
+        if (f.type !== 'label') return false;
+        const samePath = f.storedPath === labelRel;
+        const sameHash = path.parse(f.storedName).name === path.parse(file.storedName).name;
+        return samePath || sameHash;
+      });
+      if (pairedLabel) toRemove.push(pairedLabel);
+    }
+
+    const removedNames = [];
+    for (const entry of toRemove) {
+      const fullPath = path.join(datasetPath, entry.storedPath);
+      await removeLocalFileIfExists(fullPath);
+      if (entry.type === 'image') {
+        const thumbPath = path.join(
+          storageAdapter.buildThumbnailsPath(dataset.company, dataset.project, dataset.version),
+          `thumb_${entry.storedName}`
+        );
+        await removeLocalFileIfExists(thumbPath);
+      }
+      removedNames.push(entry.originalName || entry.storedName);
+    }
+
+    const removeIds = new Set(toRemove.map((e) => (e._id ? e._id.toString() : e.storedName)));
+    dataset.files = (dataset.files || []).filter((f) => {
+      const id = f._id ? f._id.toString() : f.storedName;
+      return !removeIds.has(id);
+    });
+
+    if (file.type === 'image') {
+      const imageDoc = await Image.findOne({
+        datasetId: dataset._id,
+        $or: [{ storedPath: file.storedPath }, { filename: file.storedName }],
+      });
+      if (imageDoc) {
+        await Annotation.updateMany(
+          { datasetId: dataset._id, imageId: imageDoc._id, deletedAt: null },
+          { $set: { deletedAt: new Date() } }
+        );
+        await Image.deleteOne({ _id: imageDoc._id });
+      }
+    } else if (file.type === 'label') {
+      const imageBase = path.parse(file.storedName).name;
+      const imageDoc = await Image.findOne({
+        datasetId: dataset._id,
+        filename: { $regex: new RegExp(`^${imageBase}\\.(jpe?g|png)$`, 'i') },
+      });
+      if (imageDoc) {
+        imageDoc.hasLabels = false;
+        await imageDoc.save();
+      }
+    }
+
+    dataset.sizeBytes = Math.max(
+      0,
+      (dataset.sizeBytes || 0) - toRemove.reduce((sum, e) => sum + (e.size || 0), 0)
+    );
+    const liveCounts = await applyLiveSplitCounts(dataset);
+    dataset.unlabeledImagesCount = await Image.countDocuments({ datasetId: dataset._id, hasLabels: false });
+    dataset.unlabeledImages = dataset.unlabeledImagesCount;
+    dataset.labeledImages = await Image.countDocuments({ datasetId: dataset._id, hasLabels: true });
+    await dataset.save();
+
+    return res.status(200).json({
+      deleted: removedNames.length,
+      names: removedNames,
+      totalImages: liveCounts.totalImages,
+      trainCount: liveCounts.trainCount,
+      valCount: liveCounts.valCount,
+      testCount: liveCounts.testCount,
+      message: `Deleted ${removedNames.join(', ')}`,
+    });
+  } catch (error) {
+    console.error('deleteDatasetFile error:', error);
+    return res.status(500).json({ error: 'Internal Server Error', message: error.message });
+  }
+};
+
 module.exports = {
   uploadDataset,
   listDatasets,
@@ -2747,6 +3323,8 @@ module.exports = {
   getAnnotationSummary,
   getDatasetFolders,
   getDatasetFiles,
+  addDatasetFiles,
+  deleteDatasetFile,
   getFileThumbnail,
   getFile,
   getDatasetDependencies,

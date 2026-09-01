@@ -16,6 +16,8 @@ const {
   getAnnotationSummary,
   getDatasetFolders,
   getDatasetFiles,
+  addDatasetFiles,
+  deleteDatasetFile,
   getFileThumbnail,
   getFile,
   updateDataset,
@@ -208,6 +210,35 @@ router.get('/:datasetId/folders', authenticateToken, requirePermission('viewData
  * Requires: viewRawDatasetImages permission (for Viewer role restriction)
  */
 router.get('/:datasetId/files', authenticateToken, requirePermission('viewRawDatasetImages'), getDatasetFiles);
+
+/**
+ * POST /api/dataset/:datasetId/files
+ * Add photos / labels to an existing dataset version (multipart field "files", body.folder).
+ */
+router.post(
+  '/:datasetId/files',
+  authenticateToken,
+  requirePermission('uploadDatasets'),
+  upload.fields([{ name: 'files', maxCount: 1000 }]),
+  (err, req, res, next) => {
+    if (err) {
+      return res.status(400).json({ error: 'Upload error', message: err.message });
+    }
+    next();
+  },
+  addDatasetFiles
+);
+
+/**
+ * DELETE /api/dataset/:datasetId/files/:fileId
+ * Remove one photo (and matching label) from a dataset version.
+ */
+router.delete(
+  '/:datasetId/files/:fileId',
+  authenticateToken,
+  requirePermission('uploadDatasets'),
+  deleteDatasetFile
+);
 
 /**
  * GET /api/dataset/:datasetId/file/:fileId/thumbnail
