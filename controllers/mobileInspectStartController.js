@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
+const sharp = require('sharp');
 const MobileInspectConfig = require('../models/MobileInspectConfig');
 const InferenceJob = require('../models/InferenceJob');
 const { inferenceQueue } = require('../queue');
@@ -8,6 +9,54 @@ const storageAdapter = require('../services/storageAdapter');
 const auditService = require('../services/auditService');
 const { validateWorkspaceAccess, canAccessAllWorkspaces } = require('../utils/workspaceScoping');
 const { resolveModelCheckpointPath } = require('../services/resolveModelCheckpoint');
+
+// Phone cameras are often 12MP+. YOLO already resizes to 640 internally, but
+// overlay + corrosion % + upload all run on the original pixels. 1600px is plenty
+// for a phone screen and cuts overlay time / result download a lot.
+const INSPECT_MAX_EDGE = 1600;
+
+async function downscaleInspectImage(filePath) {
+  try {
+    const ext = path.extname(filePath).toLowerCase();
+    if (!['.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff'].includes(ext)) {
+      return filePath;
+    }
+    const stat = await fs.promises.stat(filePath);
+    const meta = await sharp(filePath, { failOn: 'none' }).metadata();
+    const width = meta.width || 0;
+    const height = meta.height || 0;
+    const alreadySmall =
+      width > 0 &&
+      height > 0 &&
+      width <= INSPECT_MAX_EDGE &&
+      height <= INSPECT_MAX_EDGE &&
+      stat.size <= 1_200_000;
+    if (alreadySmall) return filePath;
+
+    const outPath = filePath.replace(/\.[^.]+$/i, '') + '.jpg';
+    const tmpPath = `${outPath}.tmp.jpg`;
+    await sharp(filePath, { failOn: 'none' })
+      .rotate()
+      .resize(INSPECT_MAX_EDGE, INSPECT_MAX_EDGE, {
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .jpeg({ quality: 82, mozjpeg: true })
+      .toFile(tmpPath);
+
+    if (fs.existsSync(filePath) && path.resolve(filePath) !== path.resolve(tmpPath)) {
+      await fs.promises.unlink(filePath);
+    }
+    if (fs.existsSync(outPath) && path.resolve(outPath) !== path.resolve(tmpPath)) {
+      await fs.promises.unlink(outPath);
+    }
+    await fs.promises.rename(tmpPath, outPath);
+    return outPath;
+  } catch (err) {
+    console.warn('[mobile-inspect] downscale skipped:', err.message);
+    return filePath;
+  }
+}
 
 /**
  * POST /api/mobile-inspect
@@ -111,6 +160,7 @@ const startMobileInspect = async (req, res) => {
         await fs.promises.copyFile(file.path, destPath);
         await fs.promises.unlink(file.path);
       }
+      await downscaleInspectImage(destPath);
     }
 
     const inferenceId = `inf_${Date.now()}_${uuidv4().substring(0, 8)}`;
@@ -145,6 +195,7 @@ const startMobileInspect = async (req, res) => {
         confidenceThreshold: conf,
         regionName,
         surveyName,
+        mobileInspect: true,
       },
       {
         attempts: 1,

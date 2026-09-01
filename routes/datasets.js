@@ -13,6 +13,7 @@ const {
   getActiveDataset,
   startAugmentation,
   cancelAugmentation,
+  duplicateDataset,
   getAnnotationSummary,
   getDatasetFolders,
   getDatasetFiles,
@@ -27,7 +28,8 @@ const {
   getDetectedClasses,
   createCategoriesFromClasses,
   downloadDataset,
-  checkDatasetType
+  checkDatasetType,
+  listDatasets
 } = require('../controllers/datasetController');
 
 /**
@@ -150,6 +152,18 @@ router.post(
   authenticateToken,
   requirePermission('uploadDatasets'),
   cancelAugmentation
+);
+
+/**
+ * POST /api/dataset/:datasetId/duplicate
+ *
+ * Creates an independent copy of a dataset version under a new version name.
+ */
+router.post(
+  '/:datasetId/duplicate',
+  authenticateToken,
+  requirePermission('uploadDatasets'),
+  duplicateDataset
 );
 
 /**

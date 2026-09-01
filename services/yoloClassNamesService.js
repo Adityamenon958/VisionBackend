@@ -157,8 +157,9 @@ async function parseNamesFromDataYaml(filePath) {
   }
 }
 
-async function getClassNamesForTrainedModel(model) {
+async function getClassNamesForTrainedModel(model, options = {}) {
   if (!model || typeof model !== 'object') return [];
+  const skipCheckpoint = options.skipCheckpoint === true;
 
   if (model.modelType === 'RF_DETR' && model.storagePath) {
     const modelRoot = path.resolve(model.storagePath);
@@ -172,6 +173,7 @@ async function getClassNamesForTrainedModel(model) {
 
   const usable = best && fs.existsSync(best) ? await isUsableCheckpoint(best) : false;
   if (
+    !skipCheckpoint &&
     model.modelType !== 'RF_DETR' &&
     best &&
     fs.existsSync(best) &&

@@ -1152,7 +1152,10 @@ const getInferenceResults = async (req, res) => {
     if (!classNames.length && inferenceJob.modelId) {
       try {
         const model = await Model.findById(inferenceJob.modelId);
-        if (model) classNames = await getClassNamesForTrainedModel(model);
+        // skipCheckpoint: never spawn Python just to label results — that can
+        // add 15–60s AFTER the job already finished. New jobs write classNames
+        // into metadata; yaml/json mapping is the fast fallback.
+        if (model) classNames = await getClassNamesForTrainedModel(model, { skipCheckpoint: true });
       } catch (err) {
         console.warn('[inference results] classNames lookup failed:', err.message);
       }

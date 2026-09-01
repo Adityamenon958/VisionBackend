@@ -379,6 +379,28 @@ class StorageAdapter {
   }
 
   /**
+   * Copy an entire directory (recursively) from source to destination, leaving the source
+   * intact. Unlike renameDirectory/moveDirectory, this does NOT remove the source — used for
+   * duplicating a dataset version into a new independent copy.
+   * @param {string} srcDir - Source directory path
+   * @param {string} destDir - Destination directory path
+   */
+  async copyDirectory(srcDir, destDir) {
+    if (this.mode === 'local') {
+      if (!(await this.exists(srcDir))) {
+        throw new Error(`Source directory does not exist: ${srcDir}`);
+      }
+      await this._copyDirectoryRecursive(srcDir, destDir);
+    } else if (this.mode === 'azure') {
+      const files = await this.listFiles(srcDir);
+      for (const file of files) {
+        const destPath = destDir + file.blobPath.slice(srcDir.length);
+        await this.copyFile(file.blobPath, destPath);
+      }
+    }
+  }
+
+  /**
    * List files/blobs under a prefix
    * @param {string} prefix - Path prefix to list (e.g., "datasets/company/project/images/train/")
    * @returns {Promise<Array<{blobPath: string, name: string, size: number}>>}

@@ -24,17 +24,8 @@ except ImportError:
     print("ERROR: ultralytics package not found. Install with: pip install ultralytics", file=sys.stderr)
     sys.exit(1)
 
-try:
-    # ✅ moviepy 2.x uses direct import (not moviepy.editor)
-    from moviepy import VideoFileClip
-except ImportError:
-    # ✅ Fallback for older moviepy versions
-    try:
-        from moviepy.editor import VideoFileClip
-    except ImportError:
-        print("ERROR: moviepy package not found. Install with: pip install moviepy", file=sys.stderr)
-        sys.exit(1)
-
+# moviepy is only needed for video conversion — do not import it on image jobs
+# (importing it at startup adds several seconds before YOLO even loads).
 
 try:
     import cv2
@@ -108,7 +99,10 @@ def save_mask_only_image(result, dest_path, alpha=0.45):
     dest_dir = os.path.dirname(dest_path)
     if dest_dir:
         os.makedirs(dest_dir, exist_ok=True)
-    return bool(cv2.imwrite(dest_path, img))
+    params = []
+    if dest_path.lower().endswith(('.jpg', '.jpeg')):
+        params = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+    return bool(cv2.imwrite(dest_path, img, params))
 
 
 def compute_corrosion_coverage(result, file_detections):
@@ -245,6 +239,15 @@ def prepare_source_with_short_names(source, output, video_extensions):
     sys.stdout.flush()
     return short_dir, short_to_original
 
+def _load_video_file_clip():
+    try:
+        from moviepy import VideoFileClip
+        return VideoFileClip
+    except ImportError:
+        from moviepy.editor import VideoFileClip
+        return VideoFileClip
+
+
 def convert_avi_to_mp4(source_path, mp4_path):
     """
     Convert video file to MP4 format for browser compatibility.
@@ -268,7 +271,7 @@ def convert_avi_to_mp4(source_path, mp4_path):
             sys.stdout.flush()
             return False
         
-        # Load video clip
+        VideoFileClip = _load_video_file_clip()
         clip = VideoFileClip(source_path)
         
         # Write as MP4 with H.264 codec (browser-compatible)
@@ -370,24 +373,34 @@ def run_inference(config):
         print("-" * 80)
         sys.stdout.flush()
 
+        # Image-only jobs: do not let YOLO write default plots (boxes/labels).
+        # We write the mask overlay ourselves once. save=True on images = double JPEG write.
+        image_only = (not is_video_file) and (not has_videos)
+        annotated_dir = os.path.join(output, 'annotated')
+        os.makedirs(annotated_dir, exist_ok=True)
+
         # ✅ Run inference
         # YOLO's predict() method can handle images, videos, and folders
-        # For images: saves annotated images to {output}/annotated/
         # For videos: saves annotated videos to {output}/annotated/
         # boxes=False: do not draw detection rectangles (ultralytics 8.1+)
         predict_kwargs = dict(
             source=source_for_inference,
-            save=True,
+            save=not image_only,
             save_txt=False,
             conf=conf,
             project=output,
             name='annotated',
             exist_ok=True,
+            verbose=False,
         )
         try:
             results = model.predict(**predict_kwargs, boxes=False)
         except TypeError:
-            results = model.predict(**predict_kwargs)
+            predict_kwargs.pop('verbose', None)
+            try:
+                results = model.predict(**predict_kwargs, boxes=False)
+            except TypeError:
+                results = model.predict(**predict_kwargs)
 
         print("-" * 80)
         print("✅ Inference completed successfully!")
@@ -401,9 +414,6 @@ def run_inference(config):
         video_files = []
         image_files = []
 
-        # ✅ Annotated output directory
-        annotated_dir = os.path.join(output, 'annotated')
-        
         for i, result in enumerate(results):
             # ✅ YOLO saves files to {output}/annotated/ with the same name as source
             # result.path might be source path, but saved file is in annotated_dir
@@ -580,11 +590,15 @@ def run_inference(config):
 
         # ✅ POST-PROCESSING: Scan annotated directory and convert any non-MP4 videos
         # This handles the case where YOLO saves videos as .avi on Windows regardless of source filename
-        print("-" * 80)
-        print("🔍 Post-processing: Checking for videos that need conversion...")
-        sys.stdout.flush()
-        
-        if os.path.exists(annotated_dir):
+        if image_only:
+            print("⏭️ Image-only job: skipping video conversion scan")
+            sys.stdout.flush()
+        else:
+            print("-" * 80)
+            print("🔍 Post-processing: Checking for videos that need conversion...")
+            sys.stdout.flush()
+
+        if (not image_only) and os.path.exists(annotated_dir):
             try:
                 actual_files = os.listdir(annotated_dir)
                 video_extensions_to_convert = ['.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v']

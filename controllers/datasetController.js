@@ -533,7 +533,7 @@ const uploadDataset = async (req, res) => {
 
 /**
  * GET /api/dataset/:datasetId
- * 
+ *
  * Returns full dataset metadata document with folders summary
  */
 const getDataset = async (req, res) => {
@@ -629,6 +629,9 @@ const getDataset = async (req, res) => {
     datasetObject.labelSource = labelSource;
     datasetObject.backup_dataset_id = dataset.backupDatasetId ? dataset.backupDatasetId.toString() : null;
     datasetObject.augmentedFromVersion = dataset.augmentedFromVersion || null;
+    // Ground truth for "does this image have a label" badges — scans storagePath/labels on
+    // disk so it's accurate even when dataset.files never got label records registered.
+    datasetObject.labeledBaseNames = await collectLabelBaseKeys(dataset);
 
     if (dataset.status !== 'queued' && dataset.status !== 'processing') {
       const live = await applyLiveSplitCounts(dataset);
@@ -1083,6 +1086,8 @@ const getDatasetFiles = async (req, res) => {
       firstFile: firstFile || null,
       firstFileId: firstFile ? (firstFile.storedName || firstFile._id?.toString()) : undefined,
       firstFileThumbnailAvailable: firstFile && firstFile.type === 'image',
+      // Ground truth for "does this image have a label" badges — see collectLabelBaseKeys.
+      labeledBaseNames: await collectLabelBaseKeys(dataset),
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -2444,6 +2449,198 @@ const startAugmentation = async (req, res) => {
 };
 
 /**
+ * POST /api/dataset/:datasetId/duplicate
+ *
+ * Creates a fully independent copy of a dataset version under a new version name: copies
+ * every file on disk, and duplicates the Dataset/Category/Image/Annotation records so the
+ * copy shares nothing with the source — editing, augmenting, adding/removing photos, or
+ * deleting the copy never touches the original. For "let me try something on a copy" work.
+ */
+const duplicateDataset = async (req, res) => {
+  try {
+    const { datasetId } = req.params;
+    const { versionName: rawVersionName } = req.body || {};
+
+    if (!mongoose.Types.ObjectId.isValid(datasetId)) {
+      return res.status(400).json({
+        error: 'Invalid dataset ID',
+      });
+    }
+
+    const sourceDataset = await Dataset.findById(datasetId);
+    if (!sourceDataset || sourceDataset.deletedAt) {
+      return res.status(404).json({
+        error: 'Dataset not found',
+      });
+    }
+
+    if (!canAccessAllWorkspaces(req.user)) {
+      const accessValidation = validateWorkspaceAccess(req.user, sourceDataset.company);
+      if (!accessValidation.allowed) {
+        return res.status(403).json({
+          error: 'Permission denied',
+          message: accessValidation.error || 'You do not have access to this dataset',
+        });
+      }
+    }
+
+    if (sourceDataset.status === 'processing' || sourceDataset.status === 'queued') {
+      return res.status(400).json({
+        error: 'Cannot duplicate a dataset while it is processing or queued',
+        currentStatus: sourceDataset.status,
+      });
+    }
+
+    // Validate versionName using the same rules as augmentation's versionName field
+    const versionName = typeof rawVersionName === 'string' ? rawVersionName.trim() : '';
+    if (!versionName) {
+      return res.status(400).json({
+        error: 'Version name is required.',
+      });
+    }
+    if (versionName.length > 50) {
+      return res.status(400).json({
+        error: 'Version name must be at most 50 characters.',
+      });
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(versionName)) {
+      return res.status(400).json({
+        error: 'Version name may only contain letters, numbers, underscores, and hyphens.',
+      });
+    }
+    if (versionName === sourceDataset.version) {
+      return res.status(400).json({
+        error: 'Version name cannot be the same as the source version.',
+      });
+    }
+    const existingWithVersion = await Dataset.findOne({
+      company: sourceDataset.company,
+      project: sourceDataset.project,
+      version: versionName,
+      deletedAt: null,
+    });
+    if (existingWithVersion) {
+      return res.status(400).json({
+        error: 'Version name already exists for this project.',
+      });
+    }
+
+    // Copy every file on disk into the new version's folder before touching Mongo, so a
+    // disk-copy failure never leaves a half-created dataset record behind.
+    const newStoragePath = storageAdapter.buildDatasetPath(
+      sourceDataset.company,
+      sourceDataset.project,
+      versionName
+    );
+    await storageAdapter.copyDirectory(sourceDataset.storagePath, newStoragePath);
+
+    // Create the new Dataset document — independent copy, not active, not marked "augmented"
+    const newDataset = new Dataset({
+      company: sourceDataset.company,
+      project: sourceDataset.project,
+      version: versionName,
+      storagePath: newStoragePath,
+      files: sourceDataset.files.map((f) => {
+        const plain = f.toObject();
+        delete plain._id;
+        return plain;
+      }),
+      totalImages: sourceDataset.totalImages,
+      sizeBytes: sourceDataset.sizeBytes,
+      labels: sourceDataset.labels,
+      datasetType: sourceDataset.datasetType,
+      annotationStatus: sourceDataset.annotationStatus,
+      unlabeledImagesCount: sourceDataset.unlabeledImagesCount,
+      status: sourceDataset.status,
+      labeledImages: sourceDataset.labeledImages,
+      unlabeledImages: sourceDataset.unlabeledImages,
+      trainCount: sourceDataset.trainCount,
+      valCount: sourceDataset.valCount,
+      testCount: sourceDataset.testCount,
+      thumbnailsGenerated: sourceDataset.thumbnailsGenerated,
+      labelSource: getLabelSource(sourceDataset),
+      isAugmented: false,
+      isActive: false,
+      split_seed: sourceDataset.split_seed,
+      split_ratio_train: sourceDataset.split_ratio_train,
+      split_ratio_val: sourceDataset.split_ratio_val,
+      test_sample_ratio: sourceDataset.test_sample_ratio,
+    });
+    await newDataset.save();
+
+    // Duplicate Category documents first — Annotation.categoryId must point at the new copies
+    const sourceCategories = await Category.find({ datasetId: sourceDataset._id }).lean();
+    const categoryIdMap = new Map();
+    if (sourceCategories.length > 0) {
+      const newCategoryDocs = sourceCategories.map((c) => {
+        const newId = new mongoose.Types.ObjectId();
+        categoryIdMap.set(String(c._id), newId);
+        const { _id, ...rest } = c;
+        return { ...rest, _id: newId, datasetId: newDataset._id };
+      });
+      await Category.insertMany(newCategoryDocs);
+    }
+
+    // Duplicate Image documents, remapped to the new dataset
+    const sourceImages = await Image.find({ datasetId: sourceDataset._id }).lean();
+    const imageIdMap = new Map();
+    if (sourceImages.length > 0) {
+      const newImageDocs = sourceImages.map((img) => {
+        const newId = new mongoose.Types.ObjectId();
+        imageIdMap.set(String(img._id), newId);
+        const { _id, ...rest } = img;
+        return { ...rest, _id: newId, datasetId: newDataset._id };
+      });
+      await Image.insertMany(newImageDocs);
+    }
+
+    // Duplicate Annotation documents, remapped to the new images/categories
+    const sourceAnnotations = await Annotation.find({
+      datasetId: sourceDataset._id,
+      deletedAt: null,
+    }).lean();
+    if (sourceAnnotations.length > 0) {
+      const newAnnotationDocs = sourceAnnotations
+        .filter((a) => imageIdMap.has(String(a.imageId)) && categoryIdMap.has(String(a.categoryId)))
+        .map((a) => {
+          const { _id, ...rest } = a;
+          return {
+            ...rest,
+            _id: new mongoose.Types.ObjectId(),
+            datasetId: newDataset._id,
+            imageId: imageIdMap.get(String(a.imageId)),
+            categoryId: categoryIdMap.get(String(a.categoryId)),
+          };
+        });
+      if (newAnnotationDocs.length > 0) {
+        await Annotation.insertMany(newAnnotationDocs);
+      }
+    }
+
+    console.log('[DUPLICATE] dataset_duplicated', {
+      sourceDatasetId: sourceDataset._id.toString(),
+      sourceVersion: sourceDataset.version,
+      newDatasetId: newDataset._id.toString(),
+      newVersion: versionName,
+      images: sourceImages.length,
+      categories: sourceCategories.length,
+    });
+
+    return res.status(201).json({
+      datasetId: newDataset._id.toString(),
+      version: versionName,
+      message: 'Dataset duplicated successfully',
+    });
+  } catch (error) {
+    console.error('Duplicate dataset error:', error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: error.message,
+    });
+  }
+};
+
+/**
  * GET /api/dataset/active/:company/:project
  * 
  * Returns the active dataset for a given company/project.
@@ -2791,6 +2988,81 @@ function classifyYoloLabelLine(line) {
   if (parts.length === 5) return { kind: 'detection', classId };
   if (parts.length >= 7 && parts.length % 2 === 1) return { kind: 'segmentation', classId };
   return { kind: 'invalid', classId };
+}
+
+/**
+ * Build a set of base filenames (on-disk filename minus extension) for every image that is
+ * actually labeled in any sense, from three sources:
+ *   1. Tracked `type: 'label'` file records in dataset.files.
+ *   2. .txt files found by walking storagePath/labels on disk (covers datasets where labels
+ *      exist on disk but were never registered as file records — see collectLabelFilePaths).
+ *   3. Image documents with hasAnnotations: true (covers images annotated in-app via the
+ *      annotation workspace, whose boxes/polygons live in the Annotation collection and may
+ *      not be exported to .txt files on disk yet).
+ *
+ * Without source 3, an image annotated in-app shows as "labeled" in the annotation workspace
+ * (which reads Image.hasAnnotations) but "unlabeled" in the file browser (which only checked
+ * disk) — same image, two different answers.
+ *
+ * Keys are the base filename ALONE, not "folder::baseName" — the Image collection and
+ * dataset.files can disagree about which split (train/val/test) a given file belongs to for
+ * the same physical image, so folder-scoping the key caused real matches to be missed. Files
+ * are stored under content-hash-style names (verified collision-free per dataset), so
+ * basename alone is a safe, simpler match. Frontend uses the same convention (see
+ * getFileBaseKey in DatasetManager.tsx) to badge image thumbnails that have a label.
+ */
+async function collectLabelBaseKeys(dataset) {
+  const keys = new Set();
+  const baseNameOf = (name) => String(name || '').replace(/\.[^./]+$/, '');
+
+  if (Array.isArray(dataset.files)) {
+    for (const file of dataset.files) {
+      if (file.type !== 'label') continue;
+      // storedName is the on-disk filename (what actually pairs with the image's storedName);
+      // originalName is only the uploader's filename and can differ from it.
+      const nameOnDisk = file.storedName || file.originalName;
+      if (!nameOnDisk) continue;
+      keys.add(baseNameOf(nameOnDisk));
+    }
+  }
+
+  if (dataset.storagePath && fs.existsSync(dataset.storagePath)) {
+    const labelsRoot = path.join(dataset.storagePath, 'labels');
+    const walk = async (dir) => {
+      let entries;
+      try {
+        entries = await fsPromises.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const ent of entries) {
+        const full = path.join(dir, ent.name);
+        if (ent.isDirectory()) {
+          await walk(full);
+        } else if (ent.isFile() && ent.name.toLowerCase().endsWith('.txt')) {
+          keys.add(baseNameOf(ent.name));
+        }
+      }
+    };
+    if (fs.existsSync(labelsRoot)) {
+      await walk(labelsRoot);
+    }
+  }
+
+  try {
+    const annotatedImages = await Image.find(
+      { datasetId: dataset._id, hasAnnotations: true },
+      { filename: 1 }
+    ).lean();
+    for (const img of annotatedImages) {
+      if (!img.filename) continue;
+      keys.add(baseNameOf(img.filename));
+    }
+  } catch (error) {
+    console.warn('[collectLabelBaseKeys] Image lookup failed:', error.message);
+  }
+
+  return Array.from(keys);
 }
 
 async function collectLabelFilePaths(dataset) {
@@ -3335,6 +3607,7 @@ module.exports = {
   createCategoriesFromClasses,
   startAugmentation,
   cancelAugmentation,
+  duplicateDataset,
   downloadDataset,
   checkDatasetType
 };

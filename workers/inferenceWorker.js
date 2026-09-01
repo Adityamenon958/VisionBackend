@@ -360,9 +360,9 @@ const processInferenceJob = async (job) => {
         ? parseFloat(job.data.confidenceThreshold)
         : 0.25;
 
-      const { getClassNamesForTrainedModel } = require('../services/yoloClassNamesService');
-      const classNames = await getClassNamesForTrainedModel(model);
-
+      // Do not spawn a second Python process to extract class names here.
+      // run_inference.py already reads model.names after YOLO() loads — this
+      // extra spawn was loading the .pt file twice (often 15–60s wasted).
       const config = {
         model: checkpointPath,
         source: sourceFolderPath,
@@ -370,9 +370,6 @@ const processInferenceJob = async (job) => {
         conf: confidenceThreshold,
         modelType: model.modelType
       };
-      if (classNames.length > 0) {
-        config.class_names = classNames;
-      }
 
       const configPath = path.join(resultsPath, 'inference-config.json');
       await fsPromises.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
@@ -467,7 +464,21 @@ const processInferenceJob = async (job) => {
           const imageFiles = metadata?.images || filesToProcess.filter(f => f.fileType !== 'video');
           const videoFiles = metadata?.videos || filesToProcess.filter(f => f.fileType === 'video');
 
-          if (metadata && (imageFiles.length > 0 || videoFiles.length > 0)) {
+          // Mobile inspect: leave JPEGs in annotated/. The results API already
+          // falls back to that folder. Copying into good/defect is extra disk I/O
+          // the phone flow does not use.
+          const isMobileInspect = Boolean(job.data.surveyName || job.data.mobileInspect);
+
+          if (isMobileInspect && imageFiles.length > 0) {
+            for (const imageData of imageFiles) {
+              if (imageData.fileType === 'video') continue;
+              const hasDetections = imageData.detections && Array.isArray(imageData.detections) && imageData.detections.length > 0;
+              if (hasDetections) defectCount++;
+              else goodCount++;
+            }
+            videoCount = videoFiles.length;
+            console.log(`📱 Mobile inspect: skipped good/defect copy (${goodCount} good, ${defectCount} defect stay in annotated/)`);
+          } else if (metadata && (imageFiles.length > 0 || videoFiles.length > 0)) {
             // ✅ Create good/ and defect/ folders for images
             if (imageFiles.length > 0) {
               goodImagesPath = path.join(resultsPath, 'good');

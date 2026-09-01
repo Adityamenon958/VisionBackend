@@ -33,7 +33,7 @@ async function resolveClassNamesForJobs(jobs) {
   try {
     const model = await Model.findById(modelId);
     if (!model) return [];
-    return await getClassNamesForTrainedModel(model);
+    return await getClassNamesForTrainedModel(model, { skipCheckpoint: true });
   } catch (err) {
     console.warn('[mobile-inspect] classNames lookup failed:', err.message);
     return [];
